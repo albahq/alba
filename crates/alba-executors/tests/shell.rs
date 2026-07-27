@@ -123,8 +123,25 @@ async fn cancellation_terminates_child() {
     // exit_code is platform/signal dependent (a killed process does not
     // exit with 0); what matters is that execute() actually returned.
     let _ = result.exit_code;
+
+    // A bare "< 6s" bound would still pass even if the graceful-stop signal
+    // did nothing at all and execute() only ever returned via the 5s grace
+    // timeout's forceful escalation — that would prove nothing about
+    // SIGTERM/kill actually working. `sleep 30` dies essentially
+    // immediately once signalled, so the real, working path returns in
+    // well under a second; 2s leaves generous headroom for a loaded CI
+    // machine while still failing loudly if the grace period had to be
+    // exhausted.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "execute() took {elapsed:?} to return after cancellation \
+         (>= 5s would mean the grace-period timeout fired instead of \
+         the process dying from the graceful-stop signal)"
+    );
+    // Hard ceiling matching the documented contract: signal, 5s grace,
+    // then force-kill. Even in the worst case this must still hold.
     assert!(
         elapsed < std::time::Duration::from_secs(6),
-        "execute() took {elapsed:?} to return after cancellation"
+        "execute() took {elapsed:?}, exceeding the 5s grace period plus overhead"
     );
 }
