@@ -95,6 +95,12 @@ pub struct Beam {
     pub executor: ExecutorKind,
     pub allow_failure: bool,
     /// The directory of the defining Beamfile, used as the `cwd` base.
+    /// Always absolute for a project built by `crate::loader::load_project`
+    /// (it derives this via `std::path::absolute`, not the file's
+    /// possibly-relative path, so it stays correct even if the process's
+    /// current directory changes between loading and running) — except for
+    /// `load_str`'s single-file front door, which has no real file on disk
+    /// to resolve against and uses `"."` (see its doc comment).
     pub dir: PathBuf,
     pub span: Span,
     /// Which source file this beam was defined in, for diagnostics.
