@@ -3,3 +3,6 @@ name = "alba-syntax"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

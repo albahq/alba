@@ -1,0 +1,375 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: parse(EXAMPLE).unwrap()
+---
+File {
+    version: Some(
+        Spanned {
+            value: "1",
+            span: Span {
+                start: 8,
+                end: 11,
+            },
+        },
+    ),
+    imports: [
+        Import {
+            path: Spanned {
+                value: "api/Beamfile",
+                span: Span {
+                    start: 20,
+                    end: 34,
+                },
+            },
+            alias: Spanned {
+                value: "api",
+                span: Span {
+                    start: 38,
+                    end: 41,
+                },
+            },
+        },
+    ],
+    lets: [
+        LetBinding {
+            name: Spanned {
+                value: "profile",
+                span: Span {
+                    start: 47,
+                    end: 54,
+                },
+            },
+            value: Call {
+                name: Spanned {
+                    value: "env",
+                    span: Span {
+                        start: 57,
+                        end: 60,
+                    },
+                },
+                args: [
+                    Str(
+                        Spanned {
+                            value: "PROFILE",
+                            span: Span {
+                                start: 61,
+                                end: 70,
+                            },
+                        },
+                    ),
+                    Str(
+                        Spanned {
+                            value: "debug",
+                            span: Span {
+                                start: 72,
+                                end: 79,
+                            },
+                        },
+                    ),
+                ],
+            },
+        },
+        LetBinding {
+            name: Spanned {
+                value: "release",
+                span: Span {
+                    start: 85,
+                    end: 92,
+                },
+            },
+            value: Binary {
+                op: Eq,
+                lhs: Var(
+                    Spanned {
+                        value: "profile",
+                        span: Span {
+                            start: 95,
+                            end: 102,
+                        },
+                    },
+                ),
+                rhs: Str(
+                    Spanned {
+                        value: "release",
+                        span: Span {
+                            start: 106,
+                            end: 115,
+                        },
+                    },
+                ),
+            },
+        },
+    ],
+    default: Some(
+        Spanned {
+            value: "build",
+            span: Span {
+                start: 125,
+                end: 130,
+            },
+        },
+    ),
+    beams: [
+        BeamDecl {
+            name: Spanned {
+                value: "build",
+                span: Span {
+                    start: 137,
+                    end: 142,
+                },
+            },
+            params: [],
+            description: Some(
+                Spanned {
+                    value: "Compile the workspace",
+                    span: Span {
+                        start: 159,
+                        end: 182,
+                    },
+                },
+            ),
+            needs: [
+                Spanned {
+                    value: BeamRef {
+                        namespace: Some(
+                            "api",
+                        ),
+                        name: "build",
+                    },
+                    span: Span {
+                        start: 192,
+                        end: 201,
+                    },
+                },
+                Spanned {
+                    value: BeamRef {
+                        namespace: None,
+                        name: "codegen",
+                    },
+                    span: Span {
+                        start: 203,
+                        end: 210,
+                    },
+                },
+            ],
+            inputs: [
+                Spanned {
+                    value: "src/**/*.rs",
+                    span: Span {
+                        start: 222,
+                        end: 235,
+                    },
+                },
+                Spanned {
+                    value: "Cargo.toml",
+                    span: Span {
+                        start: 237,
+                        end: 249,
+                    },
+                },
+            ],
+            outputs: [
+                Spanned {
+                    value: "target/{profile}/app",
+                    span: Span {
+                        start: 262,
+                        end: 284,
+                    },
+                },
+            ],
+            run: [
+                Spanned {
+                    value: "cargo build {if release then '--release' else ''}",
+                    span: Span {
+                        start: 292,
+                        end: 343,
+                    },
+                },
+            ],
+            env: [],
+            cwd: None,
+            executor: None,
+            allow_failure: false,
+            span: Span {
+                start: 132,
+                end: 345,
+            },
+        },
+        BeamDecl {
+            name: Spanned {
+                value: "test",
+                span: Span {
+                    start: 352,
+                    end: 356,
+                },
+            },
+            params: [],
+            description: None,
+            needs: [
+                Spanned {
+                    value: BeamRef {
+                        namespace: None,
+                        name: "build",
+                    },
+                    span: Span {
+                        start: 368,
+                        end: 373,
+                    },
+                },
+            ],
+            inputs: [],
+            outputs: [],
+            run: [
+                Spanned {
+                    value: "cargo test",
+                    span: Span {
+                        start: 381,
+                        end: 393,
+                    },
+                },
+            ],
+            env: [],
+            cwd: None,
+            executor: None,
+            allow_failure: false,
+            span: Span {
+                start: 347,
+                end: 395,
+            },
+        },
+        BeamDecl {
+            name: Spanned {
+                value: "lint",
+                span: Span {
+                    start: 402,
+                    end: 406,
+                },
+            },
+            params: [],
+            description: None,
+            needs: [],
+            inputs: [],
+            outputs: [],
+            run: [
+                Spanned {
+                    value: "cargo clippy -- -D warnings",
+                    span: Span {
+                        start: 436,
+                        end: 465,
+                    },
+                },
+            ],
+            env: [],
+            cwd: None,
+            executor: None,
+            allow_failure: true,
+            span: Span {
+                start: 397,
+                end: 467,
+            },
+        },
+        BeamDecl {
+            name: Spanned {
+                value: "deploy",
+                span: Span {
+                    start: 474,
+                    end: 480,
+                },
+            },
+            params: [
+                Spanned {
+                    value: "target",
+                    span: Span {
+                        start: 481,
+                        end: 487,
+                    },
+                },
+            ],
+            description: Some(
+                Spanned {
+                    value: "Deploy to an environment",
+                    span: Span {
+                        start: 505,
+                        end: 531,
+                    },
+                },
+            ),
+            needs: [
+                Spanned {
+                    value: BeamRef {
+                        namespace: None,
+                        name: "test",
+                    },
+                    span: Span {
+                        start: 541,
+                        end: 545,
+                    },
+                },
+            ],
+            inputs: [],
+            outputs: [],
+            run: [
+                Spanned {
+                    value: "./scripts/deploy.sh {target}",
+                    span: Span {
+                        start: 632,
+                        end: 662,
+                    },
+                },
+            ],
+            env: [
+                (
+                    Spanned {
+                        value: "DEPLOY_TARGET",
+                        span: Span {
+                            start: 601,
+                            end: 614,
+                        },
+                    },
+                    Spanned {
+                        value: "target",
+                        span: Span {
+                            start: 617,
+                            end: 623,
+                        },
+                    },
+                ),
+            ],
+            cwd: None,
+            executor: Some(
+                ExecutorDecl {
+                    name: Spanned {
+                        value: "docker",
+                        span: Span {
+                            start: 558,
+                            end: 564,
+                        },
+                    },
+                    options: [
+                        (
+                            Spanned {
+                                value: "image",
+                                span: Span {
+                                    start: 567,
+                                    end: 572,
+                                },
+                            },
+                            Spanned {
+                                value: "deployer:latest",
+                                span: Span {
+                                    start: 573,
+                                    end: 590,
+                                },
+                            },
+                        ),
+                    ],
+                },
+            ),
+            allow_failure: false,
+            span: Span {
+                start: 469,
+                end: 664,
+            },
+        },
+    ],
+}
