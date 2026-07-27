@@ -3,3 +3,8 @@ name = "alba-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+alba-syntax = { path = "../alba-syntax" }
+glob.workspace = true
+thiserror.workspace = true
