@@ -35,6 +35,32 @@
 //! - Import cycles are detected by canonicalized path (see
 //!   [`Loader::load_file`]'s doc comment for why that's safe on
 //!   case-insensitive filesystems).
+//!
+//! ## Two path forms, never mixed
+//!
+//! Every file this loader touches has two distinct path forms in play,
+//! and they are kept strictly separate:
+//!
+//! - The **display path**: whatever was written or joined lexically —
+//!   `root` exactly as the caller passed it, or an import's path joined
+//!   onto its importer's display path with a plain [`Path::join`], never
+//!   touching the filesystem. This is the *only* form ever stored in
+//!   [`SourceMap`], used to compute `dir` (the join base for further
+//!   imports and a beam's `cwd` base), or shown in a message.
+//! - The **canonical path**: `std::fs::canonicalize`'s output. Used
+//!   *exclusively* as the identity key on [`Loader::stack`] for cycle
+//!   detection — never stored, joined onto, or displayed.
+//!
+//! Mixing them is the bug this split exists to prevent: on Windows,
+//! `canonicalize` returns a verbatim (`\\?\`) path, and Rust's standard
+//! library passes verbatim paths to Win32 completely unnormalized — no
+//! `.` or `..` resolution, no forward-slash-to-backslash conversion.
+//! Joining a further relative import path onto a canonical `dir` would
+//! silently produce an unreadable path on Windows even though every path
+//! segment involved is individually valid. Display paths are always plain
+//! (non-verbatim) paths built with ordinary [`Path::join`], so this can't
+//! happen — the actual filesystem access that resolves `.`/`..`/symlinks
+//! happens once, implicitly, when the OS opens the file for reading.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -79,8 +105,14 @@ impl SourceMap {
 /// loading never finished — `error.source_id` is always resolvable
 /// through it, since a file is registered in `sources` before it's parsed
 /// or evaluated.
-#[derive(Debug)]
+///
+/// Implements [`std::error::Error`] (via `thiserror`, `#[source]`-linked to
+/// `error`) so it composes with `?` into `Box<dyn Error>`/`anyhow`, not
+/// just with this crate's own `Result<_, LoadError>`.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
 pub struct LoadError {
+    #[source]
     pub error: CoreError,
     pub sources: SourceMap,
 }
@@ -106,29 +138,31 @@ pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
 #[derive(Default)]
 struct Loader {
     sources: SourceMap,
-    /// Canonicalized paths of the files currently on the DFS chain from
-    /// the root to whichever file is being loaded right now — used only
-    /// to detect an import cycle, not to memoize already-finished files
-    /// (two different import sites can legitimately load the same file
-    /// under different aliases, producing differently-namespaced beams
-    /// each time).
-    stack: Vec<PathBuf>,
+    /// `(canonical path, display path)` pairs for the files currently on
+    /// the DFS chain from the root to whichever file is being loaded right
+    /// now. Only the canonical half is ever compared (to detect an import
+    /// cycle); the display half is what a cycle's error message actually
+    /// shows. Not used to memoize already-finished files — two different
+    /// import sites can legitimately load the same file under different
+    /// aliases, producing differently-namespaced beams each time.
+    stack: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Loader {
-    /// Resolves and reads `path`, reporting a failure at `error_span`
-    /// (stamped with whichever file is currently loading — the importer,
-    /// for every call except the very first).
+    /// Resolves and reads `path` (a display path — see the module doc
+    /// comment), reporting a failure at `error_span` (stamped with
+    /// whichever file is currently loading — the importer, for every call
+    /// except the very first).
     ///
-    /// Canonicalizing (rather than just reading `path` as given) is what
-    /// makes cycle detection in [`Loader::load_file`] correct: on a
+    /// Returns the *canonical* form alongside the source text: canonicalizing
+    /// is what makes cycle detection in [`Loader::load_file`] correct — on a
     /// case-insensitive filesystem (the default on macOS and Windows),
     /// `std::fs::canonicalize` normalizes a path to the casing actually on
     /// disk, so two imports spelling the same file with different casing
-    /// still compare equal on the `stack`. Its Windows `\\?\` UNC prefix
-    /// never leaks into a diagnostic: only this canonicalized path is
-    /// pushed onto `stack` for comparison — `path` itself, uncanonicalized,
-    /// is what gets registered in [`SourceMap`] and shown in messages.
+    /// still compare equal on the `stack`. That canonical path is used for
+    /// nothing else: reading goes through `path` as given, and the caller
+    /// never derives `dir` or a [`SourceMap`] entry from the canonical
+    /// form (see the module doc comment for why).
     fn resolve_and_read(path: &Path, error_span: Span) -> Result<(PathBuf, String), CoreError> {
         let not_found = |e: std::io::Error| {
             CoreError::new(
@@ -136,18 +170,19 @@ impl Loader {
                 error_span,
             )
         };
+        let source = std::fs::read_to_string(path).map_err(not_found)?;
         let canonical = std::fs::canonicalize(path).map_err(not_found)?;
-        let source = std::fs::read_to_string(&canonical).map_err(not_found)?;
         Ok((canonical, source))
     }
 
-    /// Recursively loads `path` (already resolved relative to whatever
-    /// imported it, or the root path the caller passed to
-    /// [`load_project`]) and everything it imports in turn, returning that
-    /// subtree's beams — ids and `needs` namespaced relative to `path`
-    /// itself — plus `path`'s own `default` (the caller decides whether
-    /// that's meaningful: only [`load_project`]'s top-level call uses it,
-    /// every recursive call for an `import` discards it).
+    /// Recursively loads `path` (a display path: already resolved,
+    /// lexically, relative to whatever imported it — or the root path the
+    /// caller passed to [`load_project`]) and everything it imports in
+    /// turn, returning that subtree's beams — ids and `needs` namespaced
+    /// relative to `path` itself — plus `path`'s own `default` (the caller
+    /// decides whether that's meaningful: only [`load_project`]'s
+    /// top-level call uses it, every recursive call for an `import`
+    /// discards it).
     ///
     /// `error_span` is where a failure to read `path`, or an import cycle
     /// closing on it, gets reported; it's the span of the `import` that
@@ -160,25 +195,32 @@ impl Loader {
     ) -> Result<(Vec<Beam>, Option<BeamId>), CoreError> {
         let (canonical, source) = Self::resolve_and_read(path, error_span)?;
 
-        if let Some(start) = self.stack.iter().position(|p| *p == canonical) {
+        if let Some(start) = self.stack.iter().position(|(c, _)| *c == canonical) {
             let mut chain: Vec<String> = self.stack[start..]
                 .iter()
-                .map(|p| p.display().to_string())
+                .map(|(_, display)| display.display().to_string())
                 .collect();
-            chain.push(canonical.display().to_string());
+            chain.push(path.display().to_string());
             return Err(CoreError::new(
                 format!("import cycle: {}", chain.join(" -> ")),
                 error_span,
             ));
         }
 
-        let dir = canonical
+        // `dir` is derived from `path` (the display form), never from
+        // `canonical` — see the module doc comment. `path.parent()` for a
+        // bare filename like `"Beamfile"` (no directory component) is
+        // `Some("")`, and joining onto an empty `PathBuf` is a no-op, so
+        // this still resolves further imports relative to the process's
+        // current directory in that case, matching the display path's own
+        // (relative) frame of reference.
+        let dir = path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let source_id = self.sources.push(path.to_path_buf(), source.clone());
 
-        self.stack.push(canonical);
+        self.stack.push((canonical, path.to_path_buf()));
         let result = self.load_file_body(&source, &dir, source_id);
         self.stack.pop();
         result

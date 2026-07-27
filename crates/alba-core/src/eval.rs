@@ -697,10 +697,24 @@ pub(crate) fn parse_error_to_core_error(e: ParseError) -> CoreError {
 /// Every beam this produces carries `SourceId(0)` and a `dir` of `"."`,
 /// matching [`crate::loader::load_project`]'s convention for the root file
 /// but without a real file on disk to resolve `cwd` against.
+///
+/// `import` declarations are rejected outright rather than silently
+/// ignored: this function has no filesystem to resolve them against
+/// (there's no "importing file directory" for an inline string), so
+/// silently dropping them would let a source string that accidentally
+/// includes an `import` load successfully with beams quietly missing,
+/// instead of failing loudly. Real `import` resolution is
+/// `load_project`'s job.
 #[doc(hidden)]
 pub fn load_str(source: &str) -> Result<Project, CoreError> {
     let _scope = SourceIdScope::enter(ROOT_SOURCE_ID);
     let file = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
+    if let Some(import) = file.imports.first() {
+        return Err(CoreError::new(
+            "imports are not supported by `load_str`; use `load_project` instead",
+            import.path.span,
+        ));
+    }
     build_project(&file, Path::new("."))
 }
 
@@ -1106,5 +1120,15 @@ beam b { run "{relase}" }
         // "hat" is Levenshtein distance 1 from both "cat" and "bat".
         assert_eq!(suggest("hat", ["cat", "bat"].into_iter()), Some("bat"));
         assert_eq!(suggest("hat", ["bat", "cat"].into_iter()), Some("bat"));
+    }
+
+    /// Review finding: `load_str` used to silently drop `import`
+    /// declarations (it has no filesystem to resolve them against), which
+    /// would let a source string containing one "succeed" with beams
+    /// quietly missing. It must fail loudly instead.
+    #[test]
+    fn load_str_rejects_imports() {
+        let err = load_str("import \"x/Beamfile\" as x\nbeam b { run \"echo\" }").unwrap_err();
+        assert!(err.message.contains("imports are not supported"));
     }
 }

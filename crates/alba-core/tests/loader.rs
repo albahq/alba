@@ -53,8 +53,13 @@ fn import_cycle_is_reported_with_chain() {
     let err = load_project(&dir.path().join("a/Beamfile")).unwrap_err();
 
     assert!(err.error.message.contains("import cycle"));
-    // The chain names both files involved in the cycle.
-    assert!(err.error.message.contains("a") && err.error.message.contains("b"));
+    // A structural check on the chain, not just a substring match: every
+    // message here contains the letters "a" and "b" regardless of whether
+    // a real chain was reported (e.g. "Beamfile" alone contains "a"), so
+    // assert on the shape instead — three file names joined by two
+    // arrows (a -> b -> a, closing the cycle).
+    assert_eq!(err.error.message.matches("Beamfile").count(), 3);
+    assert_eq!(err.error.message.matches(" -> ").count(), 2);
 }
 
 #[test]
@@ -172,14 +177,59 @@ fn beam_dir_is_its_defining_files_directory() {
 
     let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
 
+    // `dir` is the *display* path (see `loader.rs`'s module doc comment):
+    // exactly what was passed/joined, never run through `canonicalize`.
+    // This matters beyond tidiness — on Windows, `canonicalize`'s verbatim
+    // (`\\?\`) output can't be joined onto for further relative paths (a
+    // beam's `cwd`), so `dir` must never be derived from it.
     let build = project
         .beams
         .iter()
         .find(|b| b.id.0 == "api:build")
         .unwrap();
-    assert_eq!(build.dir, dir.path().join("api").canonicalize().unwrap());
+    assert_eq!(build.dir, dir.path().join("api"));
     let all = project.beams.iter().find(|b| b.id.0 == "all").unwrap();
-    assert_eq!(all.dir, dir.path().canonicalize().unwrap());
+    assert_eq!(all.dir, dir.path());
+}
+
+#[test]
+fn nested_relative_imports_avoid_verbatim_windows_paths() {
+    // Regression guard for a bug where `dir` (the join base for further
+    // imports, and a beam's `cwd` base) was derived from
+    // `std::fs::canonicalize`'s output. On Windows that's a `\\?\`
+    // verbatim path, and the standard library passes verbatim paths to
+    // Win32 completely unnormalized, so joining a further relative import
+    // (especially one using `..`) onto it silently fails to resolve. This
+    // can't reproduce the Windows failure on this platform, but it does
+    // pin down the two things that matter: importing through a
+    // multi-segment relative path *and* a `..` still succeeds, and no
+    // `Beam::dir` ever contains the verbatim prefix.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"a/b/Beamfile\" as ab\nbeam all { run \"echo ok\" }",
+    );
+    write(
+        dir.path().join("a/b/Beamfile"),
+        "import \"../../back/Beamfile\" as back\nbeam here { run \"echo h\" }",
+    );
+    write(
+        dir.path().join("back/Beamfile"),
+        "beam there { run \"echo t\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    let ids: Vec<&str> = project.beams.iter().map(|b| b.id.0.as_str()).collect();
+    assert!(ids.contains(&"ab:here") && ids.contains(&"ab:back:there"));
+    for beam in &project.beams {
+        let dir_str = beam.dir.to_string_lossy();
+        assert!(
+            !dir_str.starts_with(r"\\?\"),
+            "beam `{}`'s dir must not be a verbatim path, got {dir_str}",
+            beam.id.0
+        );
+    }
 }
 
 #[test]
