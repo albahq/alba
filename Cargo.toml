@@ -9,9 +9,12 @@ license = "MIT"
 repository = "https://github.com/jdevelop-io/alba"
 
 [workspace.dependencies]
+async-trait = "0.1"
 glob = "0.3"
 miette = "7"
+nix = "0.29"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 insta = "1"
 tempfile = "3"
