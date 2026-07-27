@@ -20,16 +20,19 @@
 //!   option values are not shown as syntax by the brief's struct
 //!   definitions; modeled on the design spec's example. `executor` options
 //!   follow the same "keyword-ish identifier followed by its value" shape
-//!   as beam fields (`image "deployer:latest"`, no `=`). `env` values may
-//!   be a string literal or a bare identifier (a reference to a `let`
-//!   binding or a beam parameter, as in `env { DEPLOY_TARGET = target }`);
-//!   both are captured as raw text, matching the "store raw `Spanned<String>`
-//!   where the brief says `StringTemplate`" rule for this task.
+//!   as beam fields (`image "deployer:latest"`, no `=`), and their value is
+//!   always a string literal, parsed as a `StringTemplate`. `env` values
+//!   may be a string literal (also a `StringTemplate`) or a bare identifier
+//!   (a reference to a `let` binding or a beam parameter, as in
+//!   `env { DEPLOY_TARGET = target }`); the bare-identifier form is
+//!   modeled as a single-part template wrapping that variable reference —
+//!   equivalent to writing `"{target}"` — so `NamedString`'s value half
+//!   stays uniformly a `StringTemplate` either way.
 
-use crate::ast::{
-    BeamDecl, BeamRef, BinOp, ExecutorDecl, Expr, File, Import, LetBinding, NamedString, Spanned,
-};
+use crate::ast::{BeamDecl, BeamRef, ExecutorDecl, File, Import, LetBinding, NamedString, Spanned};
+use crate::expr::Expr;
 use crate::lexer::Lexer;
+use crate::template::{StringTemplate, TemplatePart};
 use crate::token::{Span, Token, TokenKind};
 use std::collections::HashSet;
 
@@ -59,12 +62,16 @@ pub struct ParseError {
 /// Parses a whole Beamfile from source text into a typed [`File`].
 pub fn parse(source: &str) -> Result<File, ParseError> {
     let tokens = tokenize(source)?;
-    Parser::new(tokens).parse_file()
+    Parser::new(tokens, source).parse_file()
 }
 
 /// Lexes `source` into a flat token list, dropping `Newline` tokens (see
 /// the module doc comment) and stopping at the first lex error.
-fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
+///
+/// `pub(crate)` so `expr.rs`'s tests and `template.rs`'s interpolation
+/// handling can tokenize source text the same way the top-level parser
+/// does.
+pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
     let mut tokens = Vec::new();
     for result in Lexer::new(source) {
         match result {
@@ -89,40 +96,56 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
 /// so that function doesn't need ten separate `&mut` parameters.
 #[derive(Default)]
 struct BeamFields {
-    description: Option<Spanned<String>>,
+    description: Option<StringTemplate>,
     needs: Vec<Spanned<BeamRef>>,
-    inputs: Vec<Spanned<String>>,
-    outputs: Vec<Spanned<String>>,
-    run: Vec<Spanned<String>>,
+    inputs: Vec<StringTemplate>,
+    outputs: Vec<StringTemplate>,
+    run: Vec<StringTemplate>,
     env: Vec<NamedString>,
-    cwd: Option<Spanned<String>>,
+    cwd: Option<StringTemplate>,
     executor: Option<ExecutorDecl>,
     allow_failure: bool,
     seen: HashSet<String>,
 }
 
-struct Parser {
+/// Recursive descent parser over a flat token stream, plus (in `expr.rs`,
+/// an `impl` block for this same type) the precedence-climbing expression
+/// parser. Keeps `source` alongside the tokens because interpolation
+/// (`template.rs`) needs to re-slice and re-lex the *original* source text
+/// to keep its spans accurate; see `template.rs`'s module doc comment.
+pub(crate) struct Parser<'a> {
     tokens: Vec<Token>,
+    source: &'a str,
     pos: usize,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+impl<'a> Parser<'a> {
+    pub(crate) fn new(tokens: Vec<Token>, source: &'a str) -> Self {
+        Self {
+            tokens,
+            source,
+            pos: 0,
+        }
     }
 
-    fn peek(&self) -> &Token {
+    /// The full original source text this parser's tokens were lexed from,
+    /// for slicing out the raw text behind a token's span.
+    pub(crate) fn source(&self) -> &'a str {
+        self.source
+    }
+
+    pub(crate) fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
-    fn is_eof(&self) -> bool {
+    pub(crate) fn is_eof(&self) -> bool {
         matches!(self.peek().kind, TokenKind::Eof)
     }
 
     /// Consumes and returns the current token. Never advances past the
     /// trailing `Eof`, so repeated calls once at end of input keep
     /// returning `Eof` rather than panicking.
-    fn advance(&mut self) -> Token {
+    pub(crate) fn advance(&mut self) -> Token {
         let tok = self.tokens[self.pos].clone();
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
@@ -130,11 +153,11 @@ impl Parser {
         tok
     }
 
-    fn check(&self, kind: &TokenKind) -> bool {
+    pub(crate) fn check(&self, kind: &TokenKind) -> bool {
         &self.peek().kind == kind
     }
 
-    fn expect(&mut self, kind: TokenKind, what: &str) -> Result<Token, ParseError> {
+    pub(crate) fn expect(&mut self, kind: TokenKind, what: &str) -> Result<Token, ParseError> {
         if self.check(&kind) {
             Ok(self.advance())
         } else {
@@ -142,7 +165,7 @@ impl Parser {
         }
     }
 
-    fn unexpected(&self, expected: &str) -> ParseError {
+    pub(crate) fn unexpected(&self, expected: &str) -> ParseError {
         let tok = self.peek();
         ParseError {
             message: format!("expected {expected}, found {}", describe(&tok.kind)),
@@ -151,7 +174,7 @@ impl Parser {
         }
     }
 
-    fn eat_ident(&mut self) -> Result<Spanned<String>, ParseError> {
+    pub(crate) fn eat_ident(&mut self) -> Result<Spanned<String>, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Ident(name) => {
                 let span = self.advance().span;
@@ -168,6 +191,19 @@ impl Parser {
                 Ok(Spanned::new(s, span))
             }
             _ => Err(self.unexpected("a string literal")),
+        }
+    }
+
+    /// Consumes a string literal and parses it into a [`StringTemplate`],
+    /// resolving `{expr}` interpolation. Used for every AST field that
+    /// holds interpolatable text (as opposed to `eat_str`, still used for
+    /// plain identifiers-as-text like `import` paths and `version`).
+    pub(crate) fn eat_template(&mut self) -> Result<StringTemplate, ParseError> {
+        if matches!(self.peek().kind, TokenKind::Str(_)) {
+            let tok = self.advance();
+            crate::template::parse_template_at(self.source, tok.span)
+        } else {
+            Err(self.unexpected("a string literal"))
         }
     }
 
@@ -196,8 +232,8 @@ impl Parser {
         Ok(items)
     }
 
-    fn parse_string_list(&mut self) -> Result<Vec<Spanned<String>>, ParseError> {
-        self.parse_bracketed_list(Self::eat_str)
+    fn parse_template_list(&mut self) -> Result<Vec<StringTemplate>, ParseError> {
+        self.parse_bracketed_list(Self::eat_template)
     }
 
     fn parse_beam_ref(&mut self) -> Result<Spanned<BeamRef>, ParseError> {
@@ -230,11 +266,11 @@ impl Parser {
     }
 
     /// `run "cmd"` (single command) or `run ["cmd", "cmd"]` (sequential list).
-    fn parse_run_value(&mut self) -> Result<Vec<Spanned<String>>, ParseError> {
+    fn parse_run_value(&mut self) -> Result<Vec<StringTemplate>, ParseError> {
         if self.check(&TokenKind::LBracket) {
-            self.parse_string_list()
+            self.parse_template_list()
         } else {
-            Ok(vec![self.eat_str()?])
+            Ok(vec![self.eat_template()?])
         }
     }
 
@@ -252,17 +288,18 @@ impl Parser {
         }
     }
 
-    /// A string literal or a bare identifier (a variable reference),
-    /// captured as raw text. See the module doc comment.
-    fn parse_string_or_ident(&mut self) -> Result<Spanned<String>, ParseError> {
+    /// A string literal (parsed as a [`StringTemplate`]) or a bare
+    /// identifier — a variable reference, modeled as a single-part
+    /// template wrapping that reference. See the module doc comment.
+    fn parse_env_value(&mut self) -> Result<StringTemplate, ParseError> {
         match self.peek().kind.clone() {
-            TokenKind::Str(s) => {
-                let span = self.advance().span;
-                Ok(Spanned::new(s, span))
-            }
+            TokenKind::Str(_) => self.eat_template(),
             TokenKind::Ident(name) => {
                 let span = self.advance().span;
-                Ok(Spanned::new(name, span))
+                Ok(StringTemplate {
+                    parts: vec![TemplatePart::Expr(Expr::Var(Spanned::new(name, span)))],
+                    span,
+                })
             }
             _ => Err(self.unexpected("a string or an identifier")),
         }
@@ -274,7 +311,7 @@ impl Parser {
         while !self.check(&TokenKind::RBrace) {
             let key = self.eat_ident()?;
             self.expect(TokenKind::Eq, "`=`")?;
-            let value = self.parse_string_or_ident()?;
+            let value = self.parse_env_value()?;
             entries.push((key, value));
             if self.check(&TokenKind::Comma) {
                 self.advance();
@@ -290,7 +327,7 @@ impl Parser {
         let mut options = Vec::new();
         while !self.check(&TokenKind::RBrace) {
             let opt_name = self.eat_ident()?;
-            let opt_value = self.eat_str()?;
+            let opt_value = self.eat_template()?;
             options.push((opt_name, opt_value));
         }
         self.expect(TokenKind::RBrace, "`}`")?;
@@ -323,13 +360,13 @@ impl Parser {
         }
 
         match name {
-            "description" => fields.description = Some(self.eat_str()?),
+            "description" => fields.description = Some(self.eat_template()?),
             "needs" => fields.needs = self.parse_needs_list()?,
-            "inputs" => fields.inputs = self.parse_string_list()?,
-            "outputs" => fields.outputs = self.parse_string_list()?,
+            "inputs" => fields.inputs = self.parse_template_list()?,
+            "outputs" => fields.outputs = self.parse_template_list()?,
             "run" => fields.run = self.parse_run_value()?,
             "env" => fields.env = self.parse_env_block()?,
-            "cwd" => fields.cwd = Some(self.eat_str()?),
+            "cwd" => fields.cwd = Some(self.eat_template()?),
             "executor" => fields.executor = Some(self.parse_executor_decl()?),
             "allow_failure" => fields.allow_failure = self.parse_bool_value()?,
             other => unreachable!("field `{other}` accepted by BEAM_FIELDS but not dispatched"),
@@ -397,70 +434,6 @@ impl Parser {
         self.expect(TokenKind::Eq, "`=`")?;
         let value = self.parse_expr()?;
         Ok(LetBinding { name, value })
-    }
-
-    /// Parses a primary expression, then an optional trailing `== primary`.
-    ///
-    /// This is intentionally not a precedence-climbing parser: this task
-    /// only needs `let` bindings to accept string literals, booleans,
-    /// identifiers, function calls (`env("PROFILE", "debug")`), and a
-    /// single `==` comparison (`profile == "release"`). Task 4 replaces
-    /// this with the full Pratt parser (`||`, `&&`, `==`/`!=`, `+`,
-    /// `if/then/else`) in `expr.rs`.
-    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.parse_primary_expr()?;
-        if self.check(&TokenKind::EqEq) {
-            self.advance();
-            let rhs = self.parse_primary_expr()?;
-            return Ok(Expr::Binary {
-                op: BinOp::Eq,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            });
-        }
-        Ok(lhs)
-    }
-
-    fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
-        match self.peek().kind.clone() {
-            TokenKind::Str(s) => {
-                let span = self.advance().span;
-                Ok(Expr::Str(Spanned::new(s, span)))
-            }
-            TokenKind::KwTrue => {
-                self.advance();
-                Ok(Expr::Bool(true))
-            }
-            TokenKind::KwFalse => {
-                self.advance();
-                Ok(Expr::Bool(false))
-            }
-            TokenKind::Ident(name) => {
-                let name_span = self.advance().span;
-                if self.check(&TokenKind::LParen) {
-                    self.advance();
-                    let mut args = Vec::new();
-                    if !self.check(&TokenKind::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if self.check(&TokenKind::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(TokenKind::RParen, "`)`")?;
-                    Ok(Expr::Call {
-                        name: Spanned::new(name, name_span),
-                        args,
-                    })
-                } else {
-                    Ok(Expr::Var(Spanned::new(name, name_span)))
-                }
-            }
-            _ => Err(self.unexpected("an expression")),
-        }
     }
 
     /// Parses a whole file: `version`, `import`s, `let`s, `default`, and
@@ -668,9 +641,18 @@ beam deploy(target) {
         let executor = beam.executor.as_ref().unwrap();
         assert_eq!(executor.name.value, "docker");
         assert_eq!(executor.options[0].0.value, "image");
-        assert_eq!(executor.options[0].1.value, "deployer:latest");
+        assert_eq!(
+            executor.options[0].1.parts,
+            vec![crate::TemplatePart::Literal("deployer:latest".to_string())]
+        );
         assert_eq!(beam.env[0].0.value, "DEPLOY_TARGET");
-        assert_eq!(beam.env[0].1.value, "target");
+        // `target` is a bare identifier (no quotes), so it becomes a
+        // single-part template wrapping a variable reference, equivalent
+        // to writing `"{target}"`.
+        assert!(matches!(
+            &beam.env[0].1.parts[..],
+            [crate::TemplatePart::Expr(crate::Expr::Var(v))] if v.value == "target"
+        ));
     }
 
     #[test]

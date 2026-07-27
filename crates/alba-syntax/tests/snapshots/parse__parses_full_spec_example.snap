@@ -49,8 +49,12 @@ File {
                 },
                 args: [
                     Str(
-                        Spanned {
-                            value: "PROFILE",
+                        StringTemplate {
+                            parts: [
+                                Literal(
+                                    "PROFILE",
+                                ),
+                            ],
                             span: Span {
                                 start: 61,
                                 end: 70,
@@ -58,8 +62,12 @@ File {
                         },
                     ),
                     Str(
-                        Spanned {
-                            value: "debug",
+                        StringTemplate {
+                            parts: [
+                                Literal(
+                                    "debug",
+                                ),
+                            ],
                             span: Span {
                                 start: 72,
                                 end: 79,
@@ -89,8 +97,12 @@ File {
                     },
                 ),
                 rhs: Str(
-                    Spanned {
-                        value: "release",
+                    StringTemplate {
+                        parts: [
+                            Literal(
+                                "release",
+                            ),
+                        ],
                         span: Span {
                             start: 106,
                             end: 115,
@@ -120,8 +132,12 @@ File {
             },
             params: [],
             description: Some(
-                Spanned {
-                    value: "Compile the workspace",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "Compile the workspace",
+                        ),
+                    ],
                     span: Span {
                         start: 159,
                         end: 182,
@@ -153,15 +169,23 @@ File {
                 },
             ],
             inputs: [
-                Spanned {
-                    value: "src/**/*.rs",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "src/**/*.rs",
+                        ),
+                    ],
                     span: Span {
                         start: 222,
                         end: 235,
                     },
                 },
-                Spanned {
-                    value: "Cargo.toml",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "Cargo.toml",
+                        ),
+                    ],
                     span: Span {
                         start: 237,
                         end: 249,
@@ -169,8 +193,26 @@ File {
                 },
             ],
             outputs: [
-                Spanned {
-                    value: "target/{profile}/app",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "target/",
+                        ),
+                        Expr(
+                            Var(
+                                Spanned {
+                                    value: "profile",
+                                    span: Span {
+                                        start: 271,
+                                        end: 278,
+                                    },
+                                },
+                            ),
+                        ),
+                        Literal(
+                            "/app",
+                        ),
+                    ],
                     span: Span {
                         start: 262,
                         end: 284,
@@ -178,8 +220,51 @@ File {
                 },
             ],
             run: [
-                Spanned {
-                    value: "cargo build {if release then '--release' else ''}",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "cargo build ",
+                        ),
+                        Expr(
+                            If {
+                                cond: Var(
+                                    Spanned {
+                                        value: "release",
+                                        span: Span {
+                                            start: 309,
+                                            end: 316,
+                                        },
+                                    },
+                                ),
+                                then: Str(
+                                    StringTemplate {
+                                        parts: [
+                                            Literal(
+                                                "--release",
+                                            ),
+                                        ],
+                                        span: Span {
+                                            start: 322,
+                                            end: 333,
+                                        },
+                                    },
+                                ),
+                                otherwise: Str(
+                                    StringTemplate {
+                                        parts: [
+                                            Literal(
+                                                "",
+                                            ),
+                                        ],
+                                        span: Span {
+                                            start: 339,
+                                            end: 341,
+                                        },
+                                    },
+                                ),
+                            },
+                        ),
+                    ],
                     span: Span {
                         start: 292,
                         end: 343,
@@ -220,8 +305,12 @@ File {
             inputs: [],
             outputs: [],
             run: [
-                Spanned {
-                    value: "cargo test",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "cargo test",
+                        ),
+                    ],
                     span: Span {
                         start: 381,
                         end: 393,
@@ -251,8 +340,12 @@ File {
             inputs: [],
             outputs: [],
             run: [
-                Spanned {
-                    value: "cargo clippy -- -D warnings",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "cargo clippy -- -D warnings",
+                        ),
+                    ],
                     span: Span {
                         start: 436,
                         end: 465,
@@ -286,8 +379,12 @@ File {
                 },
             ],
             description: Some(
-                Spanned {
-                    value: "Deploy to an environment",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "Deploy to an environment",
+                        ),
+                    ],
                     span: Span {
                         start: 505,
                         end: 531,
@@ -309,8 +406,23 @@ File {
             inputs: [],
             outputs: [],
             run: [
-                Spanned {
-                    value: "./scripts/deploy.sh {target}",
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "./scripts/deploy.sh ",
+                        ),
+                        Expr(
+                            Var(
+                                Spanned {
+                                    value: "target",
+                                    span: Span {
+                                        start: 654,
+                                        end: 660,
+                                    },
+                                },
+                            ),
+                        ),
+                    ],
                     span: Span {
                         start: 632,
                         end: 662,
@@ -326,8 +438,20 @@ File {
                             end: 614,
                         },
                     },
-                    Spanned {
-                        value: "target",
+                    StringTemplate {
+                        parts: [
+                            Expr(
+                                Var(
+                                    Spanned {
+                                        value: "target",
+                                        span: Span {
+                                            start: 617,
+                                            end: 623,
+                                        },
+                                    },
+                                ),
+                            ),
+                        ],
                         span: Span {
                             start: 617,
                             end: 623,
@@ -354,8 +478,12 @@ File {
                                     end: 572,
                                 },
                             },
-                            Spanned {
-                                value: "deployer:latest",
+                            StringTemplate {
+                                parts: [
+                                    Literal(
+                                        "deployer:latest",
+                                    ),
+                                ],
                                 span: Span {
                                     start: 573,
                                     end: 590,
