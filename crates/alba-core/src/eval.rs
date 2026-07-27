@@ -423,10 +423,15 @@ fn check_deferred_expr(
     match expr {
         Expr::Bool(b) => Ok(StaticValue::Known(Value::Bool(*b))),
         Expr::Var(name) => {
-            if let Some(v) = lets.get(&name.value) {
-                Ok(StaticValue::Known(v.clone()))
-            } else if params.iter().any(|p| p == &name.value) {
+            // Parameters are checked first: `Scope::with_params` has a
+            // same-named parameter shadow a `let` at schedule time, so a
+            // shadowed `let`'s value must not be used here either — doing
+            // so would validate against a value the beam will never
+            // actually see once its parameter is bound.
+            if params.iter().any(|p| p == &name.value) {
                 Ok(StaticValue::Unknown)
+            } else if let Some(v) = lets.get(&name.value) {
+                Ok(StaticValue::Known(v.clone()))
             } else {
                 let candidates = lets.names().chain(params.iter().map(String::as_str));
                 Err(unknown_variable_error(name, candidates))
@@ -763,5 +768,26 @@ beam b { run "{if x then 'a' else 'b'}" }
         )
         .unwrap_err();
         assert!(err.message.contains("expected a boolean"));
+    }
+
+    /// A beam parameter that shares a name with a file-level `let` shadows
+    /// it (matching `Scope::with_params`'s documented shadowing), so
+    /// load-time validation of a deferred `run` template must treat that
+    /// name as unknown-until-schedule-time, not eagerly evaluate it using
+    /// the (shadowed) `let`'s value. Concretely: `target` here is a
+    /// `bool` `let`, but the beam's own `target` parameter shadows it and
+    /// is always a string at schedule time, so `target + '!'` — string
+    /// concatenation — must not be rejected as "`+` requires two
+    /// strings, found a boolean and a string" at load time.
+    #[test]
+    fn beam_parameter_shadows_a_same_named_let() {
+        let project = load_str(
+            r#"
+let target = true
+beam deploy(target) { run "{target + '!'}" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(project.beams[0].params, vec!["target".to_string()]);
     }
 }
