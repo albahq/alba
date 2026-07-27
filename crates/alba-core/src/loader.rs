@@ -1,8 +1,10 @@
 //! [`load_project`]: the single public entry point onto this crate. Loads
 //! a root Beamfile and every file it (transitively) `import`s, namespacing
 //! each imported beam's id and `needs` entries by the alias it was
-//! imported under, and stamping every beam with the `SourceId` and `dir`
-//! (its defining file's directory) of the file that declared it.
+//! imported under, and stamping every beam with the `SourceId` of the file
+//! that declared it and a `dir` (its defining file's directory, always
+//! absolute — see "Three path forms, never mixed" below) used as the
+//! `cwd` base.
 //!
 //! ## Resolution rules
 //!
@@ -36,31 +38,56 @@
 //!   [`Loader::load_file`]'s doc comment for why that's safe on
 //!   case-insensitive filesystems).
 //!
-//! ## Two path forms, never mixed
+//! ## Three path forms, never mixed
 //!
-//! Every file this loader touches has two distinct path forms in play,
-//! and they are kept strictly separate:
+//! Every file this loader touches has three distinct path forms in play,
+//! each with exactly one job, and they are kept strictly separate:
 //!
 //! - The **display path**: whatever was written or joined lexically —
 //!   `root` exactly as the caller passed it, or an import's path joined
-//!   onto its importer's display path with a plain [`Path::join`], never
-//!   touching the filesystem. This is the *only* form ever stored in
-//!   [`SourceMap`], used to compute `dir` (the join base for further
-//!   imports and a beam's `cwd` base), or shown in a message.
+//!   onto its *importer's own display path* with a plain [`Path::join`],
+//!   never touching the filesystem and never absolutized. This is the
+//!   *only* form ever stored in [`SourceMap`] or shown in a message (a
+//!   missing-import error, an import cycle's chain) — so what a user sees
+//!   in a diagnostic is always traceable back to what they (or an
+//!   `import` statement) actually typed, never a path this loader
+//!   invented.
 //! - The **canonical path**: `std::fs::canonicalize`'s output. Used
 //!   *exclusively* as the identity key on [`Loader::stack`] for cycle
 //!   detection — never stored, joined onto, or displayed.
+//! - The **beam directory** (`beam_dir` in [`Loader::load_file`]):
+//!   `std::path::absolute`'s output, used *exclusively* to become
+//!   `Beam::dir` (the `cwd` base a later engine hands to a process spawn,
+//!   possibly long after loading finished and the process's current
+//!   directory may have changed). Computed independently from the display
+//!   path for each file — never joined onto to build another file's
+//!   display path, and never itself absolutized further by a child's
+//!   `beam_dir` (each file's `beam_dir` comes straight from its own
+//!   `path`, not from its importer's `beam_dir`).
 //!
-//! Mixing them is the bug this split exists to prevent: on Windows,
-//! `canonicalize` returns a verbatim (`\\?\`) path, and Rust's standard
-//! library passes verbatim paths to Win32 completely unnormalized — no
-//! `.` or `..` resolution, no forward-slash-to-backslash conversion.
-//! Joining a further relative import path onto a canonical `dir` would
-//! silently produce an unreadable path on Windows even though every path
-//! segment involved is individually valid. Display paths are always plain
-//! (non-verbatim) paths built with ordinary [`Path::join`], so this can't
-//! happen — the actual filesystem access that resolves `.`/`..`/symlinks
-//! happens once, implicitly, when the OS opens the file for reading.
+//! Mixing the display path with either of the other two is exactly the
+//! bug each split exists to prevent:
+//!
+//! - Display vs. canonical: on Windows, `canonicalize` returns a verbatim
+//!   (`\\?\`) path, and Rust's standard library passes verbatim paths to
+//!   Win32 completely unnormalized — no `.`/`..` resolution, no
+//!   forward-slash-to-backslash conversion. Joining a further relative
+//!   import path onto a canonicalized directory would silently produce an
+//!   unreadable path on Windows even though every path segment involved
+//!   is individually valid.
+//! - Display vs. beam directory: joining onto an *absolutized* directory
+//!   instead of the display path would make every descendant's display
+//!   path (and `SourceMap` entry) absolute too, even when the user typed
+//!   a relative `root` — silently showing them a path they never wrote.
+//!   `std::path::absolute` itself stays safe to use for `beam_dir`
+//!   precisely because it's *not* threaded into the display-path chain:
+//!   unlike `canonicalize`, it's purely lexical (it does not touch the
+//!   filesystem or require the path to exist) and, per
+//!   `library/std/src/sys/path/windows.rs`'s `absolute` implementation,
+//!   it only returns a path unchanged (skipping normalization) when the
+//!   *input* is already verbatim — our inputs never are, since they're
+//!   always built by joining onto a display path, never a canonicalized
+//!   one.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -207,46 +234,53 @@ impl Loader {
             ));
         }
 
-        // `dir` is derived from `path` (the display form), never from
-        // `canonical` — see the module doc comment. `path.parent()` for a
-        // bare filename like `"Beamfile"` (no directory component) is
-        // `Some("")`, and joining onto an empty `PathBuf` is a no-op, so
-        // this still resolves further imports relative to the process's
-        // current directory in that case, matching the display path's own
-        // (relative) frame of reference.
-        let dir = path
+        // `import_base` (a display path) is derived from `path`, never
+        // from `canonical` — see the module doc comment. `path.parent()`
+        // for a bare filename like `"Beamfile"` (no directory component)
+        // is `Some("")`, not `None`, so the `unwrap_or_else` below rarely
+        // fires in practice — but joining onto an empty `PathBuf` is a
+        // harmless no-op, so this still resolves further imports relative
+        // to the process's current directory in that case. Used *only* to
+        // build each import's display path (`import_path` below); it is
+        // never what becomes `Beam::dir` (see `beam_dir`).
+        let import_base = path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+
+        let beam_dir = beam_dir_for(path, error_span)?;
+
         let source_id = self.sources.push(path.to_path_buf(), source.clone());
 
         self.stack.push((canonical, path.to_path_buf()));
-        let result = self.load_file_body(&source, &dir, source_id);
+        let result = self.load_file_body(&source, &import_base, &beam_dir, source_id);
         self.stack.pop();
         result
     }
 
     /// The part of [`Loader::load_file`] that runs once `path` has been
     /// read and pushed onto the cycle-detection stack: parse, evaluate
-    /// this file's own beams, check for a duplicate import alias, then
-    /// recurse into each import and namespace its beams. Split out so
-    /// `load_file` can guarantee `stack.pop()` runs via a plain
-    /// `?`-propagating helper rather than a closure.
+    /// this file's own beams (stamped with `beam_dir`), check for a
+    /// duplicate import alias, then recurse into each import (joined onto
+    /// `import_base`) and namespace its beams. Split out so `load_file`
+    /// can guarantee `stack.pop()` runs via a plain `?`-propagating helper
+    /// rather than a closure.
     fn load_file_body(
         &mut self,
         source: &str,
-        dir: &Path,
+        import_base: &Path,
+        beam_dir: &Path,
         source_id: SourceId,
     ) -> Result<(Vec<Beam>, Option<BeamId>), CoreError> {
         let _scope = SourceIdScope::enter(source_id);
         let file: File = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
         check_duplicate_aliases(&file)?;
 
-        let local = build_project(&file, dir)?;
+        let local = build_project(&file, beam_dir)?;
         let mut beams = local.beams;
 
         for import in &file.imports {
-            let import_path = dir.join(&import.path.value);
+            let import_path = import_base.join(&import.path.value);
             let (mut child_beams, _child_default) =
                 self.load_file(&import_path, import.path.span)?;
             let alias = &import.alias.value;
@@ -263,6 +297,46 @@ impl Loader {
     }
 }
 
+/// Computes the directory that becomes `Beam::dir` for every beam declared
+/// in the file at `path`: `std::path::absolute(path)`'s parent. Reported
+/// at `error_span` if `path` can't be absolutized (rare — see
+/// `std::path::absolute`'s docs for when it fails; an empty `path` is the
+/// only realistic case, and `path` here is never empty).
+///
+/// Deliberately a free function taking a `&Path` rather than a
+/// `Loader` method: it touches neither `self` nor the filesystem
+/// (`std::path::absolute` does not require `path` to exist), which is
+/// what lets it be unit tested directly against synthetic paths — a bare
+/// filename, a relative path, an already-absolute one — without a real
+/// file, a `tempdir`, or (worse) mutating the process's current directory
+/// to fabricate a "relative root" scenario, which would race every other
+/// test in this crate's suite (`cargo test` runs test functions
+/// concurrently on a shared process).
+fn beam_dir_for(path: &Path, error_span: Span) -> Result<PathBuf, CoreError> {
+    let absolute = std::path::absolute(path).map_err(|e| {
+        CoreError::new(
+            format!(
+                "cannot resolve an absolute path for `{}`: {e}",
+                path.display()
+            ),
+            error_span,
+        )
+    })?;
+    Ok(absolute
+        .parent()
+        .map(Path::to_path_buf)
+        // Unreachable in practice: `std::path::absolute` keeps `path`'s
+        // final component (the Beamfile's own file name), so the result
+        // always has a parent — even a filesystem-root file (`/Beamfile`)
+        // absolutizes to `/Beamfile`, whose parent is `/`, itself a valid
+        // absolute directory (see this function's tests). Kept as a
+        // non-panicking fallback rather than `.expect(..)`: this is a
+        // library, and a defensive branch should never crash the caller
+        // even if the "unreachable" reasoning turns out wrong on some
+        // future platform.
+        .unwrap_or_else(|| PathBuf::from(".")))
+}
+
 /// Rejects two `import`s in the same file sharing an alias — otherwise
 /// namespace prefixing would silently merge two unrelated files' beams
 /// under the same prefix.
@@ -277,4 +351,71 @@ fn check_duplicate_aliases(file: &File) -> Result<(), CoreError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the fix-round bug where `Beam::dir` for a
+    /// bare-filename root (`load_project(Path::new("Beamfile"))`, a
+    /// plausible CLI default) was the *empty* path: `Path::new("Beamfile")
+    /// .parent()` is `Some("")`, not `None`, so a fallback keyed on `None`
+    /// never fired. `beam_dir_for` must never produce that: it's absolute
+    /// and non-empty here.
+    #[test]
+    fn beam_dir_for_bare_filename_is_absolute_and_non_empty() {
+        let dir = beam_dir_for(Path::new("Beamfile"), Span::new(0, 0)).unwrap();
+        assert!(dir.is_absolute());
+        assert!(!dir.as_os_str().is_empty());
+        assert!(!dir.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    /// A relative root with a directory component (`load_project(Path::new(
+    /// "sub/Beamfile"))`) must still resolve to an absolute `Beam::dir` —
+    /// otherwise it's only correct for as long as the process's current
+    /// directory doesn't change between loading and running, a coupling
+    /// the previous (`canonicalize`-based) implementation didn't have.
+    #[test]
+    fn beam_dir_for_relative_path_is_absolute() {
+        let dir = beam_dir_for(Path::new("sub/Beamfile"), Span::new(0, 0)).unwrap();
+        assert!(dir.is_absolute());
+        assert!(dir.ends_with("sub"));
+        assert!(!dir.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    /// An already-absolute root stays absolute and gains no verbatim
+    /// prefix — `std::path::absolute` only returns a path unchanged
+    /// (skipping its own normalization) when the *input* is already
+    /// verbatim, which nothing in this crate ever constructs (see the
+    /// module doc comment's "beam directory" bullet).
+    #[test]
+    fn beam_dir_for_absolute_path_has_no_verbatim_prefix() {
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\projects\x\Beamfile")
+        } else {
+            PathBuf::from("/projects/x/Beamfile")
+        };
+        let dir = beam_dir_for(&root, Span::new(0, 0)).unwrap();
+        assert!(dir.is_absolute());
+        assert!(!dir.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    /// A root whose parent is the filesystem root itself (`/Beamfile` on
+    /// Unix) still yields a valid, absolute, non-empty directory (`/`) —
+    /// the one case where `Path::parent()` could plausibly be `None`
+    /// doesn't arise here because `std::path::absolute` always keeps the
+    /// file name component.
+    #[test]
+    fn beam_dir_for_root_level_file_is_still_a_valid_directory() {
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\Beamfile")
+        } else {
+            PathBuf::from("/Beamfile")
+        };
+        let dir = beam_dir_for(&root, Span::new(0, 0)).unwrap();
+        assert!(dir.is_absolute());
+        assert!(!dir.as_os_str().is_empty());
+        assert!(!dir.to_string_lossy().starts_with(r"\\?\"));
+    }
 }
