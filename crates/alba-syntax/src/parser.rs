@@ -486,6 +486,14 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The [`describe`] text for [`TokenKind::Eof`], exposed so `template.rs`
+/// can recognize (and correct) it when its own synthetic end-of-body
+/// sentinel — which reuses `TokenKind::Eof` as the sub-parser's
+/// end-of-input marker, but really means "the interpolation's closing
+/// `}`" — surfaces in an error message. Kept as a single source of truth
+/// rather than a string duplicated in both places, so the two can't drift.
+pub(crate) const EOF_DESCRIPTION: &str = "end of input";
+
 /// A short, human-readable description of a token kind for error messages.
 fn describe(kind: &TokenKind) -> String {
     match kind {
@@ -517,7 +525,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::OrOr => "`||`".to_string(),
         TokenKind::Plus => "`+`".to_string(),
         TokenKind::Newline => "a newline".to_string(),
-        TokenKind::Eof => "end of input".to_string(),
+        TokenKind::Eof => EOF_DESCRIPTION.to_string(),
     }
 }
 
