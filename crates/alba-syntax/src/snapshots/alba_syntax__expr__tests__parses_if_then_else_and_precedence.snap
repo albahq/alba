@@ -1,0 +1,81 @@
+---
+source: crates/alba-syntax/src/expr.rs
+expression: e
+---
+If {
+    cond: Binary {
+        op: And,
+        lhs: Binary {
+            op: Eq,
+            lhs: Var(
+                Spanned {
+                    value: "a",
+                    span: Span {
+                        start: 3,
+                        end: 4,
+                    },
+                },
+            ),
+            rhs: Str(
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "x",
+                        ),
+                    ],
+                    span: Span {
+                        start: 8,
+                        end: 11,
+                    },
+                },
+            ),
+        },
+        rhs: Var(
+            Spanned {
+                value: "b",
+                span: Span {
+                    start: 15,
+                    end: 16,
+                },
+            },
+        ),
+    },
+    then: Str(
+        StringTemplate {
+            parts: [
+                Literal(
+                    "yes",
+                ),
+            ],
+            span: Span {
+                start: 22,
+                end: 27,
+            },
+        },
+    ),
+    otherwise: Binary {
+        op: Concat,
+        lhs: Str(
+            StringTemplate {
+                parts: [
+                    Literal(
+                        "no",
+                    ),
+                ],
+                span: Span {
+                    start: 33,
+                    end: 37,
+                },
+            },
+        ),
+        rhs: Var(
+            Spanned {
+                value: "suffix",
+                span: Span {
+                    start: 40,
+                    end: 46,
+                },
+            },
+        ),
+    },
+}
