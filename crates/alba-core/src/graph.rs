@@ -35,6 +35,16 @@ fn all_ids(project: &Project) -> impl Iterator<Item = &str> {
     project.beams.iter().map(|b| b.id.0.as_str())
 }
 
+/// An O(1) id-to-beam lookup for `project`, built fresh on every call.
+/// Shared by [`validate_graph`] and [`execution_subgraph`], which both
+/// need one, so the same map isn't built twice per call in a caller that
+/// validates and then immediately extracts a subgraph. Only ever used for
+/// lookups, never iterated — see the module doc comment's "Determinism"
+/// section for why that distinction matters here.
+fn by_id(project: &Project) -> HashMap<&str, &Beam> {
+    project.beams.iter().map(|b| (b.id.0.as_str(), b)).collect()
+}
+
 /// Builds the "unknown beam `name`" error `validate_graph` and
 /// `execution_subgraph` both need, with a "did you mean...?" suggestion
 /// attached when a close-enough candidate exists. The caller stamps the
@@ -67,7 +77,7 @@ fn unknown_beam_error<'a>(
 /// multi-file project's error at the root file regardless of which
 /// imported file actually declared the problem.
 pub fn validate_graph(project: &Project) -> Result<(), CoreError> {
-    let by_id: HashMap<&str, &Beam> = project.beams.iter().map(|b| (b.id.0.as_str(), b)).collect();
+    let by_id = by_id(project);
 
     for beam in &project.beams {
         for need in &beam.needs {
@@ -167,7 +177,7 @@ fn detect_cycle<'a>(
 /// `Project`'s fields are public), a `needs` entry that doesn't resolve is
 /// silently skipped instead of extended into.
 pub fn execution_subgraph(project: &Project, target: &BeamId) -> Result<Vec<BeamId>, CoreError> {
-    let by_id: HashMap<&str, &Beam> = project.beams.iter().map(|b| (b.id.0.as_str(), b)).collect();
+    let by_id = by_id(project);
 
     let Some(&start) = by_id.get(target.0.as_str()) else {
         return Err(unknown_beam_error(
@@ -326,6 +336,97 @@ beam b2 { needs [b1] run \"x\" }
             let err = load_str(src).unwrap_err();
             assert!(err.message.contains("a1 → a2 → a1"));
         }
+    }
+
+    /// Distinguishes correct cycle-path slicing (`path[pos..]`) from the
+    /// bug it guards against (reporting the whole DFS path from whatever
+    /// root started the walk, `path[0..]`): a long, non-cyclic prefix
+    /// leads into the cycle, and none of that prefix's ids may appear in
+    /// the message — only the loop itself. `cycle_reports_exact_path`
+    /// alone doesn't distinguish these, because its DFS root is already
+    /// part of the cycle.
+    #[test]
+    fn cycle_message_excludes_the_non_cyclic_dfs_prefix() {
+        let err = load_str(
+            "
+beam root { needs [mid] run \"x\" }
+beam mid { needs [inner] run \"x\" }
+beam inner { needs [x] run \"x\" }
+beam x { needs [y] run \"x\" }
+beam y { needs [x] run \"x\" }
+",
+        )
+        .unwrap_err();
+        assert!(err.message.contains("x → y → x"));
+        assert!(!err.message.contains("root"));
+        assert!(!err.message.contains("mid"));
+        assert!(!err.message.contains("inner"));
+    }
+
+    /// `d` needs both `b` and `c`, which both need `a`: `a` must appear in
+    /// the closure exactly once, distinguishing the `seen`-guarded BFS
+    /// from one that pushes every `needs` entry unconditionally.
+    /// `duplicate_needs_do_not_duplicate_in_subgraph` only covers the easy
+    /// half (the same id repeated within one beam's own `needs` list) —
+    /// this covers two different beams sharing a dependency.
+    #[test]
+    fn diamond_shaped_needs_deduplicates_shared_dependency() {
+        let project = load_str(
+            "
+beam a { run \"x\" }
+beam b { needs [a] run \"x\" }
+beam c { needs [a] run \"x\" }
+beam d { needs [b, c] run \"x\" }
+",
+        )
+        .unwrap();
+        let ids = execution_subgraph(&project, &BeamId("d".into())).unwrap();
+        assert_eq!(ids.iter().filter(|id| id.0 == "a").count(), 1);
+        assert_eq!(sorted(ids), vec!["a", "b", "c", "d"]);
+    }
+
+    /// A five-level chain, to confirm the BFS actually walks multiple hops
+    /// to completion rather than stopping early — `subgraph_is_transitive_
+    /// closure`'s three levels leave that under-exercised.
+    #[test]
+    fn subgraph_walks_a_deep_chain_completely() {
+        let project = load_str(
+            "
+beam a { run \"x\" }
+beam b { needs [a] run \"x\" }
+beam c { needs [b] run \"x\" }
+beam d { needs [c] run \"x\" }
+beam e { needs [d] run \"x\" }
+",
+        )
+        .unwrap();
+        let ids = execution_subgraph(&project, &BeamId("e".into())).unwrap();
+        assert_eq!(sorted(ids), vec!["a", "b", "c", "d", "e"]);
+    }
+
+    /// Highest-risk item from the review: a cycle entirely among
+    /// *imported*, namespaced beams. `detect_cycle` compares `BeamId.0` as
+    /// a plain string, so a `:`-namespaced id is no different from an
+    /// unnamespaced one by inspection — this pins that down with a real
+    /// multi-file fixture instead of leaving it unverified. `api/Beamfile`
+    /// is registered second (`SourceId(1)`), so the error must carry that
+    /// id, not the root's.
+    #[test]
+    fn cycle_among_imported_namespaced_beams_reports_qualified_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path().join("Beamfile"),
+            "import \"api/Beamfile\" as api\nbeam all { needs [api:x] run \"echo\" }",
+        );
+        write(
+            dir.path().join("api/Beamfile"),
+            "beam x { needs [y] run \"x\" }\nbeam y { needs [x] run \"y\" }",
+        );
+
+        let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+
+        assert!(err.error.message.contains("api:x → api:y → api:x"));
+        assert_eq!(err.error.source_id, SourceId(1));
     }
 
     /// The `source_id` half of the wiring: `validate_graph` runs after
