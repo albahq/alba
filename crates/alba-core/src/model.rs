@@ -1,11 +1,11 @@
 //! The typed project model that `alba-core` evaluates a Beamfile's AST
 //! into: [`Project`], its [`Beam`]s, and the small value types they carry.
 //!
-//! Scope boundary (this crate's Task 6): single-file loading only. A
-//! [`Beam`]'s `needs` list is converted straight from the AST's
-//! `BeamRef`s without validating that the referenced beam exists, and
-//! `import`/namespace resolution (Task 7) and graph validation / subgraph
-//! extraction (Task 8) are not implemented here.
+//! Scope boundary: a [`Beam`]'s `needs` list is converted straight from
+//! the AST's `BeamRef`s (namespaced by [`crate::loader::load_project`]
+//! when it came from an `import`) without validating that the referenced
+//! beam actually exists — graph validation and subgraph extraction are
+//! Task 8's job, not this crate's model.
 
 use std::path::PathBuf;
 
@@ -14,15 +14,17 @@ use alba_syntax::{Span, StringTemplate};
 use crate::eval::Scope;
 
 /// Identifies which source file a [`Beam`] or [`crate::CoreError`] came
-/// from, for pointing diagnostics at the right source text once more than
-/// one file is loaded (Task 7's `import`s). Single-file loading in this
-/// crate only ever produces `SourceId(0)`.
+/// from, for pointing diagnostics at the right source text. Assigned by
+/// [`crate::loader::load_project`] (the root file is always `SourceId(0)`,
+/// each import gets the next one in load order) and resolvable back to a
+/// path and source text via [`crate::loader::SourceMap::get`].
+/// `load_str`'s single-file loading always produces `SourceId(0)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SourceId(pub usize);
 
-/// A fully namespaced beam identifier, e.g. `"api:build"` for an imported
-/// beam or `"build"` for a local one. Namespacing is added by Task 7;
-/// single-file loading only ever produces unnamespaced ids.
+/// A fully namespaced beam identifier, e.g. `"api:build"` for a beam
+/// imported under the alias `api`, `"api:db:migrate"` for one imported
+/// transitively through a chain of aliases, or `"build"` for a local one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BeamId(pub String);
 
