@@ -20,6 +20,15 @@ thread_local! {
     /// parameter, so that stamping the right id is a change made in one
     /// place ([`SourceIdScope::enter`]) rather than a parameter threaded
     /// through every one of `eval.rs`'s error-construction sites.
+    ///
+    /// Only ever set by a [`SourceIdScope`], which is `pub(crate)` — so
+    /// outside this crate (in particular, the future engine calling the
+    /// publicly re-exported [`crate::eval_expr`]/[`crate::render_template`]
+    /// at schedule time, after loading has finished) this defaults to
+    /// [`ROOT_SOURCE_ID`] regardless of which file the value being
+    /// rendered actually came from. A schedule-time caller that knows the
+    /// real answer (typically `Beam::source`) must correct it explicitly
+    /// with [`CoreError::with_source_id`] — see that method's doc comment.
     static CURRENT_SOURCE: Cell<SourceId> = const { Cell::new(ROOT_SOURCE_ID) };
 }
 
@@ -90,6 +99,26 @@ impl CoreError {
     /// Attaches help text (chainable with [`CoreError::new`]).
     pub(crate) fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+
+    /// Overrides this error's `source_id`. Public (unlike [`CoreError::new`]
+    /// and [`CoreError::with_help`]) because it's meant for callers outside
+    /// this crate: [`crate::eval_expr`] and [`crate::render_template`] are
+    /// re-exported so the engine can render a beam's `run`/`env` templates
+    /// at schedule time, but by then loading has finished and there is no
+    /// active [`SourceIdScope`] (that type is `pub(crate)`-only, scoped to
+    /// this crate's own loading) — every error they build defaults to
+    /// [`ROOT_SOURCE_ID`] regardless of which file the beam actually came
+    /// from. A schedule-time caller that has the beam on hand should
+    /// correct that explicitly, e.g. `render_template(&tpl,
+    /// &scope).map_err(|e| e.with_source_id(beam.source))`, rather than
+    /// reaching into the (also-public) `source_id` field directly — this
+    /// method is the one, documented, intentional place that's meant to
+    /// happen, as opposed to an ad hoc patch scattered at whichever call
+    /// site happens to need it.
+    pub fn with_source_id(mut self, source_id: SourceId) -> Self {
+        self.source_id = source_id;
         self
     }
 }
