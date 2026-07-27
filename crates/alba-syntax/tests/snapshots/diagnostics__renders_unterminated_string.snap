@@ -1,0 +1,10 @@
+---
+source: crates/alba-syntax/tests/diagnostics.rs
+expression: rendered
+---
+  × unterminated string literal
+   ╭─[Beamfile:2:7]
+ 1 │     beam x {
+ 2 │ ╭─▶   run "oops
+ 3 │ ╰─▶ }
+   ╰────
