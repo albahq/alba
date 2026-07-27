@@ -151,10 +151,26 @@ pub struct LoadError {
 /// This is the single public entry point the CLI calls: `load_str` (used
 /// internally by this crate's and the engine's tests) stays
 /// `#[doc(hidden)]`.
+///
+/// Runs [`crate::graph::validate_graph`] once every file has finished
+/// loading, before returning the assembled [`Project`] — that check runs
+/// with no [`SourceIdScope`] active (loading is over by then), so it
+/// stamps each error it produces with the offending beam's own `source`
+/// field itself, rather than leaving it at whatever this thread's ambient
+/// id defaults to.
 pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
     let mut loader = Loader::default();
     match loader.load_file(root, Span::new(0, 0)) {
-        Ok((beams, default)) => Ok((Project { beams, default }, loader.sources)),
+        Ok((beams, default)) => {
+            let project = Project { beams, default };
+            match crate::graph::validate_graph(&project) {
+                Ok(()) => Ok((project, loader.sources)),
+                Err(error) => Err(LoadError {
+                    error,
+                    sources: loader.sources,
+                }),
+            }
+        }
         Err(error) => Err(LoadError {
             error,
             sources: loader.sources,

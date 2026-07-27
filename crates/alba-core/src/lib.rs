@@ -8,18 +8,20 @@
 //! load-time-vs-schedule-time rendering split between a beam's fields.
 //!
 //! Multi-file loading (`import "path" as alias`, namespaced beam ids) is
-//! [`load_project`]'s job. Dependency-graph validation (unknown `needs`
-//! targets, `needs`-cycles) and subgraph extraction are layered on top in
-//! later work — this crate builds the model, it doesn't validate the
-//! graph.
+//! [`load_project`]'s job, which also validates the resulting dependency
+//! graph (unknown `needs` targets, `needs`-cycles) via [`validate_graph`]
+//! before returning it. [`execution_subgraph`] extracts the transitive
+//! closure of a target beam, for whichever engine schedules and runs it.
 
 mod error;
 mod eval;
+mod graph;
 mod loader;
 mod model;
 
 pub use error::CoreError;
 pub use eval::{Scope, eval_expr, render_template};
+pub use graph::{execution_subgraph, validate_graph};
 pub use loader::{LoadError, SourceMap, load_project};
 pub use model::{Beam, BeamId, ExecutorKind, Project, SourceId, Value};
 

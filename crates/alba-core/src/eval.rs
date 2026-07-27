@@ -165,7 +165,15 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// whose iteration order is randomized per process, so without an
 /// explicit tie-break the suggestion offered for the same typo could
 /// change from run to run.
-fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+///
+/// `pub(crate)`: `graph.rs`'s "unknown beam" and "unknown target"
+/// diagnostics reuse this exact function (and its tie-break rule) for
+/// their own "did you mean...?" help, rather than duplicating it a third
+/// time alongside `alba_syntax::parser`'s private original.
+pub(crate) fn suggest<'a>(
+    name: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
     let mut scored: Vec<(&str, usize)> = candidates
         .map(|candidate| (candidate, levenshtein(name, candidate)))
         .filter(|&(_, distance)| distance <= 2)
@@ -694,9 +702,19 @@ pub(crate) fn parse_error_to_core_error(e: ParseError) -> CoreError {
 /// file on disk, but it isn't part of this crate's supported public API —
 /// real callers go through `alba_core::load_project` instead.
 ///
-/// Every beam this produces carries `SourceId(0)` and a `dir` of `"."`,
-/// matching [`crate::loader::load_project`]'s convention for the root file
-/// but without a real file on disk to resolve `cwd` against.
+/// Runs [`crate::graph::validate_graph`] before returning, exactly like
+/// [`crate::loader::load_project`] does — so the engine's tests, which
+/// build their `Project`s through this function, see the same unknown-
+/// `needs`/cycle errors a real multi-file load would produce, rather than
+/// the two entry points drifting apart on what counts as a valid graph.
+///
+/// Every beam this produces carries `SourceId(0)`, matching
+/// [`crate::loader::load_project`]'s convention for the root file, and a
+/// `dir` of `"."`. That second part is *not* the same convention
+/// `load_project` uses: it resolves `Beam::dir` to an absolute path via
+/// `std::path::absolute`, while this function has no real file on disk to
+/// resolve `cwd` against, so it leaves `dir` as the literal, relative
+/// `"."` instead.
 ///
 /// `import` declarations are rejected outright rather than silently
 /// ignored: this function has no filesystem to resolve them against
@@ -715,7 +733,9 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
             import.path.span,
         ));
     }
-    build_project(&file, Path::new("."))
+    let project = build_project(&file, Path::new("."))?;
+    crate::graph::validate_graph(&project)?;
+    Ok(project)
 }
 
 /// Evaluates an already-parsed [`File`] into a [`Project`]: file-level
