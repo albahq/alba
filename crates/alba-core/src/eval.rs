@@ -6,11 +6,13 @@
 //!
 //! A beam's `description`, `inputs`, `outputs`, `cwd`, and executor
 //! options are rendered once, here, at load time, using a [`Scope`] built
-//! only from the file's `let` bindings: referencing a beam's own
-//! parameter in one of these fields is therefore a plain "unknown
-//! variable" error (the parameter was never added to that scope), which
-//! satisfies the "parameters are forbidden here" rule without any special
-//! casing.
+//! only from the file's `let` bindings. A beam's own parameter is never in
+//! that scope, so referencing one there is always an error — but a
+//! same-named `let` could otherwise silently take its place instead of
+//! erroring, which is why `render_load_time_template` explicitly rejects
+//! any `Var` matching one of the beam's parameter names (via
+//! `reject_param_references`) *before* rendering, rather than relying on
+//! the scope's shape alone.
 //!
 //! `run` and `env` values stay as [`StringTemplate`]s in the model,
 //! rendered later (at schedule time, by the engine, through the same
@@ -19,17 +21,27 @@
 //! aren't bound yet at load time, those templates can't be fully
 //! evaluated up front — but the brief still requires that every name they
 //! reference resolve to *something* (a file-level `let` or one of the
-//! beam's own parameters) at load time. [`validate_deferred_template`]
-//! does that without evaluating: it walks the expression tree, treats a
-//! reference to a file-level `let` as concretely known (since those are
-//! already evaluated) and a reference to one of the beam's own parameters
-//! as validly-named-but-unknown-until-schedule-time, and eagerly
-//! type-checks (reusing [`eval_binary`]/[`eval_expr`]) any sub-expression
-//! that turns out to depend only on `let`s. That is what makes
+//! beam's own parameters) at load time, in *every* branch of the
+//! expression (including one an `if` with a statically known condition
+//! doesn't take — a typo hiding in a dead branch must still be caught).
+//! [`validate_deferred_template`] does that without evaluating: it walks
+//! the expression tree via [`check_deferred_expr`], treating a reference
+//! to a file-level `let` as concretely known (since those are already
+//! evaluated; a same-named parameter still shadows it, matching
+//! [`Scope::with_params`]) and a reference to one of the beam's own
+//! parameters as validly-named-but-unknown-until-schedule-time, and
+//! eagerly type-checks (reusing [`eval_binary`]) any sub-expression that
+//! turns out to depend only on `let`s. That is what makes
 //! `if_condition_must_be_bool` (whose `if` condition is a plain `let`,
 //! with no parameter involved) catchable at load time, while a `run`
 //! template that mixes `let`s and parameters only gets its names checked,
 //! not its types, until schedule time.
+//!
+//! One built-in is deliberately never executed on this deferred path:
+//! `env()` reads the process environment, a side effect that belongs at
+//! schedule time even when its arguments happen to be fully known already
+//! — see `check_deferred_expr`'s `Call` arm. `glob()` has no such side
+//! effect (it only compiles a pattern), so it stays eagerly validated.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,14 +50,8 @@ use alba_syntax::{
     BeamDecl, BeamRef, BinOp, ExecutorDecl, Expr, File, Span, Spanned, StringTemplate, TemplatePart,
 };
 
-use crate::error::CoreError;
-use crate::model::{Beam, BeamId, ExecutorKind, Project, SourceId, Value};
-
-/// The `SourceId` every error and beam produced by this crate's
-/// single-file loading (`load_str`) carries. Multi-file loading (Task 7's
-/// real `load_project` entry point) will assign distinct ids per imported
-/// file instead of this constant.
-pub(crate) const ROOT_SOURCE_ID: SourceId = SourceId(0);
+use crate::error::{CoreError, ROOT_SOURCE_ID};
+use crate::model::{Beam, BeamId, ExecutorKind, Project, Value};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
 const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
@@ -91,6 +97,15 @@ impl Scope {
     /// the cheap, obvious composition the engine uses to bind a beam's
     /// positional arguments before rendering its `run`/`env` templates:
     /// `beam.scope.with_params(&beam.params, &args)`.
+    ///
+    /// Mismatched lengths are not validated here: `zip` simply stops at
+    /// the shorter of the two, so a missing argument leaves its parameter
+    /// name unbound (rendering later fails with a plain "unknown
+    /// variable" error, not an arity message) and an extra argument is
+    /// silently ignored. Task 10 is expected to check `args.len() ==
+    /// beam.params.len()` itself before calling this, so a real
+    /// argument-count mismatch gets a clear diagnostic instead of
+    /// surfacing here as a confusing unknown-variable one.
     pub fn with_params(&self, params: &[String], args: &[String]) -> Self {
         let mut values = self.values.clone();
         for (name, arg) in params.iter().zip(args.iter()) {
@@ -143,35 +158,37 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// The closest name in `candidates` to `name`, if within Levenshtein
-/// distance 2 (picking the closest on ties by iteration order), matching
-/// `alba_syntax`'s unknown-field suggestion threshold.
+/// distance 2, matching `alba_syntax`'s unknown-field suggestion
+/// threshold. Ties are broken alphabetically, not by iteration order:
+/// `candidates` is typically a `HashMap`'s keys (via `Scope::names`),
+/// whose iteration order is randomized per process, so without an
+/// explicit tie-break the suggestion offered for the same typo could
+/// change from run to run.
 fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
-    candidates
+    let mut scored: Vec<(&str, usize)> = candidates
         .map(|candidate| (candidate, levenshtein(name, candidate)))
         .filter(|&(_, distance)| distance <= 2)
-        .min_by_key(|&(_, distance)| distance)
-        .map(|(candidate, _)| candidate)
+        .collect();
+    scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    scored.into_iter().next().map(|(candidate, _)| candidate)
 }
 
 fn unknown_variable_error<'a>(
     name: &Spanned<String>,
     candidates: impl Iterator<Item = &'a str>,
 ) -> CoreError {
-    CoreError {
-        message: format!("unknown variable `{}`", name.value),
-        span: name.span,
-        help: suggest(&name.value, candidates).map(|c| format!("did you mean `{c}`?")),
-        source_id: ROOT_SOURCE_ID,
+    let err = CoreError::new(format!("unknown variable `{}`", name.value), name.span);
+    match suggest(&name.value, candidates) {
+        Some(c) => err.with_help(format!("did you mean `{c}`?")),
+        None => err,
     }
 }
 
 fn unknown_function_error(name: &Spanned<String>) -> CoreError {
-    CoreError {
-        message: format!("unknown function `{}`", name.value),
-        span: name.span,
-        help: suggest(&name.value, BUILTIN_FUNCTIONS.iter().copied())
-            .map(|c| format!("did you mean `{c}`?")),
-        source_id: ROOT_SOURCE_ID,
+    let err = CoreError::new(format!("unknown function `{}`", name.value), name.span);
+    match suggest(&name.value, BUILTIN_FUNCTIONS.iter().copied()) {
+        Some(c) => err.with_help(format!("did you mean `{c}`?")),
+        None => err,
     }
 }
 
@@ -233,15 +250,13 @@ fn eval_with_fallback(expr: &Expr, scope: &Scope, fallback: Span) -> Result<Valu
                 Value::Bool(false) => {
                     eval_with_fallback(otherwise, scope, expr_span(otherwise).unwrap_or(fallback))
                 }
-                other => Err(CoreError {
-                    message: format!(
+                other => Err(CoreError::new(
+                    format!(
                         "expected a boolean condition for `if`, found {}",
                         other.type_name()
                     ),
-                    span: cond_span,
-                    help: None,
-                    source_id: ROOT_SOURCE_ID,
-                }),
+                    cond_span,
+                )),
             }
         }
     }
@@ -251,29 +266,25 @@ fn eval_binary(op: BinOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, C
     match op {
         BinOp::Concat => match (lhs, rhs) {
             (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
-            (l, r) => Err(CoreError {
-                message: format!(
+            (l, r) => Err(CoreError::new(
+                format!(
                     "`+` requires two strings, found {} and {}",
                     l.type_name(),
                     r.type_name()
                 ),
                 span,
-                help: None,
-                source_id: ROOT_SOURCE_ID,
-            }),
+            )),
         },
         BinOp::Eq | BinOp::NotEq => {
             if std::mem::discriminant(&lhs) != std::mem::discriminant(&rhs) {
-                return Err(CoreError {
-                    message: format!(
+                return Err(CoreError::new(
+                    format!(
                         "`==`/`!=` requires operands of the same type, found {} and {}",
                         lhs.type_name(),
                         rhs.type_name()
                     ),
                     span,
-                    help: None,
-                    source_id: ROOT_SOURCE_ID,
-                });
+                ));
             }
             let equal = lhs == rhs;
             Ok(Value::Bool(if op == BinOp::Eq { equal } else { !equal }))
@@ -282,16 +293,14 @@ fn eval_binary(op: BinOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, C
             (Value::Bool(a), Value::Bool(b)) => {
                 Ok(Value::Bool(if op == BinOp::And { a && b } else { a || b }))
             }
-            (l, r) => Err(CoreError {
-                message: format!(
+            (l, r) => Err(CoreError::new(
+                format!(
                     "`&&`/`||` requires two booleans, found {} and {}",
                     l.type_name(),
                     r.type_name()
                 ),
                 span,
-                help: None,
-                source_id: ROOT_SOURCE_ID,
-            }),
+            )),
         },
     }
 }
@@ -315,20 +324,35 @@ fn arity_error(name: &Spanned<String>, min: usize, max: usize, found: usize) -> 
     } else {
         format!("{min} to {max}")
     };
-    CoreError {
-        message: format!(
+    CoreError::new(
+        format!(
             "`{}` expects {expected} argument(s), found {found}",
             name.value
         ),
-        span: name.span,
-        help: None,
-        source_id: ROOT_SOURCE_ID,
+        name.span,
+    )
+}
+
+/// Requires `value` to be a string, for built-in function arguments
+/// (`env`'s name/default, `glob`'s pattern) that are never meaningfully
+/// anything else. Shared by [`expect_str_arg`] (which evaluates the
+/// argument first) and [`check_deferred_expr`]'s `glob` handling (which
+/// already has the argument's statically known value in hand, and would
+/// otherwise have to re-evaluate it to reach this same check).
+fn expect_str_value(fn_name: &str, value: Value, span: Span) -> Result<String, CoreError> {
+    match value {
+        Value::Str(s) => Ok(s),
+        other => Err(CoreError::new(
+            format!(
+                "argument to `{fn_name}` must be a string, found {}",
+                other.type_name()
+            ),
+            span,
+        )),
     }
 }
 
-/// Evaluates `arg` and requires the result to be a string, for built-in
-/// function arguments (`env`'s name/default, `glob`'s pattern) that are
-/// never meaningfully anything else.
+/// Evaluates `arg` and requires the result to be a string.
 fn expect_str_arg(
     fn_name: &Spanned<String>,
     arg: &Expr,
@@ -336,19 +360,8 @@ fn expect_str_arg(
     fallback: Span,
 ) -> Result<String, CoreError> {
     let span = expr_span(arg).unwrap_or(fallback);
-    match eval_with_fallback(arg, scope, span)? {
-        Value::Str(s) => Ok(s),
-        other => Err(CoreError {
-            message: format!(
-                "argument to `{}` must be a string, found {}",
-                fn_name.value,
-                other.type_name()
-            ),
-            span,
-            help: None,
-            source_id: ROOT_SOURCE_ID,
-        }),
-    }
+    let value = eval_with_fallback(arg, scope, span)?;
+    expect_str_value(&fn_name.value, value, span)
 }
 
 /// `env(name)` / `env(name, default)`: reads the process environment.
@@ -369,18 +382,25 @@ fn eval_env(
                 let span = expr_span(default_expr).unwrap_or(fallback);
                 eval_with_fallback(default_expr, scope, span)
             }
-            None => Err(CoreError {
-                message: format!("environment variable `{key}` is not set"),
-                span: name.span,
-                help: None,
-                source_id: ROOT_SOURCE_ID,
-            }),
+            None => Err(CoreError::new(
+                format!("environment variable `{key}` is not set"),
+                name.span,
+            )),
         },
     }
 }
 
-/// `glob(pattern)`: validates that the pattern compiles (expansion is the
-/// cache's job, later) and returns it unchanged as a string.
+/// Validates that `pattern` compiles as a glob pattern (expansion is the
+/// cache's job, later) and returns it unchanged, wrapped as a [`Value`].
+/// Shared by [`eval_glob`] and [`check_deferred_expr`]'s `glob` handling.
+fn validate_glob_pattern(pattern: String, span: Span) -> Result<Value, CoreError> {
+    glob::Pattern::new(&pattern)
+        .map_err(|e| CoreError::new(format!("invalid glob pattern `{pattern}`: {e}"), span))?;
+    Ok(Value::Str(pattern))
+}
+
+/// `glob(pattern)`: validates that the pattern compiles and returns it
+/// unchanged as a string.
 fn eval_glob(
     name: &Spanned<String>,
     args: &[Expr],
@@ -392,13 +412,7 @@ fn eval_glob(
     }
     let pattern_span = expr_span(&args[0]).unwrap_or(fallback);
     let pattern = expect_str_arg(name, &args[0], scope, fallback)?;
-    glob::Pattern::new(&pattern).map_err(|e| CoreError {
-        message: format!("invalid glob pattern `{pattern}`: {e}"),
-        span: pattern_span,
-        help: None,
-        source_id: ROOT_SOURCE_ID,
-    })?;
-    Ok(Value::Str(pattern))
+    validate_glob_pattern(pattern, pattern_span)
 }
 
 /// What [`check_deferred_expr`] statically knows about a sub-expression of
@@ -413,7 +427,9 @@ enum StaticValue {
 
 /// Walks `expr`, validating variable names and eagerly type-checking
 /// whatever sub-expressions don't depend on `params`. See the module doc
-/// comment for the overall strategy.
+/// comment for the overall strategy — in particular, *every* branch of an
+/// `if` is validated here, even one a statically known condition doesn't
+/// take, and `env()` is never actually executed on this path.
 fn check_deferred_expr(
     expr: &Expr,
     lets: &Scope,
@@ -438,44 +454,82 @@ fn check_deferred_expr(
             }
         }
         Expr::Str(template) => {
+            // Builds the rendered string directly from each part's
+            // already-computed `StaticValue` rather than recursing once
+            // to check it and then calling `render_template` again on the
+            // same subtree, which would (among other redundant work)
+            // evaluate any `glob()` call inside it twice.
             let mut any_unknown = false;
+            let mut rendered = String::new();
             for part in &template.parts {
-                if let TemplatePart::Expr(e) = part {
-                    let span = expr_span(e).unwrap_or(template.span);
-                    match check_deferred_expr(e, lets, params, span)? {
-                        StaticValue::Known(_) => {}
-                        StaticValue::Unknown => any_unknown = true,
+                match part {
+                    TemplatePart::Literal(s) => rendered.push_str(s),
+                    TemplatePart::Expr(e) => {
+                        let span = expr_span(e).unwrap_or(template.span);
+                        match check_deferred_expr(e, lets, params, span)? {
+                            StaticValue::Known(v) => rendered.push_str(v.as_display()),
+                            StaticValue::Unknown => any_unknown = true,
+                        }
                     }
                 }
             }
             if any_unknown {
                 Ok(StaticValue::Unknown)
             } else {
-                Ok(StaticValue::Known(Value::Str(render_template(
-                    template, lets,
-                )?)))
+                Ok(StaticValue::Known(Value::Str(rendered)))
             }
         }
         Expr::Call { name, args } => {
             if !BUILTIN_FUNCTIONS.contains(&name.value.as_str()) {
                 return Err(unknown_function_error(name));
             }
+
+            if name.value == "env" {
+                // Reading the environment is a side effect that belongs
+                // at schedule time, not load time (see the module doc
+                // comment): check the call's arity and the names inside
+                // its arguments, but never execute the read — not even
+                // when every argument turns out to be statically known.
+                // Otherwise a `run` template referencing an unset
+                // variable would fail the *entire project's* load, for a
+                // beam nobody asked to run.
+                if args.is_empty() || args.len() > 2 {
+                    return Err(arity_error(name, 1, 2, args.len()));
+                }
+                for arg in args {
+                    let span = expr_span(arg).unwrap_or(fallback);
+                    check_deferred_expr(arg, lets, params, span)?;
+                }
+                return Ok(StaticValue::Unknown);
+            }
+
+            // Only "glob" remains, and it has no side effect (it only
+            // compiles the pattern), so it's safe — and required, per the
+            // brief's "type errors ... unknown function" list — to
+            // validate it eagerly once every argument is known. Reuses
+            // each argument's already-computed `StaticValue` instead of
+            // evaluating the call a second time via `eval_expr`.
+            let mut arg_values = Vec::with_capacity(args.len());
             let mut any_unknown = false;
             for arg in args {
                 let span = expr_span(arg).unwrap_or(fallback);
                 match check_deferred_expr(arg, lets, params, span)? {
-                    StaticValue::Known(_) => {}
+                    StaticValue::Known(v) => arg_values.push(v),
                     StaticValue::Unknown => any_unknown = true,
                 }
             }
             if any_unknown {
-                Ok(StaticValue::Unknown)
-            } else {
-                // All arguments are known from `let`s alone: run the real
-                // call (arity, env lookup / glob validation) now, reusing
-                // `eval_expr` rather than duplicating that logic.
-                Ok(StaticValue::Known(eval_expr(expr, lets)?))
+                return Ok(StaticValue::Unknown);
             }
+            if args.len() != 1 {
+                return Err(arity_error(name, 1, 1, args.len()));
+            }
+            let pattern_span = expr_span(&args[0]).unwrap_or(fallback);
+            let pattern = expect_str_value("glob", arg_values.remove(0), pattern_span)?;
+            Ok(StaticValue::Known(validate_glob_pattern(
+                pattern,
+                pattern_span,
+            )?))
         }
         Expr::Binary { op, lhs, rhs } => {
             let l = check_deferred_expr(lhs, lets, params, expr_span(lhs).unwrap_or(fallback))?;
@@ -496,35 +550,33 @@ fn check_deferred_expr(
             otherwise,
         } => {
             let cond_span = expr_span(cond).unwrap_or(fallback);
+            let then_span = expr_span(then).unwrap_or(fallback);
+            let otherwise_span = expr_span(otherwise).unwrap_or(fallback);
             match check_deferred_expr(cond, lets, params, cond_span)? {
-                StaticValue::Known(Value::Bool(true)) => {
-                    check_deferred_expr(then, lets, params, expr_span(then).unwrap_or(fallback))
+                StaticValue::Known(Value::Bool(cond_value)) => {
+                    // Both branches are validated regardless of which one
+                    // the condition picks: an untaken branch can still
+                    // reference a nonexistent name, and which branch is
+                    // "untaken" can depend on the environment the file
+                    // happens to be loaded in (e.g. a condition derived
+                    // from `env(...)`) — that must not make the
+                    // diagnostic environment-dependent too.
+                    let then_result = check_deferred_expr(then, lets, params, then_span)?;
+                    let else_result = check_deferred_expr(otherwise, lets, params, otherwise_span)?;
+                    Ok(if cond_value { then_result } else { else_result })
                 }
-                StaticValue::Known(Value::Bool(false)) => check_deferred_expr(
-                    otherwise,
-                    lets,
-                    params,
-                    expr_span(otherwise).unwrap_or(fallback),
-                ),
-                StaticValue::Known(other) => Err(CoreError {
-                    message: format!(
+                StaticValue::Known(other) => Err(CoreError::new(
+                    format!(
                         "expected a boolean condition for `if`, found {}",
                         other.type_name()
                     ),
-                    span: cond_span,
-                    help: None,
-                    source_id: ROOT_SOURCE_ID,
-                }),
+                    cond_span,
+                )),
                 StaticValue::Unknown => {
                     // Which branch runs isn't known until schedule time;
                     // still validate names/types in both.
-                    check_deferred_expr(then, lets, params, expr_span(then).unwrap_or(fallback))?;
-                    check_deferred_expr(
-                        otherwise,
-                        lets,
-                        params,
-                        expr_span(otherwise).unwrap_or(fallback),
-                    )?;
+                    check_deferred_expr(then, lets, params, then_span)?;
+                    check_deferred_expr(otherwise, lets, params, otherwise_span)?;
                     Ok(StaticValue::Unknown)
                 }
             }
@@ -551,6 +603,72 @@ fn validate_deferred_template(
     Ok(())
 }
 
+/// Rejects any reference to one of `params` inside `expr`, tagged with
+/// `field` for the error message. Used for load-time fields
+/// (`description`, `inputs`, `outputs`, `cwd`, executor options), where a
+/// beam's own parameters are never in scope — but without this explicit
+/// check, a same-named `let` would silently take a forbidden parameter
+/// reference's place instead of erroring (the load-time mirror of the
+/// parameter/`let` shadowing `check_deferred_expr` already accounts for
+/// on the deferred side).
+fn reject_param_references(expr: &Expr, params: &[String], field: &str) -> Result<(), CoreError> {
+    match expr {
+        Expr::Bool(_) => Ok(()),
+        Expr::Var(name) => {
+            if params.iter().any(|p| p == &name.value) {
+                Err(CoreError::new(
+                    format!("beam parameters cannot be used in `{field}`"),
+                    name.span,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Expr::Str(template) => reject_param_references_in_template(template, params, field),
+        Expr::Call { args, .. } => args
+            .iter()
+            .try_for_each(|arg| reject_param_references(arg, params, field)),
+        Expr::Binary { lhs, rhs, .. } => {
+            reject_param_references(lhs, params, field)?;
+            reject_param_references(rhs, params, field)
+        }
+        Expr::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            reject_param_references(cond, params, field)?;
+            reject_param_references(then, params, field)?;
+            reject_param_references(otherwise, params, field)
+        }
+    }
+}
+
+fn reject_param_references_in_template(
+    template: &StringTemplate,
+    params: &[String],
+    field: &str,
+) -> Result<(), CoreError> {
+    template.parts.iter().try_for_each(|part| match part {
+        TemplatePart::Literal(_) => Ok(()),
+        TemplatePart::Expr(e) => reject_param_references(e, params, field),
+    })
+}
+
+/// Renders a load-time field's template: `params` may never appear in it
+/// (see the module doc comment), checked explicitly first so a
+/// same-named `let` can't silently mask a forbidden parameter reference;
+/// then rendered against `lets` alone.
+fn render_load_time_template(
+    field: &str,
+    template: &StringTemplate,
+    lets: &Scope,
+    params: &[String],
+) -> Result<String, CoreError> {
+    reject_param_references_in_template(template, params, field)?;
+    render_template(template, lets)
+}
+
 /// Parses `source` as a single Beamfile and evaluates it into a
 /// [`Project`]: file-level `let`s in order, then every `beam` declaration.
 /// Single-file loading only (see the crate's module doc comments) — no
@@ -564,11 +682,12 @@ fn validate_deferred_template(
 /// instead.
 #[doc(hidden)]
 pub fn load_str(source: &str) -> Result<Project, CoreError> {
-    let file = alba_syntax::parse(source).map_err(|e| CoreError {
-        message: e.message,
-        span: e.span,
-        help: e.help,
-        source_id: ROOT_SOURCE_ID,
+    let file = alba_syntax::parse(source).map_err(|e| {
+        let err = CoreError::new(e.message, e.span);
+        match e.help {
+            Some(help) => err.with_help(help),
+            None => err,
+        }
     })?;
     build_project(&file)
 }
@@ -599,10 +718,12 @@ fn beam_ref_to_id(r: &BeamRef) -> BeamId {
 }
 
 fn build_beam(decl: &BeamDecl, lets: &Scope) -> Result<Beam, CoreError> {
+    let params: Vec<String> = decl.params.iter().map(|p| p.value.clone()).collect();
+
     let description = decl
         .description
         .as_ref()
-        .map(|t| render_template(t, lets))
+        .map(|t| render_load_time_template("description", t, lets, &params))
         .transpose()?;
 
     let needs = decl
@@ -610,17 +731,16 @@ fn build_beam(decl: &BeamDecl, lets: &Scope) -> Result<Beam, CoreError> {
         .iter()
         .map(|n| beam_ref_to_id(&n.value))
         .collect();
-    let params: Vec<String> = decl.params.iter().map(|p| p.value.clone()).collect();
 
     let inputs = decl
         .inputs
         .iter()
-        .map(|t| render_template(t, lets))
+        .map(|t| render_load_time_template("inputs", t, lets, &params))
         .collect::<Result<Vec<_>, _>>()?;
     let outputs = decl
         .outputs
         .iter()
-        .map(|t| render_template(t, lets))
+        .map(|t| render_load_time_template("outputs", t, lets, &params))
         .collect::<Result<Vec<_>, _>>()?;
 
     for run_template in &decl.run {
@@ -633,9 +753,9 @@ fn build_beam(decl: &BeamDecl, lets: &Scope) -> Result<Beam, CoreError> {
     let cwd = decl
         .cwd
         .as_ref()
-        .map(|t| render_template(t, lets))
+        .map(|t| render_load_time_template("cwd", t, lets, &params))
         .transpose()?;
-    let executor = build_executor(decl.executor.as_ref(), lets)?;
+    let executor = build_executor(decl.executor.as_ref(), lets, &params)?;
 
     Ok(Beam {
         id: BeamId(decl.name.value.clone()),
@@ -662,7 +782,11 @@ fn build_beam(decl: &BeamDecl, lets: &Scope) -> Result<Beam, CoreError> {
     })
 }
 
-fn build_executor(decl: Option<&ExecutorDecl>, lets: &Scope) -> Result<ExecutorKind, CoreError> {
+fn build_executor(
+    decl: Option<&ExecutorDecl>,
+    lets: &Scope,
+    params: &[String],
+) -> Result<ExecutorKind, CoreError> {
     let Some(decl) = decl else {
         return Ok(ExecutorKind::Shell);
     };
@@ -673,27 +797,30 @@ fn build_executor(decl: Option<&ExecutorDecl>, lets: &Scope) -> Result<ExecutorK
     // field per the brief).
     let mut options = HashMap::new();
     for (key, value) in &decl.options {
-        options.insert(key.value.as_str(), render_template(value, lets)?);
+        options.insert(
+            key.value.as_str(),
+            render_load_time_template("executor options", value, lets, params)?,
+        );
     }
 
     match decl.name.value.as_str() {
         "shell" => Ok(ExecutorKind::Shell),
         "docker" => {
-            let image = options.remove("image").ok_or_else(|| CoreError {
-                message: "executor `docker` requires an `image` option".to_string(),
-                span: decl.name.span,
-                help: None,
-                source_id: ROOT_SOURCE_ID,
+            let image = options.remove("image").ok_or_else(|| {
+                CoreError::new(
+                    "executor `docker` requires an `image` option".to_string(),
+                    decl.name.span,
+                )
             })?;
             Ok(ExecutorKind::Docker { image })
         }
-        other => Err(CoreError {
-            message: format!("unknown executor `{other}`"),
-            span: decl.name.span,
-            help: suggest(other, ["shell", "docker"].into_iter())
-                .map(|c| format!("did you mean `{c}`?")),
-            source_id: ROOT_SOURCE_ID,
-        }),
+        other => {
+            let err = CoreError::new(format!("unknown executor `{other}`"), decl.name.span);
+            Err(match suggest(other, ["shell", "docker"].into_iter()) {
+                Some(c) => err.with_help(format!("did you mean `{c}`?")),
+                None => err,
+            })
+        }
     }
 }
 
@@ -716,11 +843,19 @@ mod tests {
     impl EnvVarGuard {
         fn absent(name: &'static str) -> Self {
             let previous = std::env::var(name).ok();
-            // SAFETY: this is the only test in this crate that touches
-            // process environment variables, and this crate spawns no
-            // other threads that read or write them, so there is no
-            // concurrent access for `set_var`/`remove_var`'s documented
-            // hazard to apply to.
+            // SAFETY: `set_var`/`remove_var` are `unsafe` because
+            // concurrently mutating and reading the process environment
+            // from different threads is unsound, and this test suite does
+            // not fully rule that out — `cargo test` runs test functions
+            // on multiple threads by default, and both the standard
+            // library and other crates can read the environment at any
+            // time (e.g. `RUST_BACKTRACE` on a panic). What *is* true,
+            // and is the actual basis for accepting this: no other test
+            // in this crate calls `set_var`/`remove_var`, so nothing here
+            // races another *write*, and `ALBA_TEST_PROFILE` is a name no
+            // other code in this process has any reason to read. This is
+            // the same trade-off most Rust test suites that need to touch
+            // environment variables accept, rather than eliminate.
             unsafe { std::env::remove_var(name) };
             Self { name, previous }
         }
@@ -789,5 +924,171 @@ beam deploy(target) { run "{target + '!'}" }
         )
         .unwrap();
         assert_eq!(project.beams[0].params, vec!["target".to_string()]);
+    }
+
+    /// Review finding #1: the branch a statically-known `if` condition
+    /// does *not* take must still be name-validated at load time — a
+    /// typo hiding there must not depend on which machine (or which
+    /// environment variable) the file happens to be loaded on.
+    #[test]
+    fn if_validates_the_not_taken_branch_too() {
+        let err = load_str(
+            r#"
+let flag = false
+beam b { run "{if flag then bogus else 'ok'}" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("unknown variable"));
+        assert!(err.message.contains("bogus"));
+    }
+
+    /// Review finding #2: a beam parameter is forbidden in load-time
+    /// fields (`cwd` here) even when a same-named file-level `let`
+    /// exists — the `let` must not silently stand in for it.
+    #[test]
+    fn load_time_field_rejects_parameter_even_when_shadowing_a_let() {
+        let err = load_str(
+            r#"
+let target = "prod"
+beam deploy(target) { cwd "{target}" run "echo {target}" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("beam parameters cannot be used"));
+        assert!(err.message.contains("cwd"));
+    }
+
+    /// Review finding #3: `env()` inside a deferred (`run`) template must
+    /// not actually be executed at load time — only its name/arity are
+    /// checked. A project with a beam referencing an unset environment
+    /// variable in `run` must still load successfully; the "not set"
+    /// failure belongs at schedule time, for whoever actually runs that
+    /// beam.
+    #[test]
+    fn env_in_run_template_is_not_read_at_load_time() {
+        let project =
+            load_str(r#"beam deploy { run "curl -H {env('ALBA_PROBE_TOKEN_XYZ')}" }"#).unwrap();
+        assert_eq!(project.beams[0].id.0, "deploy");
+    }
+
+    #[test]
+    fn env_without_default_errors_when_absent() {
+        let _guard = EnvVarGuard::absent("ALBA_TEST_ABSENT_XYZ");
+        let err = load_str(
+            r#"
+let x = env("ALBA_TEST_ABSENT_XYZ")
+beam b { run "x" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("is not set"));
+    }
+
+    #[test]
+    fn glob_validates_pattern_and_returns_it_unchanged() {
+        let project = load_str(
+            r#"
+let pattern = glob("src/**/*.rs")
+beam b { run "{pattern}" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].scope.get("pattern"),
+            Some(&Value::Str("src/**/*.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn glob_rejects_invalid_pattern() {
+        let err = load_str(
+            r#"
+let pattern = glob("[unclosed")
+beam b { run "x" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("invalid glob pattern"));
+    }
+
+    #[test]
+    fn binary_operators_evaluate_correctly() {
+        let project = load_str(
+            r#"
+let a = true
+let b = false
+let and_result = a && b
+let or_result = a || b
+let neq_result = a != b
+let concat_result = "foo" + "bar"
+beam x { run "ok" }
+"#,
+        )
+        .unwrap();
+        let scope = &project.beams[0].scope;
+        assert_eq!(scope.get("and_result"), Some(&Value::Bool(false)));
+        assert_eq!(scope.get("or_result"), Some(&Value::Bool(true)));
+        assert_eq!(scope.get("neq_result"), Some(&Value::Bool(true)));
+        assert_eq!(
+            scope.get("concat_result"),
+            Some(&Value::Str("foobar".to_string()))
+        );
+    }
+
+    #[test]
+    fn unknown_function_errors_with_help() {
+        let err = load_str(
+            r#"
+let x = evn("Y")
+beam b { run "x" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("unknown function"));
+        assert_eq!(err.help.as_deref(), Some("did you mean `env`?"));
+    }
+
+    #[test]
+    fn executor_docker_carries_image() {
+        let project =
+            load_str(r#"beam deploy { executor docker { image "registry/app:latest" } run "x" }"#)
+                .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Docker {
+                image: "registry/app:latest".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_executor_errors_with_help() {
+        let err = load_str(r#"beam deploy { executor dokcer { image "x" } run "y" }"#).unwrap_err();
+        assert!(err.message.contains("unknown executor"));
+        assert_eq!(err.help.as_deref(), Some("did you mean `docker`?"));
+    }
+
+    #[test]
+    fn unknown_variable_suggests_close_match() {
+        let err = load_str(
+            r#"
+let release = true
+beam b { run "{relase}" }
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.help.as_deref(), Some("did you mean `release`?"));
+    }
+
+    /// Review minor #5: `suggest`'s candidates commonly come from
+    /// `HashMap` iteration (`Scope::names`), whose order is randomized
+    /// per process — without an explicit tie-break, two equally-close
+    /// candidates could yield a different suggestion from run to run.
+    #[test]
+    fn suggest_breaks_distance_ties_alphabetically() {
+        // "hat" is Levenshtein distance 1 from both "cat" and "bat".
+        assert_eq!(suggest("hat", ["cat", "bat"].into_iter()), Some("bat"));
+        assert_eq!(suggest("hat", ["bat", "cat"].into_iter()), Some("bat"));
     }
 }
