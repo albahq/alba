@@ -13,19 +13,18 @@ use miette::{Diagnostic as MietteDiagnostic, GraphicalReportHandler, GraphicalTh
 use miette::{LabeledSpan, NamedSource, SourceCode, SourceSpan};
 use std::fmt;
 
-use crate::lexer::LexError;
 use crate::parser::ParseError;
 use crate::token::Span;
 
 /// A renderable diagnostic: a message, a label on the offending span, and
-/// optional help text. Built from a [`ParseError`] (via
-/// [`ParseError::into_diagnostic`]) or a [`LexError`] (via [`From`]).
+/// optional help text. Built from a [`ParseError`] via
+/// [`ParseError::into_diagnostic`].
 ///
 /// Deliberately does not carry the source text or a display path: those are
 /// supplied separately to [`render_diagnostic`], matching how a caller
 /// (typically a CLI reading a file) already has both on hand and shouldn't
 /// need to clone the source into every error it produces.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Diagnostic {
     message: String,
     span: SourceSpan,
@@ -83,19 +82,6 @@ impl ParseError {
     /// practice.
     pub fn into_diagnostic(self) -> Diagnostic {
         Diagnostic::new(self.message, self.span, self.help)
-    }
-}
-
-impl From<LexError> for Diagnostic {
-    /// Converts a raw [`LexError`] into a renderable [`Diagnostic`]
-    /// directly, for a caller that has one without going through
-    /// [`ParseError`]. In practice every lex error reaching a caller of
-    /// this crate already went through `parser::tokenize` and became a
-    /// `ParseError`, but this conversion is a reasonable, cheap-to-maintain
-    /// counterpart to `ParseError::into_diagnostic` for the type the brief
-    /// names as consumed.
-    fn from(err: LexError) -> Self {
-        Diagnostic::new(err.message, err.span, None)
     }
 }
 
@@ -186,15 +172,5 @@ mod tests {
 
         assert!(!rendered.is_empty());
         assert!(rendered.contains("Beamfile"));
-    }
-
-    #[test]
-    fn lex_error_converts_directly_into_a_diagnostic() {
-        let err = crate::Lexer::new("beam @ {")
-            .find_map(Result::err)
-            .expect("expected a lex error");
-        let diagnostic: Diagnostic = err.into();
-        let rendered = render_diagnostic("beam @ {", "Beamfile", &diagnostic);
-        assert!(rendered.contains('@'));
     }
 }
