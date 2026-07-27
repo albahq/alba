@@ -1,0 +1,5 @@
+# Rust
+/target
+
+# Superpowers transient working state
+.superpowers/
