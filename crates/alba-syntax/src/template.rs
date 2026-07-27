@@ -38,7 +38,12 @@
 //! `{}` (nothing between the braces) is rejected as an "empty
 //! interpolation" error. A `{` with no matching `}` before the end of the
 //! string is rejected as an "unclosed interpolation" error, spanning just
-//! the offending `{`.
+//! the offending `{` — but only when the body genuinely never closes. A
+//! real lex error inside the body (an unexpected character, an
+//! unterminated nested string, ...) is propagated as itself, at its own
+//! precise span, rather than swallowed and misreported as "unclosed
+//! interpolation": the interpolation *is* syntactically closed in that
+//! case, and "unclosed" would send a reader to the wrong byte.
 
 use crate::expr::Expr;
 use crate::lexer::Lexer;
@@ -67,21 +72,51 @@ pub enum TemplatePart {
 /// it were the whole world: spans in the result are 0-based byte offsets
 /// into `source` itself. Use [`parse_template_at`] when the literal is
 /// embedded in a larger file and spans must land in that original source.
+///
+/// This is a real public entry point, not just a test helper, so it holds
+/// itself to a public API's input contract: `source` is lexed first (the
+/// same way `parser::parse` lexes a whole file), and anything other than
+/// exactly one string literal followed by end of input — an empty string,
+/// unquoted text, a bad escape, an unterminated literal, trailing
+/// content, and so on — is rejected with a `ParseError` rather than
+/// panicking or silently misparsing. That validation is what lets
+/// [`parse_template_at`] below assume its `span` always names a string
+/// the lexer already accepted.
 pub fn parse_template(source: &str) -> Result<StringTemplate, ParseError> {
-    parse_template_at(source, Span::new(0, source.len()))
+    let tokens = crate::parser::tokenize(source)?;
+    match &tokens[..] {
+        [
+            Token {
+                kind: TokenKind::Str(_),
+                span,
+            },
+            Token {
+                kind: TokenKind::Eof,
+                ..
+            },
+        ] => parse_template_at(source, *span),
+        _ => Err(ParseError {
+            message: "expected a single string literal".to_string(),
+            span: Span::new(0, source.len()),
+            help: None,
+        }),
+    }
 }
 
 /// Parses the string literal at `span` (including its surrounding quotes)
 /// within `full_source` into a [`StringTemplate`], with every span in the
 /// result a byte offset into `full_source`.
 ///
-/// `span` is always the span of a string literal the lexer already
-/// tokenized successfully once — either the original top-level token, or
+/// `span` must be the span of a string literal the lexer has already
+/// tokenized successfully: either the original top-level token, a literal
+/// [`parse_template`] validated by lexing `full_source` itself, or
 /// (recursively) a nested string literal found while re-lexing an
-/// interpolation body below. Either way, the lexer already validated its
+/// interpolation body below. In every case the lexer already validated its
 /// escapes and its closing quote, so decoding them again here can never
 /// fail; the `unreachable!` in the escape match documents that invariant
-/// rather than guarding against it.
+/// rather than guarding against it. Callers that cannot guarantee this —
+/// i.e. anyone outside this crate — should go through [`parse_template`]
+/// instead, which lexes first.
 pub(crate) fn parse_template_at(
     full_source: &str,
     span: Span,
@@ -175,7 +210,24 @@ fn scan_interpolation(
             // parser.rs); drop them and keep scanning.
             Some(Ok(tok)) if tok.kind == TokenKind::Newline => {}
             Some(Ok(tok)) => tokens.push(shift(tok, body_start)),
-            Some(Err(_)) | None => break,
+            // A real lex error (e.g. an unexpected character, or an
+            // unterminated nested string) is the actual fault here, and a
+            // far more precise diagnosis than "unclosed interpolation" —
+            // propagate it, shifted onto `full_source`, instead of
+            // discarding it and falling through to that generic message.
+            Some(Err(e)) => {
+                return Err(ParseError {
+                    message: e.message,
+                    span: shift_span(e.span, body_start),
+                    help: None,
+                });
+            }
+            // The lexer only ever yields `None` after it has already
+            // yielded `Eof` once (see `Lexer`'s own doc comment), and the
+            // arm above already breaks on that `Eof` — so this is not
+            // reachable in practice. Treated the same as running out of
+            // input, for defense in depth rather than `unreachable!()`.
+            None => break,
         }
     }
 
@@ -195,26 +247,52 @@ fn scan_interpolation(
         });
     }
 
-    // A synthetic Eof so the ordinary Parser machinery can confirm the
-    // body is exactly one expression with nothing trailing before `}`.
-    let eof_span = Span::new(close_end - 1, close_end - 1);
+    // A synthetic Eof — spanning the closing `}` itself — so the ordinary
+    // Parser machinery can confirm the body is exactly one expression with
+    // nothing trailing before `}`. Should an error land exactly on this
+    // sentinel (e.g. `{b +}`, where an operand is missing right before the
+    // brace), `describe`'s generic "end of input" phrasing would be a lie —
+    // the `}` is right there — so `fixup_eof_message` corrects it.
+    let eof_span = Span::new(close_end - 1, close_end);
     tokens.push(Token::new(TokenKind::Eof, eof_span));
 
     let mut parser = Parser::new(tokens, full_source);
-    let expr = parser.parse_expr()?;
+    let expr = parser
+        .parse_expr()
+        .map_err(|err| fixup_eof_message(err, eof_span))?;
     if !parser.is_eof() {
         return Err(parser.unexpected("`}`"));
     }
     Ok((expr, close_end))
 }
 
+/// Rewrites an error's "found end of input" phrasing to name the
+/// interpolation's closing `}` instead, when the error's span is exactly
+/// `eof_span` (the synthetic sentinel `scan_interpolation` feeds the
+/// sub-parser). Every other error — including the `!parser.is_eof()`
+/// check above, which only ever fires on a real trailing token — is
+/// returned unchanged.
+fn fixup_eof_message(mut err: ParseError, eof_span: Span) -> ParseError {
+    if err.span == eof_span {
+        err.message = err
+            .message
+            .replacen(crate::parser::EOF_DESCRIPTION, "`}`", 1);
+    }
+    err
+}
+
 /// Shifts a token lexed from a bounded sub-slice of `full_source` so its
 /// span points at its real, absolute position in `full_source`.
 fn shift(token: Token, offset: usize) -> Token {
-    Token::new(
-        token.kind,
-        Span::new(token.span.start + offset, token.span.end + offset),
-    )
+    Token::new(token.kind, shift_span(token.span, offset))
+}
+
+/// Shifts a span computed against a bounded sub-slice of `full_source` (as
+/// `scan_interpolation`'s sub-lexer produces, both for tokens and for its
+/// own lex errors) onto that slice's real, absolute position in
+/// `full_source`.
+fn shift_span(span: Span, offset: usize) -> Span {
+    Span::new(span.start + offset, span.end + offset)
 }
 
 #[cfg(test)]
@@ -238,5 +316,67 @@ mod tests {
     fn rejects_unclosed_interpolation() {
         let err = crate::parse(r#"beam x { run "echo {oops" }"#).unwrap_err();
         assert!(err.message.contains("unclosed interpolation"));
+    }
+
+    #[test]
+    fn unclosed_interpolation_span_points_at_the_open_brace() {
+        let err = parse_template(r#""a{oops""#).unwrap_err();
+        assert_eq!(err.span, Span::new(2, 3));
+        assert!(err.message.contains("unclosed interpolation"));
+    }
+
+    #[test]
+    fn empty_interpolation_span_covers_both_braces() {
+        let err = parse_template(r#""a{}b""#).unwrap_err();
+        assert_eq!(err.span, Span::new(2, 4));
+        assert!(err.message.contains("empty interpolation"));
+    }
+
+    /// A syntactically closed interpolation whose body contains a real lex
+    /// error (an unexpected character) must report that error, at the
+    /// character's own span — not get misdiagnosed as "unclosed
+    /// interpolation" just because the sub-lexer that's hunting for the
+    /// closing `}` happened to fail before reaching one.
+    #[test]
+    fn interpolation_reports_the_real_lex_error_not_unclosed() {
+        let err = parse_template(r#""a{b @ c}""#).unwrap_err();
+        assert_eq!(err.span, Span::new(5, 6));
+        assert!(err.message.contains('@'));
+        assert!(!err.message.contains("unclosed"));
+    }
+
+    #[test]
+    fn missing_operand_before_close_brace_names_the_brace_not_end_of_input() {
+        let err = parse_template(r#""a{b +}""#).unwrap_err();
+        assert_eq!(err.span, Span::new(6, 7));
+        assert!(err.message.contains('}'));
+        assert!(!err.message.contains("end of input"));
+    }
+
+    #[test]
+    fn rejects_empty_input_instead_of_panicking() {
+        assert!(parse_template("").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_escape_instead_of_panicking() {
+        let err = parse_template(r#""a\qb""#).unwrap_err();
+        assert!(err.message.contains("unknown escape"));
+    }
+
+    #[test]
+    fn rejects_unquoted_text_instead_of_silently_truncating() {
+        assert!(parse_template("hello").is_err());
+    }
+
+    #[test]
+    fn rejects_unterminated_string_instead_of_silently_truncating() {
+        let err = parse_template(r#""ab\"#).unwrap_err();
+        assert!(err.message.contains("unterminated string"));
+    }
+
+    #[test]
+    fn rejects_trailing_content_after_the_string_literal() {
+        assert!(parse_template(r#""a" "b""#).is_err());
     }
 }
