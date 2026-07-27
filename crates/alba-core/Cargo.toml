@@ -8,3 +8,6 @@ license.workspace = true
 alba-syntax = { path = "../alba-syntax" }
 glob.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

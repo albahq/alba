@@ -1,17 +1,62 @@
 //! [`CoreError`]: the single error type produced while evaluating a
 //! Beamfile's AST into a [`crate::Project`].
 
+use std::cell::Cell;
+
 use alba_syntax::Span;
 
 use crate::model::SourceId;
 
-/// The `SourceId` every error and beam produced by this crate's
-/// single-file loading (`load_str`) carries. Multi-file loading (Task 7's
-/// real `load_project` entry point) will assign distinct ids per imported
-/// file instead of this constant — and because [`CoreError::new`] is the
-/// single place that reaches for it, that change is a one-line edit here
-/// rather than a search-and-replace across every error site.
+/// The `SourceId` this crate's single-file loading (`load_str`) always
+/// assigns to its one file, and the id `loader::load_project` always
+/// assigns to the root Beamfile (the first file registered in a
+/// [`crate::loader::SourceMap`] is always id 0).
 pub(crate) const ROOT_SOURCE_ID: SourceId = SourceId(0);
+
+thread_local! {
+    /// The `SourceId` of whichever file is currently being evaluated on
+    /// this thread. [`CoreError::new`] and `Beam`'s construction
+    /// (`current_source_id`) both read this instead of taking an explicit
+    /// parameter, so that stamping the right id is a change made in one
+    /// place ([`SourceIdScope::enter`]) rather than a parameter threaded
+    /// through every one of `eval.rs`'s error-construction sites.
+    static CURRENT_SOURCE: Cell<SourceId> = const { Cell::new(ROOT_SOURCE_ID) };
+}
+
+/// The `SourceId` every [`CoreError`] and `Beam` built right now will be
+/// stamped with. See [`SourceIdScope`].
+pub(crate) fn current_source_id() -> SourceId {
+    CURRENT_SOURCE.with(Cell::get)
+}
+
+/// RAII guard that sets this thread's "currently loading" [`SourceId`] to
+/// `id` for its lifetime, restoring the previous value when it drops
+/// (including on an early return via `?`, or a panic unwind).
+///
+/// The loader holds one of these per file it evaluates. Because imports
+/// are loaded depth-first and a recursive call's guard only drops once
+/// that file (and everything it imports) has been fully evaluated, nested
+/// guards naturally restore the importing file's id afterward — plain
+/// stack discipline, no separate stack type needed. `load_str`'s
+/// single-file front door also enters one (pinned to [`ROOT_SOURCE_ID`])
+/// so its behavior doesn't depend on whatever a previous call on the same
+/// thread left behind.
+pub(crate) struct SourceIdScope {
+    previous: SourceId,
+}
+
+impl SourceIdScope {
+    pub(crate) fn enter(id: SourceId) -> Self {
+        let previous = CURRENT_SOURCE.with(|cell| cell.replace(id));
+        Self { previous }
+    }
+}
+
+impl Drop for SourceIdScope {
+    fn drop(&mut self) {
+        CURRENT_SOURCE.with(|cell| cell.set(self.previous));
+    }
+}
 
 /// An error produced while evaluating a Beamfile: an unknown variable, a
 /// type mismatch, an unresolvable built-in call, and so on. Always carries
@@ -28,16 +73,17 @@ pub struct CoreError {
 }
 
 impl CoreError {
-    /// A new error with no help text, at this crate's current single-file
-    /// `SourceId`. The one place every `eval.rs` error-construction site
-    /// goes through, instead of repeating the `CoreError { .. }` literal
-    /// (including its `source_id`) at each of them.
+    /// A new error with no help text, stamped with whichever file is
+    /// currently being loaded (see [`SourceIdScope`]). The one place every
+    /// error-construction site in this crate goes through, instead of
+    /// repeating the `CoreError { .. }` literal (including its
+    /// `source_id`) at each of them.
     pub(crate) fn new(message: impl Into<String>, span: Span) -> Self {
         Self {
             message: message.into(),
             span,
             help: None,
-            source_id: ROOT_SOURCE_ID,
+            source_id: current_source_id(),
         }
     }
 

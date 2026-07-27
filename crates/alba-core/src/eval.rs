@@ -44,13 +44,14 @@
 //! effect (it only compiles a pattern), so it stays eagerly validated.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 
 use alba_syntax::{
-    BeamDecl, BeamRef, BinOp, ExecutorDecl, Expr, File, Span, Spanned, StringTemplate, TemplatePart,
+    BeamDecl, BeamRef, BinOp, ExecutorDecl, Expr, File, ParseError, Span, Spanned, StringTemplate,
+    TemplatePart,
 };
 
-use crate::error::{CoreError, ROOT_SOURCE_ID};
+use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
 use crate::model::{Beam, BeamId, ExecutorKind, Project, Value};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
@@ -669,30 +670,47 @@ fn render_load_time_template(
     render_template(template, lets)
 }
 
-/// Parses `source` as a single Beamfile and evaluates it into a
-/// [`Project`]: file-level `let`s in order, then every `beam` declaration.
-/// Single-file loading only (see the crate's module doc comments) — no
-/// `import` resolution, which is Task 7's job.
-///
-/// `#[doc(hidden)]` rather than private: Task 7's loader tests and Task
-/// 10's engine tests reuse this exact helper (as `alba_core::load_str`)
-/// to build a `Project` from an inline source string without needing a
-/// real file on disk, but it isn't part of this crate's supported public
-/// API — real callers go through `alba_core::load_project` (Task 7)
-/// instead.
-#[doc(hidden)]
-pub fn load_str(source: &str) -> Result<Project, CoreError> {
-    let file = alba_syntax::parse(source).map_err(|e| {
-        let err = CoreError::new(e.message, e.span);
-        match e.help {
-            Some(help) => err.with_help(help),
-            None => err,
-        }
-    })?;
-    build_project(&file)
+/// Converts a lexer/parser failure into a [`CoreError`], stamped with
+/// whichever file is currently being loaded (see [`SourceIdScope`]).
+/// Shared by [`load_str`] and [`crate::loader`], so a parse failure looks
+/// identical regardless of whether it came from the single-file front door
+/// or from a file loaded as part of an `import` chain.
+pub(crate) fn parse_error_to_core_error(e: ParseError) -> CoreError {
+    let err = CoreError::new(e.message, e.span);
+    match e.help {
+        Some(help) => err.with_help(help),
+        None => err,
+    }
 }
 
-fn build_project(file: &File) -> Result<Project, CoreError> {
+/// Parses `source` as a single Beamfile and evaluates it into a
+/// [`Project`]: file-level `let`s in order, then every `beam` declaration.
+/// Single-file loading only — no `import` resolution, which is
+/// [`crate::loader::load_project`]'s job.
+///
+/// `#[doc(hidden)]` rather than private: `loader`'s tests and the future
+/// engine's tests reuse this exact helper (as `alba_core::load_str`) to
+/// build a `Project` from an inline source string without needing a real
+/// file on disk, but it isn't part of this crate's supported public API —
+/// real callers go through `alba_core::load_project` instead.
+///
+/// Every beam this produces carries `SourceId(0)` and a `dir` of `"."`,
+/// matching [`crate::loader::load_project`]'s convention for the root file
+/// but without a real file on disk to resolve `cwd` against.
+#[doc(hidden)]
+pub fn load_str(source: &str) -> Result<Project, CoreError> {
+    let _scope = SourceIdScope::enter(ROOT_SOURCE_ID);
+    let file = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
+    build_project(&file, Path::new("."))
+}
+
+/// Evaluates an already-parsed [`File`] into a [`Project`]: file-level
+/// `let`s in order, then every `beam` declaration, each stamped with
+/// `dir` and with whichever `SourceId` is currently active (see
+/// [`SourceIdScope`]). Does not resolve `file.imports` — that recursion,
+/// and the namespace prefixing it requires, belongs to
+/// [`crate::loader::load_project`], which calls this once per file.
+pub(crate) fn build_project(file: &File, dir: &Path) -> Result<Project, CoreError> {
     let mut lets = Scope::empty();
     for binding in &file.lets {
         let value = eval_expr(&binding.value, &lets)?;
@@ -702,7 +720,7 @@ fn build_project(file: &File) -> Result<Project, CoreError> {
     let beams = file
         .beams
         .iter()
-        .map(|decl| build_beam(decl, &lets))
+        .map(|decl| build_beam(decl, &lets, dir))
         .collect::<Result<Vec<_>, _>>()?;
 
     let default = file.default.as_ref().map(|d| BeamId(d.value.clone()));
@@ -717,7 +735,7 @@ fn beam_ref_to_id(r: &BeamRef) -> BeamId {
     }
 }
 
-fn build_beam(decl: &BeamDecl, lets: &Scope) -> Result<Beam, CoreError> {
+fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreError> {
     let params: Vec<String> = decl.params.iter().map(|p| p.value.clone()).collect();
 
     let description = decl
@@ -773,11 +791,9 @@ fn build_beam(decl: &BeamDecl, lets: &Scope) -> Result<Beam, CoreError> {
         cwd,
         executor,
         allow_failure: decl.allow_failure,
-        // No real file on disk in single-file loading (Task 7 assigns
-        // real directories once `import`s make one meaningful).
-        dir: PathBuf::from("."),
+        dir: dir.to_path_buf(),
         span: decl.span,
-        source: ROOT_SOURCE_ID,
+        source: current_source_id(),
         scope: lets.clone(),
     })
 }
