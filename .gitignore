@@ -3,3 +3,6 @@
 
 # Superpowers transient working state
 .superpowers/
+
+# JetBrains IDEs
+.idea/
