@@ -4,8 +4,13 @@
 //! exactly once, in `main.rs`, before any command runs: every command here
 //! is handed an already-loaded [`alba_core::Project`] and only formats its
 //! own success output. This keeps the "how do we load and report a load
-//! failure" logic in one place shared by `check`, bare listing, and (once
-//! Task 12 adds it) `run`.
+//! failure" logic in one place shared by `check`, bare listing, and `run`.
+//!
+//! `run` is the one command that can still fail after loading succeeded (a
+//! target that does not exist, an executor Alba does not implement yet), so
+//! it is also handed the `SourceMap` it needs to render such a failure the
+//! same way `main.rs` renders a load failure.
 
 pub mod check;
 pub mod list;
+pub mod run;

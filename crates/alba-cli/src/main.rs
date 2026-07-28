@@ -4,19 +4,20 @@
 //! Loading happens exactly once here, before any subcommand runs — see the
 //! `commands` module doc comment for why that split exists. A load failure
 //! (missing file, parse error, validation error) is rendered and reported
-//! from this one place, so every command downstream only has a success
-//! path left to implement.
+//! from this one place, so no command downstream has to repeat it.
 
 mod args;
 mod commands;
 mod exit;
+mod render;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+use alba_core::{CoreError, SourceMap};
 use clap::Parser;
 
-use args::{Cli, Command};
+use args::{Cli, Command, RunFlags};
 use exit::EXIT_ALBA_ERROR;
 
 fn main() {
@@ -33,10 +34,10 @@ fn run(cli: Cli) -> i32 {
         }
     };
 
-    // `sources` is unused by every command in this task (`check` and bare
-    // listing only need `project`); Task 12's `run` will need it to render
-    // schedule-time diagnostics, at which point this becomes `sources`.
-    let (project, _sources) = match alba_core::load_project(&beamfile) {
+    // `sources` outlives loading because `run` needs it too: a schedule-time
+    // failure (an unknown target, a `run` template that will not render)
+    // carries a span into a Beamfile that only this map can resolve.
+    let (project, sources) = match alba_core::load_project(&beamfile) {
         Ok(loaded) => loaded,
         Err(err) => {
             eprint!("{}", render_load_error(err));
@@ -46,13 +47,16 @@ fn run(cli: Cli) -> i32 {
 
     match cli.command {
         Some(Command::Check) => commands::check::run(&project),
+        Some(Command::Run {
+            beam,
+            params,
+            flags,
+        }) => commands::run::run(&project, &sources, &alba_core::BeamId(beam), params, &flags),
+        // Bare `alba`: run the declared `default` with every run flag left
+        // at its default, or fall back to listing when none is declared.
         None => match &project.default {
-            // TODO(task-12): replace with a real dispatch to `run <target>`.
-            // The only contract later tests may rely on until then is that
-            // the target's name appears in the output.
             Some(target) => {
-                println!("would run `{}`", target.0);
-                0
+                commands::run::run(&project, &sources, target, Vec::new(), &RunFlags::default())
             }
             None => commands::list::run(&project),
         },
@@ -108,13 +112,22 @@ fn resolve_beamfile(file: Option<&Path>) -> Result<PathBuf, String> {
     ))
 }
 
-/// Renders a [`alba_core::LoadError`] the same way the design intends every
-/// spanned failure to look: the source line, a caret under the exact span,
-/// and help text, via `alba_syntax::render_diagnostic`. Falls back to the
-/// bare message on the (currently unreachable in practice) case where the
-/// error's `source_id` was never registered in `sources`.
+/// Renders a [`alba_core::LoadError`] by unpacking it into the error and
+/// the sources it was produced alongside.
 fn render_load_error(err: alba_core::LoadError) -> String {
     let alba_core::LoadError { error, sources } = err;
+    render_core_error(error, &sources)
+}
+
+/// Renders a [`CoreError`] the same way the design intends every spanned
+/// failure to look: the source line, a caret under the exact span, and help
+/// text, via `alba_syntax::render_diagnostic`. Falls back to the bare
+/// message on the (currently unreachable in practice) case where the
+/// error's `source_id` was never registered in `sources`.
+///
+/// Shared with `commands::run`, which renders the same kind of error when
+/// it comes back from the engine at schedule time rather than from loading.
+pub(crate) fn render_core_error(error: CoreError, sources: &SourceMap) -> String {
     let source_id = error.source_id;
     let diagnostic = error.into_diagnostic();
 
@@ -130,9 +143,10 @@ fn render_load_error(err: alba_core::LoadError) -> String {
 /// user has not opted out via `NO_COLOR` (https://no-color.org). Checked
 /// explicitly here rather than left to `owo-colors`' own ambient detection,
 /// which does not account for `NO_COLOR` and would otherwise make every
-/// `assert_cmd` test in this task (and Task 12's, which reuses this same
-/// function for per-beam colours) compare captured output against escape
-/// codes on top of whatever it actually asserts.
+/// `assert_cmd` test compare captured output against escape codes on top
+/// of whatever it actually asserts. The one gate the whole binary shares:
+/// the beam listing's dimmed placeholder and the interleaved renderer's
+/// per-beam colours both ask it rather than detecting anything themselves.
 pub(crate) fn color_enabled() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
