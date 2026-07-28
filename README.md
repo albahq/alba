@@ -160,6 +160,10 @@ inputs would be, such as an umbrella beam that only reports on the beams
 it needs. If a beam declares `outputs` and one of them is missing from
 disk, the beam also reruns even if its inputs are otherwise unchanged: a
 cache entry only stands in for work whose result is actually still there.
+Both `inputs` and `outputs` patterns resolve relative to the directory of
+the Beamfile that declares the beam, never to the beam's `cwd`, so a beam
+with `cwd "sub"` writing `out.txt` must declare it as `outputs
+["sub/out.txt"]`.
 
 `alba run <beam> --force` ignores the cache on the way in: the beam runs
 regardless of what changed. If it succeeds, its result is written back to
