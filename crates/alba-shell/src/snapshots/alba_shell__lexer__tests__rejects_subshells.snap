@@ -2,7 +2,7 @@
 source: crates/alba-shell/src/lexer.rs
 expression: "err(\"(cd sub; make)\").render(\"(cd sub; make)\")"
 ---
-error: subshells and function definitions are not supported
+error: subshells, function definitions, and `case` patterns are not supported
   │ (cd sub; make)
   │ ^
   = help: move the logic into a script invoked by `run`, or declare `executor system_shell` on this beam

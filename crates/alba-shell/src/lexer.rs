@@ -68,7 +68,7 @@ impl<'a> Lexer<'a> {
                     return Err(self.error(
                         pos,
                         pos + 1,
-                        "subshells and function definitions are not supported",
+                        "subshells, function definitions, and `case` patterns are not supported",
                         Some(OUT_OF_SUBSET_HELP),
                     ));
                 }
