@@ -93,65 +93,94 @@ pub fn validate_graph(project: &Project) -> Result<(), CoreError> {
         if done.contains(beam.id.0.as_str()) {
             continue;
         }
-        let mut path: Vec<&str> = Vec::new();
-        detect_cycle(beam, &by_id, &mut done, &mut path)?;
+        detect_cycle(beam, &by_id, &mut done)?;
     }
 
     Ok(())
 }
 
-/// Depth-first search from `beam`, following `needs` edges, tracking the
-/// current DFS branch in `path` (ids "on the stack" for this walk, not the
+/// One entry of [`detect_cycle`]'s explicit search stack: either a beam to
+/// descend into, or the marker that pops a beam back off the current path
+/// once its whole subtree has been explored (what returning from a
+/// recursive call would have done).
+enum Step<'a> {
+    Enter(&'a Beam),
+    Leave(&'a str),
+}
+
+/// Depth-first search from `root`, following `needs` edges, tracking the
+/// current branch in `path` (ids "on the stack" for this walk, not the
 /// whole project). `done` records beams whose subtree has already been
 /// fully explored (by this call or an earlier one from
 /// [`validate_graph`]'s outer loop), so a beam reachable from more than
 /// one root is never walked twice.
 ///
-/// A cycle is detected the instant `beam`'s own id is already present in
+/// The search keeps its own heap-allocated stack rather than recursing per
+/// `needs` edge. Depth here is a property of the *Beamfile*, not of Alba: a
+/// chain of beams each needing the next, declared in that order, descends
+/// as deep as the chain is long. Recursion made that a stack overflow —
+/// which aborts the process outright rather than panicking, so a library
+/// would take its caller down with no diagnostic at all.
+///
+/// A cycle is detected the instant a beam's own id is already present in
 /// `path`: the reported cycle is `path[pos..]` (the loop itself, starting
-/// from where it closes) with `beam`'s id appended once more to show it
-/// closing — not the full DFS path from whatever root started this walk.
-/// For `build → codegen → build`, `path` at the point of detection is
-/// `["build", "codegen"]` and `beam` is `build` again, so `pos` is `0` and
-/// the reported cycle is exactly `["build", "codegen", "build"]`. A
-/// self-referencing beam (`a` needing `a`) falls out of the same logic:
-/// `path` is `["a"]`, `beam` is `a`, `pos` is `0`, reported as `"a → a"`.
+/// from where it closes) with that id appended once more to show it
+/// closing — not the full path from whatever root started this walk. For
+/// `build → codegen → build`, `path` at the point of detection is
+/// `["build", "codegen"]` and the beam being entered is `build` again, so
+/// `pos` is `0` and the reported cycle is exactly
+/// `["build", "codegen", "build"]`. A self-referencing beam (`a` needing
+/// `a`) falls out of the same logic: `path` is `["a"]`, the beam is `a`,
+/// `pos` is `0`, reported as `"a → a"`.
+///
+/// Visiting order matches what recursion produced, so which of several
+/// independent cycles gets reported does not change: a beam's `needs` are
+/// pushed in reverse so the first entry is the first one entered.
 ///
 /// The error is stamped with the closing beam's own `span`/`source` (see
-/// [`validate_graph`]'s doc comment) — the model doesn't carry a span for
-/// an individual `needs` entry, only for the beam declaration as a whole,
-/// so that's the most precise location available.
+/// [`validate_graph`]'s doc comment).
 fn detect_cycle<'a>(
-    beam: &'a Beam,
+    root: &'a Beam,
     by_id: &HashMap<&'a str, &'a Beam>,
     done: &mut HashSet<&'a str>,
-    path: &mut Vec<&'a str>,
 ) -> Result<(), CoreError> {
-    let id = beam.id.0.as_str();
+    let mut path: Vec<&'a str> = Vec::new();
+    let mut stack: Vec<Step<'a>> = vec![Step::Enter(root)];
 
-    if let Some(pos) = path.iter().position(|&on_stack| on_stack == id) {
-        let mut cycle: Vec<&str> = path[pos..].to_vec();
-        cycle.push(id);
-        return Err(CoreError::new(
-            format!("dependency cycle: {}", cycle.join(" → ")),
-            beam.span,
-        )
-        .with_source_id(beam.source));
-    }
+    while let Some(step) = stack.pop() {
+        let beam = match step {
+            Step::Leave(id) => {
+                path.pop();
+                done.insert(id);
+                continue;
+            }
+            Step::Enter(beam) => beam,
+        };
+        let id = beam.id.0.as_str();
 
-    if done.contains(id) {
-        return Ok(());
-    }
+        if let Some(pos) = path.iter().position(|&on_path| on_path == id) {
+            let mut cycle: Vec<&str> = path[pos..].to_vec();
+            cycle.push(id);
+            return Err(CoreError::new(
+                format!("dependency cycle: {}", cycle.join(" → ")),
+                beam.span,
+            )
+            .with_source_id(beam.source));
+        }
 
-    path.push(id);
-    for need in &beam.needs {
-        // Safe to index directly: `validate_graph`'s first pass already
-        // rejected any `needs` entry that doesn't resolve, and
-        // `execution_subgraph` never calls this function.
-        detect_cycle(by_id[need.0.as_str()], by_id, done, path)?;
+        if done.contains(id) {
+            continue;
+        }
+
+        path.push(id);
+        stack.push(Step::Leave(id));
+        for need in beam.needs.iter().rev() {
+            // Safe to index directly: `validate_graph`'s first pass already
+            // rejected any `needs` entry that doesn't resolve, and
+            // `execution_subgraph` never calls this function.
+            stack.push(Step::Enter(by_id[need.0.as_str()]));
+        }
     }
-    path.pop();
-    done.insert(id);
 
     Ok(())
 }
@@ -402,6 +431,59 @@ beam e { needs [d] run \"x\" }
         .unwrap();
         let ids = execution_subgraph(&project, &BeamId("e".into())).unwrap();
         assert_eq!(sorted(ids), vec!["a", "b", "c", "d", "e"]);
+    }
+
+    /// A chain declared so that every beam needs the one declared *after*
+    /// it: nothing is marked done ahead of the walk, so cycle detection
+    /// descends the full depth in one go. A recursive walk aborts the
+    /// process here — a stack overflow is not a panic, so no caller can
+    /// catch it — which is why the search keeps its own heap-allocated
+    /// stack.
+    #[test]
+    fn cycle_detection_survives_a_very_deep_chain() {
+        const DEPTH: usize = 10_000;
+
+        let mut source = String::new();
+        for index in 0..DEPTH - 1 {
+            source.push_str(&format!(
+                "beam b{index} {{ needs [b{}] run \"x\" }}\n",
+                index + 1
+            ));
+        }
+        source.push_str(&format!("beam b{} {{ run \"x\" }}\n", DEPTH - 1));
+
+        let project = load_str(&source).unwrap();
+
+        assert_eq!(project.beams.len(), DEPTH);
+    }
+
+    /// The same depth, closed into a cycle by its last beam: the reported
+    /// path must still be exact rather than truncated or reordered by the
+    /// iterative walk.
+    #[test]
+    fn a_cycle_at_the_bottom_of_a_deep_chain_is_reported_exactly() {
+        const DEPTH: usize = 5_000;
+
+        let mut source = String::new();
+        for index in 0..DEPTH - 1 {
+            source.push_str(&format!(
+                "beam b{index} {{ needs [b{}] run \"x\" }}\n",
+                index + 1
+            ));
+        }
+        source.push_str(&format!(
+            "beam b{} {{ needs [b{}] run \"x\" }}\n",
+            DEPTH - 1,
+            DEPTH - 2
+        ));
+
+        let err = load_str(&source).unwrap_err();
+
+        assert!(
+            err.message
+                .contains(&format!("b{} → b{} → b{}", DEPTH - 2, DEPTH - 1, DEPTH - 2))
+        );
+        assert!(!err.message.contains("b0 "));
     }
 
     /// Highest-risk item from the review: a cycle entirely among
