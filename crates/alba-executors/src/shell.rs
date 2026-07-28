@@ -12,6 +12,25 @@ use crate::{CommandSpec, ExecContext, ExecError, ExecResult, Executor, OutputLin
 /// before escalating to a forceful kill.
 const GRACE_PERIOD: Duration = Duration::from_secs(5);
 
+/// How long to wait for the stdout/stderr reader tasks to observe EOF,
+/// after the child has exited or been killed, before giving up on further
+/// output and returning anyway.
+///
+/// This is a backstop independent of cancellation: even an uncancelled
+/// command that merely backgrounds something (`sleep 30 &`) can leave a
+/// descendant holding the inherited stdout/stderr pipes open indefinitely,
+/// which would otherwise block `execute()` forever waiting for an EOF that
+/// never comes. Combined with putting the child in its own process group
+/// and signalling the whole group on cancellation (see `build_command`
+/// and `send_terminate_signal`), this should essentially never fire in
+/// practice — it exists for descendants that escape the group (a
+/// double-forked/daemonized process) or simply outlive an uncancelled run.
+/// Chosen short relative to [`GRACE_PERIOD`] because it is not part of the
+/// "ask nicely, then insist" cancellation escalation; it only bounds how
+/// long we wait to flush trailing output that should already be sitting
+/// in the pipe by the time the process we care about has exited.
+const DRAIN_PERIOD: Duration = Duration::from_secs(2);
+
 /// Runs commands via `sh -c` (unix) or `powershell -NoProfile -Command`
 /// (windows), streaming stdout/stderr line-by-line and honouring
 /// [`ExecContext::cancel`] with a graceful-then-forceful termination.
@@ -33,8 +52,10 @@ impl Executor for SystemShellExecutor {
             .take()
             .expect("child spawned with piped stderr");
 
-        let stdout_task = tokio::spawn(stream_lines(stdout, Stream::Stdout, ctx.output.clone()));
-        let stderr_task = tokio::spawn(stream_lines(stderr, Stream::Stderr, ctx.output.clone()));
+        let mut stdout_task =
+            tokio::spawn(stream_lines(stdout, Stream::Stdout, ctx.output.clone()));
+        let mut stderr_task =
+            tokio::spawn(stream_lines(stderr, Stream::Stderr, ctx.output.clone()));
 
         let status = tokio::select! {
             result = child.wait() => result.map_err(|error| ExecError {
@@ -45,9 +66,20 @@ impl Executor for SystemShellExecutor {
 
         // The child has exited (or been reaped after termination), so its
         // pipes are closing/closed; let the reader tasks drain whatever is
-        // left before reporting the result.
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
+        // left, but only for up to DRAIN_PERIOD total — see its doc
+        // comment for why this must be bounded rather than an
+        // unconditional await. Both tasks share a single DRAIN_PERIOD
+        // budget (joined concurrently, not one after another): awaiting
+        // them sequentially would double the worst-case wait to
+        // `2 * DRAIN_PERIOD` for no benefit, since both pipes can stall
+        // for the same reason (a surviving descendant) at the same time.
+        let drain = async {
+            let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        };
+        if tokio::time::timeout(DRAIN_PERIOD, drain).await.is_err() {
+            stdout_task.abort();
+            stderr_task.abort();
+        }
 
         Ok(ExecResult {
             exit_code: status.code().unwrap_or(-1),
@@ -60,6 +92,14 @@ fn build_command(cmd: &CommandSpec) -> Command {
     let mut command = {
         let mut command = Command::new("sh");
         command.arg("-c").arg(&cmd.command);
+        // Make this child the leader of its own process group (pgid ==
+        // its pid) instead of inheriting ours. A beam's command is often
+        // compound (`a && b`, `x & wait`, anything that backgrounds a
+        // watcher) — without its own group, cancellation could only ever
+        // signal the immediate `sh` process, leaving whatever it spawned
+        // running. See `send_terminate_signal`/`force_kill`, which signal
+        // the negated pid to reach the whole group.
+        command.process_group(0);
         command
     };
     #[cfg(windows)]
@@ -119,12 +159,22 @@ async fn stream_lines<R>(
 /// platform's graceful-stop request, wait up to [`GRACE_PERIOD`] for it to
 /// exit on its own, then escalate to an unconditional kill.
 ///
-/// On unix the graceful request is a real `SIGTERM`, distinct from the
-/// forceful `SIGKILL` used on escalation. Windows has no equivalent of
-/// `SIGTERM` for an arbitrary process — `TerminateProcess` (what
-/// `Child::start_kill` issues) is unconditional — so both steps use the
-/// same forceful termination there; the grace period is harmless but in
-/// practice never has anything left to wait out.
+/// On unix both steps target the child's whole process group (it was
+/// spawned as that group's leader — see `build_command`), so a compound
+/// or backgrounding command dies together with the process we directly
+/// hold, not just that one process. The graceful request is a real
+/// `SIGTERM`, distinct from the forceful `SIGKILL` used on escalation.
+///
+/// Windows has no equivalent of `SIGTERM`/process groups for an arbitrary
+/// process short of a Job object (`CREATE_NEW_PROCESS_GROUP` plus
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), which this crate does not set
+/// up: `TerminateProcess` (what `Child::start_kill` issues) is
+/// unconditional and reaches only the immediate child, not its
+/// descendants. Both steps use that same forceful, child-only termination
+/// on windows; the grace period is harmless but in practice never has
+/// anything left to wait out. This is a known, deliberate gap — a beam
+/// command on windows that backgrounds a descendant can outlive
+/// cancellation there. See also [`ExecContext::cancel`]'s doc comment.
 async fn terminate(child: &mut Child) -> Result<ExitStatus, ExecError> {
     send_terminate_signal(child);
 
@@ -133,9 +183,7 @@ async fn terminate(child: &mut Child) -> Result<ExitStatus, ExecError> {
             message: format!("failed to wait for cancelled child: {error}"),
         }),
         Err(_elapsed) => {
-            child.kill().await.map_err(|error| ExecError {
-                message: format!("failed to force-kill child after grace period: {error}"),
-            })?;
+            force_kill(child).await?;
             child.wait().await.map_err(|error| ExecError {
                 message: format!("failed to wait for force-killed child: {error}"),
             })
@@ -149,16 +197,40 @@ fn send_terminate_signal(child: &Child) {
     use nix::unistd::Pid;
 
     if let Some(pid) = child.id() {
-        // Best-effort: if the process already exited between us checking
-        // and sending, `kill` returning an error (ESRCH) is fine — the
-        // subsequent `wait` will observe the exit either way.
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        // The negated pid targets the whole process group this child
+        // leads (see `build_command`'s `process_group(0)`), not just the
+        // child itself. Best-effort: if the group already exited between
+        // us checking and sending, `kill` returning an error (ESRCH) is
+        // fine — the subsequent `wait` will observe the exit either way.
+        let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGTERM);
     }
 }
 
 #[cfg(windows)]
 fn send_terminate_signal(child: &mut Child) {
     let _ = child.start_kill();
+}
+
+/// The forceful escalation after [`GRACE_PERIOD`] elapses. On unix this is
+/// a group-wide `SIGKILL`, mirroring [`send_terminate_signal`]'s group-wide
+/// `SIGTERM`. On windows it is `Child::kill`, which only reaches the
+/// immediate child (see `terminate`'s doc comment for why).
+#[cfg(unix)]
+async fn force_kill(child: &Child) -> Result<(), ExecError> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn force_kill(child: &mut Child) -> Result<(), ExecError> {
+    child.kill().await.map_err(|error| ExecError {
+        message: format!("failed to force-kill child after grace period: {error}"),
+    })
 }
 
 #[cfg(test)]
