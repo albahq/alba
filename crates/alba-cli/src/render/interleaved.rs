@@ -4,10 +4,12 @@
 //! The default on a terminal, where seeing a long run make progress
 //! matters more than reading each beam's output as one block.
 
+use std::io;
+
 use alba_engine::RunEvent;
 use owo_colors::{AnsiColors, OwoColorize};
 
-use super::{Renderer, format_duration, print_summary, status_label};
+use super::{LineSink, Renderer, format_duration, print_summary, status_label};
 
 /// The colours beam ids cycle through. Six is enough to tell adjacent
 /// beams apart without reaching for colours that carry their own meaning
@@ -26,22 +28,29 @@ const SEPARATOR: &str = "\u{2502}";
 
 pub struct InterleavedRenderer {
     color: bool,
+    out: LineSink<io::Stdout>,
+    err: LineSink<io::Stderr>,
 }
 
 impl InterleavedRenderer {
     /// `color` comes from [`crate::color_enabled`] — the single TTY and
     /// `NO_COLOR` gate the whole binary shares.
     pub fn new(color: bool) -> Self {
-        Self { color }
+        Self {
+            color,
+            out: LineSink::stdout(),
+            err: LineSink::stderr(),
+        }
     }
 
     /// Prints one prefixed line on stdout.
-    fn line(&self, id: &str, text: &str) {
-        if self.color {
-            println!("{} {SEPARATOR} {text}", id.color(color_for(id)));
+    fn line(&mut self, id: &str, text: &str) {
+        let prefix = if self.color {
+            id.color(color_for(id)).to_string()
         } else {
-            println!("{id} {SEPARATOR} {text}");
-        }
+            id.to_string()
+        };
+        self.out.line(&format!("{prefix} {SEPARATOR} {text}"));
     }
 }
 
@@ -54,14 +63,14 @@ impl Renderer for InterleavedRenderer {
                 id,
                 status,
                 duration,
-            } => self.line(
-                &id.0,
+            } => {
                 // `in` rather than a second parenthesis: a status is
                 // already parenthesized (`failed (exit 7)`), and
                 // `failed (exit 7) (1.2s)` reads as two unrelated asides.
-                &format!("{} in {}", status_label(status), format_duration(*duration)),
-            ),
-            RunEvent::RunFinished { summary } => print_summary(summary),
+                let text = format!("{} in {}", status_label(status), format_duration(*duration));
+                self.line(&id.0, &text);
+            }
+            RunEvent::RunFinished { summary } => print_summary(&mut self.err, summary),
         }
     }
 }
