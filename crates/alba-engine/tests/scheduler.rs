@@ -387,7 +387,7 @@ beam all { needs [broken, other] run "step all" }
     );
     let reported = only(
         positions(events, |event| {
-            matches!(event, RunEvent::BeamOutput { id, line }
+            matches!(event, RunEvent::BeamOutput { id, line, .. }
                 if id.0 == "broken"
                     && line.stream == Stream::Stderr
                     && line.text.contains("ALBA_MISSING_VAR_XYZ"))
@@ -498,7 +498,7 @@ beam all { needs [broken, other] run "step all" }
     let events = &outcome.events;
     let reported = only(
         positions(events, |event| {
-            matches!(event, RunEvent::BeamOutput { id, line }
+            matches!(event, RunEvent::BeamOutput { id, line, .. }
                 if id.0 == "broken"
                     && line.stream == Stream::Stderr
                     && line.text.contains("failed to spawn `broken command`"))

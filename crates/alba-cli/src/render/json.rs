@@ -63,21 +63,27 @@ enum WireEvent<'a> {
     BeamStarted {
         beam: &'a str,
     },
+    BeamCached {
+        beam: &'a str,
+    },
     BeamOutput {
         beam: &'a str,
         stream: WireStream,
         text: &'a str,
+        replayed: bool,
     },
     BeamFinished {
         beam: &'a str,
         status: &'static str,
         /// Present only for a beam that actually ran and exited non-zero;
-        /// `null` for a success or a cancellation, which have no code.
+        /// `null` for a success, a cache hit, or a cancellation, which have
+        /// no code.
         exit_code: Option<i32>,
         duration_ms: u64,
     },
     RunFinished {
         succeeded: Vec<&'a str>,
+        cached: Vec<&'a str>,
         failed: Vec<&'a str>,
         failed_allowed: Vec<&'a str>,
         cancelled: Vec<&'a str>,
@@ -101,13 +107,15 @@ impl<'a> From<&'a RunEvent> for WireEvent<'a> {
     fn from(event: &'a RunEvent) -> Self {
         match event {
             RunEvent::BeamStarted { id } => WireEvent::BeamStarted { beam: &id.0 },
-            RunEvent::BeamOutput { id, line } => WireEvent::BeamOutput {
+            RunEvent::BeamCached { id } => WireEvent::BeamCached { beam: &id.0 },
+            RunEvent::BeamOutput { id, line, replayed } => WireEvent::BeamOutput {
                 beam: &id.0,
                 stream: match line.stream {
                     Stream::Stdout => WireStream::Stdout,
                     Stream::Stderr => WireStream::Stderr,
                 },
                 text: &line.text,
+                replayed: *replayed,
             },
             RunEvent::BeamFinished {
                 id,
@@ -131,6 +139,7 @@ impl<'a> WireEvent<'a> {
         };
         WireEvent::RunFinished {
             succeeded: ids(&summary.succeeded),
+            cached: ids(&summary.cached),
             failed: ids(&summary.failed),
             failed_allowed: ids(&summary.failed_allowed),
             cancelled: ids(&summary.cancelled),
@@ -143,6 +152,7 @@ impl<'a> WireEvent<'a> {
 fn status_name(status: &BeamStatus) -> &'static str {
     match status {
         BeamStatus::Succeeded => "succeeded",
+        BeamStatus::Cached => "cached",
         BeamStatus::Failed { .. } => "failed",
         BeamStatus::FailedAllowed { .. } => "failed_allowed",
         BeamStatus::Cancelled => "cancelled",
@@ -154,7 +164,7 @@ fn exit_code(status: &BeamStatus) -> Option<i32> {
         BeamStatus::Failed { exit_code } | BeamStatus::FailedAllowed { exit_code } => {
             Some(*exit_code)
         }
-        BeamStatus::Succeeded | BeamStatus::Cancelled => None,
+        BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::Cancelled => None,
     }
 }
 
@@ -183,6 +193,7 @@ mod tests {
                 stream: Stream::Stderr,
                 text: "warning".to_string(),
             },
+            replayed: false,
         };
 
         let value = json(&event);
@@ -209,6 +220,49 @@ mod tests {
         let succeeded = json(&finished(BeamStatus::Succeeded));
         assert_eq!(succeeded["status"], "succeeded");
         assert!(succeeded["exit_code"].is_null());
+    }
+
+    #[test]
+    fn a_cached_beam_emits_its_own_event_and_status() {
+        let cached = json(&RunEvent::BeamCached {
+            id: BeamId("gen".to_string()),
+        });
+        assert_eq!(cached["event"], "beam_cached");
+        assert_eq!(cached["beam"], "gen");
+
+        let finished = json(&RunEvent::BeamFinished {
+            id: BeamId("gen".to_string()),
+            status: BeamStatus::Cached,
+            duration: std::time::Duration::from_millis(2100),
+        });
+        assert_eq!(finished["status"], "cached");
+        assert!(finished["exit_code"].is_null());
+    }
+
+    #[test]
+    fn output_lines_carry_the_replayed_marker() {
+        let event = |replayed| RunEvent::BeamOutput {
+            id: BeamId("gen".to_string()),
+            line: OutputLine {
+                stream: Stream::Stdout,
+                text: "generated".to_string(),
+            },
+            replayed,
+        };
+
+        assert_eq!(json(&event(true))["replayed"], true);
+        assert_eq!(json(&event(false))["replayed"], false);
+    }
+
+    #[test]
+    fn the_final_event_carries_the_cached_bucket() {
+        let event = RunEvent::RunFinished {
+            summary: RunSummary {
+                cached: vec![BeamId("gen".to_string())],
+                ..RunSummary::default()
+            },
+        };
+        assert_eq!(json(&event)["cached"][0], "gen");
     }
 
     #[test]

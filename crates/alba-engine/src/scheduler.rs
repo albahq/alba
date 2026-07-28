@@ -306,7 +306,7 @@ async fn run_beam(mut task: BeamTask) -> BeamStatus {
 async fn dependencies_satisfied(dependencies: &mut [watch::Receiver<Option<BeamStatus>>]) -> bool {
     for dependency in dependencies {
         match wait_for_status(dependency).await {
-            BeamStatus::Succeeded | BeamStatus::FailedAllowed { .. } => {}
+            BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::FailedAllowed { .. } => {}
             BeamStatus::Failed { .. } | BeamStatus::Cancelled => return false,
         }
     }
@@ -520,6 +520,7 @@ async fn forward_output(
         let _ = events.send(RunEvent::BeamOutput {
             id: id.clone(),
             line,
+            replayed: false,
         });
     }
 }
