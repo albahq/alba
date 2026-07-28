@@ -112,3 +112,34 @@ fn outputs_check_ignores_gitignore() {
         "outputs live in ignored directories; the check must query the raw disk"
     );
 }
+
+/// A pattern that will not compile is skipped on its own: taking the whole
+/// set down with it turned every declared input into "nothing matched",
+/// which the cache reads as a beam that never changes.
+#[test]
+fn one_uncompilable_pattern_does_not_take_the_others_down() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "src/a.rs", "a");
+
+    assert_eq!(
+        relative_paths(dir.path(), &["src/**/*.rs", "a[b"]),
+        vec!["src/a.rs"]
+    );
+}
+
+/// A source tree reached through a symbolic link is still a source tree:
+/// the walk follows links, so the file behind one is matched and hashed
+/// by content rather than dropped for not being a regular file.
+#[cfg(unix)]
+#[test]
+fn files_reached_through_a_symbolic_link_are_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "real/a.rs", "a");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::os::unix::fs::symlink("../real/a.rs", dir.path().join("src/a.rs")).unwrap();
+
+    assert_eq!(
+        relative_paths(dir.path(), &["src/**/*.rs"]),
+        vec!["src/a.rs"]
+    );
+}

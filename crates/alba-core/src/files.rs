@@ -25,20 +25,26 @@ use std::path::{Path, PathBuf};
 /// regardless of whose machine resolves them. Hidden files are included —
 /// `inputs [".env"]` must work — but `.git/` and `.alba/` are never
 /// walked: the first is noise, and hashing the cache's own directory
-/// would invalidate every beam on every run.
+/// would invalidate every beam on every run. Symbolic links are followed:
+/// a linked source file (or a linked source directory, as a vendored or
+/// workspace-shared tree often is) is a real input, and dropping it for
+/// not being a regular file would silently hash nothing.
 ///
-/// Never fails: patterns were validated when the Beamfile loaded, and a
-/// pattern this function still cannot compile yields an empty list, which
-/// the cache treats as "nothing matched".
+/// Never fails. `inputs`/`outputs` patterns are validated when the
+/// Beamfile loads, so a pattern that does not compile here can only come
+/// from a [`crate::Project`] assembled some other way; it is skipped on
+/// its own, leaving its siblings' matches intact.
 pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> {
-    let Some(set) = build_globset(patterns) else {
+    let set = build_globset(patterns);
+    if set.is_empty() {
         return Vec::new();
-    };
+    }
 
     let walker = ignore::WalkBuilder::new(base)
         .hidden(false)
         .require_git(false)
         .git_global(false)
+        .follow_links(true)
         .filter_entry(|entry| {
             entry.file_name() != OsStr::new(".git") && entry.file_name() != OsStr::new(".alba")
         })
@@ -76,10 +82,20 @@ pub fn outputs_satisfied(base: &Path, patterns: &[String]) -> bool {
     })
 }
 
-fn build_globset(patterns: &[String]) -> Option<globset::GlobSet> {
+/// Compiles `patterns` one at a time, keeping the ones that compile. A
+/// single bad pattern used to abandon the whole set, turning every
+/// declared input into "nothing matched" — which the cache reads as a beam
+/// whose inputs never change, and therefore never reruns.
+fn build_globset(patterns: &[String]) -> globset::GlobSet {
     let mut builder = globset::GlobSetBuilder::new();
     for pattern in patterns {
-        builder.add(globset::Glob::new(pattern).ok()?);
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            builder.add(glob);
+        }
     }
-    builder.build().ok()
+    // `build` only fails on a glob that already compiled, but the cache
+    // degrades rather than panics on anything unexpected.
+    builder
+        .build()
+        .unwrap_or_else(|_| globset::GlobSet::empty())
 }
