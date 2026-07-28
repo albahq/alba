@@ -1,0 +1,8 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "err(\"touch f.{rs,md}\").render(\"touch f.{rs,md}\")"
+---
+error: brace expansion is not supported
+  │ touch f.{rs,md}
+  │         ^^^^^^^
+  = help: spell the alternatives out as separate arguments

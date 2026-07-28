@@ -1,0 +1,8 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "err(\"echo $((1+2))\").render(\"echo $((1+2))\")"
+---
+error: arithmetic expansion is not supported
+  │ echo $((1+2))
+  │      ^^^
+  = help: move the logic into a script invoked by `run`, or declare `executor system_shell` on this beam

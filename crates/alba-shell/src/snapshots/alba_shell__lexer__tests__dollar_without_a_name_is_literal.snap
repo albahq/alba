@@ -1,0 +1,45 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: kinds
+---
+[
+    Word(
+        Word {
+            parts: [
+                Text(
+                    "echo",
+                ),
+            ],
+            span: Span {
+                start: 0,
+                end: 4,
+            },
+        },
+    ),
+    Word(
+        Word {
+            parts: [
+                Text(
+                    "$",
+                ),
+            ],
+            span: Span {
+                start: 5,
+                end: 6,
+            },
+        },
+    ),
+    Word(
+        Word {
+            parts: [
+                Text(
+                    "$1x",
+                ),
+            ],
+            span: Span {
+                start: 7,
+                end: 10,
+            },
+        },
+    ),
+]

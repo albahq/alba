@@ -1,0 +1,7 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "err(\"echo \\\"oops\").render(\"echo \\\"oops\")"
+---
+error: unclosed double quote
+  │ echo "oops
+  │      ^

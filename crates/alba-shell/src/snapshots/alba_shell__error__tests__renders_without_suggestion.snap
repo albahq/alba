@@ -1,0 +1,7 @@
+---
+source: crates/alba-shell/src/error.rs
+expression: "error.render(\"echo 'oops\")"
+---
+error: unclosed single quote
+  │ echo 'oops
+  │      ^

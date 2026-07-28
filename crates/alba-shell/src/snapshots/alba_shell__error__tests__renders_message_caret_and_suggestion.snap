@@ -1,0 +1,8 @@
+---
+source: crates/alba-shell/src/error.rs
+expression: "error.render(\"watch & build\")"
+---
+error: background jobs (`&`) are not supported
+  │ watch & build
+  │       ^
+  = help: the engine already parallelizes beams; run one command per `run` entry

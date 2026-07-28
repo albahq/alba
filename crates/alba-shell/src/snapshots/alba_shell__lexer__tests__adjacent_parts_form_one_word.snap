@@ -1,0 +1,22 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "word_parts(&kinds[0])"
+---
+[
+    Text(
+        "a",
+    ),
+    Var(
+        "B",
+    ),
+    SingleQuoted(
+        "c",
+    ),
+    DoubleQuoted(
+        [
+            Text(
+                "d",
+            ),
+        ],
+    ),
+]

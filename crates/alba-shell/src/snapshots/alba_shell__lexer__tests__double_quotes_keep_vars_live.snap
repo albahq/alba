@@ -1,0 +1,55 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "kinds(r#\"echo \"a $b ${c} $(d e)\"\"#)"
+---
+[
+    Word(
+        Word {
+            parts: [
+                Text(
+                    "echo",
+                ),
+            ],
+            span: Span {
+                start: 0,
+                end: 4,
+            },
+        },
+    ),
+    Word(
+        Word {
+            parts: [
+                DoubleQuoted(
+                    [
+                        Text(
+                            "a ",
+                        ),
+                        Var(
+                            "b",
+                        ),
+                        Text(
+                            " ",
+                        ),
+                        Var(
+                            "c",
+                        ),
+                        Text(
+                            " ",
+                        ),
+                        CmdSubst {
+                            source: "d e",
+                            span: Span {
+                                start: 18,
+                                end: 21,
+                            },
+                        },
+                    ],
+                ),
+            ],
+            span: Span {
+                start: 5,
+                end: 23,
+            },
+        },
+    ),
+]
