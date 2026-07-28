@@ -13,3 +13,4 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 alba-executors = { path = "../alba-executors", features = ["test-util"] }
+async-trait.workspace = true
