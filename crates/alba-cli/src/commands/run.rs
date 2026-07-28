@@ -70,6 +70,9 @@ async fn execute(
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
         params,
+        // The cache is not exposed on the command line yet, so every run
+        // still executes every beam.
+        cache: None,
     };
 
     let (events, incoming) = unbounded_channel();

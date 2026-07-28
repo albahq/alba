@@ -16,6 +16,7 @@ mod cache;
 mod event;
 mod scheduler;
 
+pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
 pub use scheduler::{RunOptions, run};
 

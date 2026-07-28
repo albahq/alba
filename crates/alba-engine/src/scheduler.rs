@@ -20,7 +20,7 @@
 //!
 //! ## Completion signalling
 //!
-//! Every beam owns a `watch` channel carrying `Option<BeamStatus>`, and
+//! Every beam owns a `watch` channel carrying `Option<BeamOutcome>`, and
 //! its dependents hold receivers cloned *before* any task is spawned.
 //! `watch::Receiver::wait_for` reads the channel's current value before it
 //! ever suspends, so a beam that finishes before a dependent starts
@@ -43,7 +43,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{
-    Beam, BeamId, CoreError, ExecutorKind, Project, execution_subgraph, render_template,
+    Beam, BeamId, CoreError, ExecutorKind, Project, execution_subgraph, expand_globs,
+    outputs_satisfied, render_template,
 };
 use alba_executors::{CommandSpec, ExecContext, Executor, OutputLine, Stream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -51,6 +52,10 @@ use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
+use crate::cache::{
+    BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, fingerprint, hash_file,
+    static_contribution,
+};
 use crate::event::{BeamStatus, RunEvent, RunSummary};
 
 /// How a run is parameterized: everything the caller chose, as opposed to
@@ -66,6 +71,9 @@ pub struct RunOptions {
     /// Positional arguments for the target beam, e.g. `staging` in
     /// `alba run deploy staging`.
     pub params: Vec<String>,
+    /// Where the cache lives and how this run treats it. `None` disables
+    /// caching entirely — `alba check` and most tests want that.
+    pub cache: Option<CacheOptions>,
 }
 
 /// Runs `target` and everything it needs, and reports what happened.
@@ -90,6 +98,13 @@ pub async fn run(
 
     let slots = Arc::new(Semaphore::new(options.jobs.max(1)));
     let stop = cancel.child_token();
+    // One store for the whole run, shared by every task: it holds only a
+    // path, and each entry is written atomically under the beam's own name.
+    let cache = options
+        .cache
+        .as_ref()
+        .map(|options| Arc::new(CacheStore::new(options.dir.clone())));
+    let force = options.cache.as_ref().is_some_and(|options| options.force);
 
     // Both halves of every channel exist before the first task is spawned,
     // so no dependent can ever start waiting on a beam whose channel does
@@ -139,6 +154,8 @@ pub async fn run(
             cancel: cancel.clone(),
             stop: stop.clone(),
             keep_going: options.keep_going,
+            cache: cache.clone(),
+            force,
         };
         tasks.push((beam.id.clone(), tokio::spawn(run_beam(task))));
     }
@@ -246,14 +263,25 @@ fn check_parameters(
     }))
 }
 
+/// What a finished beam publishes to its dependents: how it ended, and
+/// what it contributes to their fingerprints. `contribution` is `None`
+/// when nothing stable could be computed (a render failure, a
+/// cancellation) — a dependent seeing `None` from a satisfied dependency
+/// is simply non-cacheable for that run.
+#[derive(Debug, Clone)]
+struct BeamOutcome {
+    status: BeamStatus,
+    contribution: Option<String>,
+}
+
 /// Everything one beam's task owns. A struct rather than a long argument
 /// list, since all of it is handed to a spawned task as a unit.
 struct BeamTask {
     beam: Beam,
     /// The target's positional arguments; empty for every other beam.
     args: Vec<String>,
-    dependencies: Vec<watch::Receiver<Option<BeamStatus>>>,
-    status: watch::Sender<Option<BeamStatus>>,
+    dependencies: Vec<watch::Receiver<Option<BeamOutcome>>>,
+    status: watch::Sender<Option<BeamOutcome>>,
     slots: Arc<Semaphore>,
     executor: Arc<dyn Executor>,
     events: UnboundedSender<RunEvent>,
@@ -263,6 +291,10 @@ struct BeamTask {
     /// "No beam may start from now on" — see the module doc comment.
     stop: CancellationToken,
     keep_going: bool,
+    /// Where cache entries live; `None` when caching is disabled.
+    cache: Option<Arc<CacheStore>>,
+    /// Ignore any stored entry when reading, but still write one.
+    force: bool,
 }
 
 /// One beam's whole life: wait, run (or not), report, release dependents.
@@ -281,10 +313,10 @@ struct BeamTask {
 /// been cancelled — so the dependent cannot observe a stale "nothing has
 /// failed yet" and start.
 async fn run_beam(mut task: BeamTask) -> BeamStatus {
-    let (status, duration) = if dependencies_satisfied(&mut task.dependencies).await {
-        execute(&task).await
-    } else {
-        (BeamStatus::Cancelled, Duration::ZERO)
+    let (status, duration, contribution) = match wait_for_dependencies(&mut task.dependencies).await
+    {
+        Some(contributions) => process(&task, &contributions).await,
+        None => (BeamStatus::Cancelled, Duration::ZERO, None),
     };
 
     if matches!(status, BeamStatus::Failed { .. }) && !task.keep_going {
@@ -295,48 +327,198 @@ async fn run_beam(mut task: BeamTask) -> BeamStatus {
         status: status.clone(),
         duration,
     });
-    let _ = task.status.send(Some(status.clone()));
+    let _ = task.status.send(Some(BeamOutcome {
+        status: status.clone(),
+        contribution,
+    }));
     status
 }
 
-/// Whether every dependency ended in a state that lets this beam run.
-/// `FailedAllowed` counts as satisfied; `Failed` and `Cancelled` do not,
-/// and that holds even under `keep_going` — a beam whose dependency did
-/// not produce its outputs cannot meaningfully run.
-async fn dependencies_satisfied(dependencies: &mut [watch::Receiver<Option<BeamStatus>>]) -> bool {
+/// Waits for every dependency and collects what each contributes to this
+/// beam's fingerprint, in `needs` order. `None` means a dependency failed
+/// or was cancelled — this beam must not run. `FailedAllowed` and
+/// `Cached` both count as satisfied.
+///
+/// That a `FailedAllowed` dependency satisfies its dependents holds even
+/// under `keep_going`: a beam whose dependency did not produce its outputs
+/// cannot meaningfully run.
+async fn wait_for_dependencies(
+    dependencies: &mut [watch::Receiver<Option<BeamOutcome>>],
+) -> Option<Vec<Option<String>>> {
+    let mut contributions = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
-        match wait_for_status(dependency).await {
-            BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::FailedAllowed { .. } => {}
-            BeamStatus::Failed { .. } | BeamStatus::Cancelled => return false,
+        let outcome = wait_for_outcome(dependency).await;
+        match outcome.status {
+            BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::FailedAllowed { .. } => {
+                contributions.push(outcome.contribution);
+            }
+            BeamStatus::Failed { .. } | BeamStatus::Cancelled => return None,
         }
     }
-    true
+    Some(contributions)
 }
 
-/// Blocks until `dependency` publishes its final status.
+/// Blocks until `dependency` publishes its final outcome.
 ///
 /// `wait_for` inspects the channel's current value before it suspends, so
 /// a dependency that finished before this call is still observed. Its
-/// borrow guard holds the channel's internal lock, so the status is cloned
+/// borrow guard holds the channel's internal lock, so the outcome is cloned
 /// out of it and the guard dropped before returning — never held across an
 /// await.
-async fn wait_for_status(dependency: &mut watch::Receiver<Option<BeamStatus>>) -> BeamStatus {
+async fn wait_for_outcome(dependency: &mut watch::Receiver<Option<BeamOutcome>>) -> BeamOutcome {
+    let cancelled = BeamOutcome {
+        status: BeamStatus::Cancelled,
+        contribution: None,
+    };
     match dependency.wait_for(Option::is_some).await {
         Ok(seen) => match &*seen {
-            Some(status) => status.clone(),
-            None => BeamStatus::Cancelled,
+            Some(outcome) => outcome.clone(),
+            None => cancelled,
         },
         // The sender was dropped without publishing: that beam's task died
         // unexpectedly, so treat it as cancelled rather than wait forever.
-        Err(_) => BeamStatus::Cancelled,
+        Err(_) => cancelled,
     }
 }
 
-/// Takes a slot and runs the beam's commands, returning how it ended and
-/// how long it took. Returns `Cancelled` with a zero duration for a beam
-/// that never got to start.
-async fn execute(task: &BeamTask) -> (BeamStatus, Duration) {
-    let cancelled = (BeamStatus::Cancelled, Duration::ZERO);
+/// What the cache concluded about a cacheable beam. `fingerprint` doubles
+/// as this beam's contribution to its dependents; `hit` carries the
+/// manifest to replay when the beam can be skipped.
+struct Assessment {
+    fingerprint: String,
+    hit: Option<Manifest>,
+}
+
+/// Renders, consults the cache, and either replays a hit or executes.
+///
+/// Rendering happens here — before the cache decision, which needs the
+/// rendered command — and the successful result is handed to `execute` so
+/// commands are rendered exactly once. A template that fails to render is
+/// deliberately *re*-rendered inside `execute`: the failure then follows
+/// the exact event path it always has (started, stderr line, failed).
+async fn process(
+    task: &BeamTask,
+    contributions: &[Option<String>],
+) -> (BeamStatus, Duration, Option<String>) {
+    let plan = render(&task.beam, &task.args).ok();
+    let (assessment, notice) = assess(task, plan.as_ref(), contributions);
+
+    if let Some(assessment) = &assessment
+        && let Some(manifest) = &assessment.hit
+    {
+        replay(task, manifest);
+        return (
+            BeamStatus::Cached,
+            Duration::from_millis(manifest.duration_ms),
+            Some(assessment.fingerprint.clone()),
+        );
+    }
+
+    let contribution = match (&assessment, &plan) {
+        (Some(assessment), _) => Some(assessment.fingerprint.clone()),
+        (None, Some(plan)) => Some(static_contribution(&plan.commands, &plan.env, &task.args)),
+        (None, None) => None,
+    };
+
+    let (status, duration, lines) = execute(task, plan, notice).await;
+
+    // Only a plain success is worth remembering: a failure, an allowed
+    // failure, and a cancellation all leave the previous entry alone.
+    if status == BeamStatus::Succeeded
+        && let (Some(assessment), Some(store)) = (&assessment, &task.cache)
+    {
+        store.store(
+            &task.beam.id,
+            &Manifest {
+                version: FORMAT_VERSION,
+                fingerprint: assessment.fingerprint.clone(),
+                outputs: task.beam.outputs.clone(),
+                duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            },
+            &lines,
+        );
+    }
+
+    (status, duration, contribution)
+}
+
+/// The cache's verdict for this beam, plus an optional user-facing notice.
+///
+/// The verdict is `None` when the beam is not cacheable at all: caching
+/// disabled, no declared `inputs`, a template that will not render, a
+/// dependency with no stable contribution, or an input file that cannot
+/// be hashed. Only that last case carries a notice — it is the one worth
+/// telling the user about, emitted as a stderr line once the beam starts.
+fn assess(
+    task: &BeamTask,
+    plan: Option<&RenderedBeam>,
+    contributions: &[Option<String>],
+) -> (Option<Assessment>, Option<String>) {
+    let (Some(store), Some(plan)) = (task.cache.as_ref(), plan) else {
+        return (None, None);
+    };
+    if task.beam.inputs.is_empty() {
+        return (None, None);
+    }
+    let Some(needs) = contributions
+        .iter()
+        .cloned()
+        .collect::<Option<Vec<String>>>()
+    else {
+        return (None, None);
+    };
+
+    let mut files = Vec::new();
+    for (relative, absolute) in expand_globs(&task.beam.dir, &task.beam.inputs) {
+        match hash_file(&absolute) {
+            Ok(hash) => files.push((relative, hash)),
+            // Unreadable between glob resolution and hashing (deleted,
+            // permissions): non-cacheable this run, never a failed run.
+            Err(error) => {
+                return (
+                    None,
+                    Some(format!(
+                        "cache: cannot hash input `{relative}` ({error}); running without cache"
+                    )),
+                );
+            }
+        }
+    }
+
+    let fingerprint = fingerprint(&BeamFacts {
+        files: &files,
+        commands: &plan.commands,
+        env: &plan.env,
+        args: &task.args,
+        needs: &needs,
+    });
+
+    let hit = (!task.force)
+        .then(|| store.load(&task.beam.id))
+        .flatten()
+        .filter(|manifest| manifest.fingerprint == fingerprint)
+        .filter(|_| outputs_satisfied(&task.beam.dir, &task.beam.outputs));
+
+    (Some(Assessment { fingerprint, hit }), None)
+}
+
+/// Announces a hit. Replaying the stored output lines arrives with the log
+/// store; until then a hit is the `BeamCached` announcement alone.
+fn replay(task: &BeamTask, _manifest: &Manifest) {
+    let _ = task.events.send(RunEvent::BeamCached {
+        id: task.beam.id.clone(),
+    });
+}
+
+/// Takes a slot and runs the beam's commands, returning how it ended, how
+/// long it took, and the output lines worth storing. Returns `Cancelled`
+/// with a zero duration for a beam that never got to start.
+async fn execute(
+    task: &BeamTask,
+    plan: Option<RenderedBeam>,
+    notice: Option<String>,
+) -> (BeamStatus, Duration, Vec<OutputLine>) {
+    let cancelled = (BeamStatus::Cancelled, Duration::ZERO, Vec::new());
 
     // `biased` so a run that is already stopping does not start one more
     // beam just because a permit happened to be free at the same instant.
@@ -376,6 +558,15 @@ async fn execute(task: &BeamTask) -> (BeamStatus, Duration) {
         task.events.clone(),
     ));
 
+    // Why this beam is running uncached, told where the user is already
+    // looking rather than out of band.
+    if let Some(notice) = notice {
+        let _ = lines.send(OutputLine {
+            stream: Stream::Stderr,
+            text: notice,
+        });
+    }
+
     // A template that will not render is this beam's failure, not the
     // run's — the same rule a command that cannot be spawned follows, and
     // for the same reason: `env(NAME)` with no default is deliberately
@@ -383,7 +574,11 @@ async fn execute(task: &BeamTask) -> (BeamStatus, Duration) {
     // outcome that `keep_going` and `allow_failure` are meant to govern.
     // Abandoning the whole run instead discarded the summary, dropped the
     // final event, and left this beam with no events at all.
-    let status = match render(&task.beam, &task.args) {
+    //
+    // `plan` is what the caller already rendered successfully; re-rendering
+    // here is how a beam whose template does not render reaches the failure
+    // path with its error message intact.
+    let status = match plan.map_or_else(|| render(&task.beam, &task.args), Ok) {
         Ok(plan) => run_commands(task, &plan, &lines).await,
         Err(error) => {
             let _ = lines.send(OutputLine {
@@ -396,7 +591,7 @@ async fn execute(task: &BeamTask) -> (BeamStatus, Duration) {
     drop(lines);
     let _ = forwarder.await;
 
-    (status, started_at.elapsed())
+    (status, started_at.elapsed(), Vec::new())
 }
 
 /// How a beam that failed before running a single command is recorded:
