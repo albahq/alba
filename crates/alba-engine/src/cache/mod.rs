@@ -4,6 +4,9 @@
 //! (persistence, Task 3). The scheduler is the only consumer.
 
 mod fingerprint;
+mod store;
 
 #[allow(dead_code, unused_imports)] // consumed by the scheduler in a follow-up change
 pub(crate) use fingerprint::{BeamFacts, fingerprint, hash_file, static_contribution};
+#[allow(dead_code, unused_imports)] // consumed by the scheduler in a follow-up change
+pub(crate) use store::{CacheStore, FORMAT_VERSION, Manifest};

@@ -51,6 +51,8 @@ dependencies = [
  "alba-executors",
  "async-trait",
  "blake3",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
