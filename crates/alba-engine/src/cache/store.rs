@@ -63,16 +63,9 @@ impl CacheStore {
         let _ = self.try_store(id, manifest, logs);
     }
 
-    /// The other half of the round trip: the scheduler already stores logs,
-    /// and reads them back once a cache hit replays the original run's
-    /// output — until then this reader has no caller but its own tests.
-    /// `expect` rather than `allow`, and scoped to the non-test build
-    /// because the tests below do call it, so the attribute fails the build
-    /// the moment a real caller appears.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "replaying a hit's output is not wired yet")
-    )]
+    /// The other half of the round trip: the scheduler stores logs on a
+    /// successful run and reads them back here once a cache hit replays
+    /// that run's output.
     pub(crate) fn load_logs(&self, id: &BeamId) -> Vec<OutputLine> {
         let Ok(content) = std::fs::read_to_string(self.entry(id, "log")) else {
             return Vec::new();

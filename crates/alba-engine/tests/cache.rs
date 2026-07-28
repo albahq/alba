@@ -752,3 +752,142 @@ beam all {
             .any(|event| matches!(event, RunEvent::BeamCached { .. }))
     );
 }
+
+#[tokio::test]
+async fn a_hit_replays_the_stored_output_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+
+    let talkative = FakeExecutor::new().on(
+        "generate",
+        FakeBehavior {
+            output_lines: vec![
+                alba_executors::OutputLine {
+                    stream: alba_executors::Stream::Stdout,
+                    text: "generated 12 files".to_string(),
+                },
+                alba_executors::OutputLine {
+                    stream: alba_executors::Stream::Stderr,
+                    text: "warning: deprecated".to_string(),
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        talkative,
+    )
+    .await;
+    let second = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let replayed: Vec<(&str, bool)> = second
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::BeamOutput { line, replayed, .. } => Some((line.text.as_str(), *replayed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed,
+        vec![("generated 12 files", true), ("warning: deprecated", true)],
+        "stored lines must replay, in order, marked as replayed"
+    );
+}
+
+#[tokio::test]
+async fn live_output_is_not_marked_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+
+    let talkative = FakeExecutor::new().on(
+        "generate",
+        FakeBehavior {
+            output_lines: vec![alba_executors::OutputLine {
+                stream: alba_executors::Stream::Stdout,
+                text: "generated".to_string(),
+            }],
+            ..Default::default()
+        },
+    );
+    let first = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        talkative,
+    )
+    .await;
+
+    assert!(first.events.iter().any(|event| matches!(
+        event,
+        RunEvent::BeamOutput {
+            replayed: false,
+            ..
+        }
+    )));
+    assert!(
+        !first
+            .events
+            .iter()
+            .any(|event| matches!(event, RunEvent::BeamOutput { replayed: true, .. }))
+    );
+}
+
+/// The replay order contract: `BeamCached`, then every replayed line,
+/// then `BeamFinished` — mirroring a live beam's started/output/finished.
+#[tokio::test]
+async fn replayed_lines_sit_between_cached_and_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+
+    let talkative = FakeExecutor::new().on(
+        "generate",
+        FakeBehavior {
+            output_lines: vec![alba_executors::OutputLine {
+                stream: alba_executors::Stream::Stdout,
+                text: "generated".to_string(),
+            }],
+            ..Default::default()
+        },
+    );
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        talkative,
+    )
+    .await;
+    let second = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let index = |predicate: &dyn Fn(&RunEvent) -> bool| {
+        second
+            .events
+            .iter()
+            .position(predicate)
+            .expect("event must exist")
+    };
+    let cached = index(&|e| matches!(e, RunEvent::BeamCached { .. }));
+    let output = index(&|e| matches!(e, RunEvent::BeamOutput { replayed: true, .. }));
+    let finished = index(&|e| matches!(e, RunEvent::BeamFinished { .. }));
+    assert!(cached < output && output < finished);
+}

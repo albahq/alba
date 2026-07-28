@@ -521,12 +521,22 @@ fn assess(
     (Some(Assessment { fingerprint, hit }), None)
 }
 
-/// Announces a hit. Replaying the stored output lines arrives with the log
-/// store; until then a hit is the `BeamCached` announcement alone.
+/// Announces a hit, then replays its stored output lines in order —
+/// `BeamCached` first, so a consumer sees the hit before any of the
+/// original run's lines, mirroring a live beam's started/output order.
 fn replay(task: &BeamTask, _manifest: &Manifest) {
     let _ = task.events.send(RunEvent::BeamCached {
         id: task.beam.id.clone(),
     });
+    if let Some(store) = &task.cache {
+        for line in store.load_logs(&task.beam.id) {
+            let _ = task.events.send(RunEvent::BeamOutput {
+                id: task.beam.id.clone(),
+                line,
+                replayed: true,
+            });
+        }
+    }
 }
 
 /// Takes a slot and runs the beam's commands, returning how it ended, how
@@ -608,9 +618,9 @@ async fn execute(
         }
     };
     drop(lines);
-    let _ = forwarder.await;
+    let lines = forwarder.await.unwrap_or_default();
 
-    (status, started_at.elapsed(), Vec::new())
+    (status, started_at.elapsed(), lines)
 }
 
 /// How a beam that failed before running a single command is recorded:
@@ -723,18 +733,22 @@ async fn run_commands(
     BeamStatus::Succeeded
 }
 
-/// Relabels an executor's output lines as this beam's output events, until
-/// the executor drops the last sender.
+/// Relabels an executor's output lines as this beam's output events until
+/// the executor drops the last sender, and returns everything it saw —
+/// the capture a successful beam stores for future replay.
 async fn forward_output(
     id: BeamId,
     mut output: UnboundedReceiver<OutputLine>,
     events: UnboundedSender<RunEvent>,
-) {
+) -> Vec<OutputLine> {
+    let mut seen = Vec::new();
     while let Some(line) = output.recv().await {
         let _ = events.send(RunEvent::BeamOutput {
             id: id.clone(),
-            line,
+            line: line.clone(),
             replayed: false,
         });
+        seen.push(line);
     }
+    seen
 }
