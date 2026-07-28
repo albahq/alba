@@ -10,7 +10,14 @@
 //! target that does not exist, an executor Alba does not implement yet), so
 //! it is also handed the `SourceMap` it needs to render such a failure the
 //! same way `main.rs` renders a load failure.
+//!
+//! `cache` is the one exception to "already loaded": it only needs the
+//! Beamfile's path to locate the project's cache directory, never its
+//! content, so `main.rs` dispatches it before loading — a Beamfile that
+//! does not even parse must not block cleaning the cache sitting next to
+//! it.
 
+pub mod cache;
 pub mod check;
 pub mod list;
 pub mod run;

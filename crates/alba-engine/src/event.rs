@@ -17,18 +17,32 @@ use alba_executors::OutputLine;
 /// Per beam, the order is `BeamStarted`, then every `BeamOutput`, then
 /// `BeamFinished` — a beam that runs several commands still emits exactly
 /// one started/finished pair, since the individual commands are an
-/// implementation detail of the beam. A beam that never ran (cancelled
-/// before it acquired a slot, or skipped because a dependency failed)
-/// emits only `BeamFinished` with [`BeamStatus::Cancelled`]. Events from
-/// different beams interleave freely; `RunFinished` is always last.
+/// implementation detail of the beam. A cache hit follows the same shape
+/// with `BeamCached` in place of `BeamStarted`: the same replayed
+/// `BeamOutput` lines, then `BeamFinished` with [`BeamStatus::Cached`]. A
+/// beam that never ran (cancelled before it acquired a slot, or skipped
+/// because a dependency failed) emits only `BeamFinished` with
+/// [`BeamStatus::Cancelled`]. Events from different beams interleave
+/// freely; `RunFinished` is always last.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
     BeamStarted {
         id: BeamId,
     },
+    /// A cache hit: emitted instead of `BeamStarted` for a beam that is
+    /// skipped, followed by its replayed `BeamOutput` lines and a
+    /// `BeamFinished` with [`BeamStatus::Cached`] carrying the original
+    /// run's duration.
+    BeamCached {
+        id: BeamId,
+    },
     BeamOutput {
         id: BeamId,
         line: OutputLine,
+        /// True for a line replayed from the cache rather than produced
+        /// by a live command — CI tooling parsing the JSON stream needs
+        /// to tell the two apart.
+        replayed: bool,
     },
     BeamFinished {
         id: BeamId,
@@ -51,21 +65,29 @@ pub enum RunEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BeamStatus {
     Succeeded,
-    Failed { exit_code: i32 },
-    FailedAllowed { exit_code: i32 },
+    /// A cache hit: counts as satisfied for this beam's dependents and as
+    /// success for the run's exit code, exactly like `Succeeded`.
+    Cached,
+    Failed {
+        exit_code: i32,
+    },
+    FailedAllowed {
+        exit_code: i32,
+    },
     Cancelled,
 }
 
 /// What a whole run amounts to: every beam of the target's subgraph sorted
 /// into the bucket it ended in, plus how long the run took.
 ///
-/// The four vectors are in the project's declaration order, never in
+/// The five vectors are in the project's declaration order, never in
 /// completion order — a run is a concurrent thing, and ordering the summary
 /// by whichever task happened to finish first would make it differ from run
 /// to run for the same project.
 #[derive(Debug, Clone, Default)]
 pub struct RunSummary {
     pub succeeded: Vec<BeamId>,
+    pub cached: Vec<BeamId>,
     pub failed: Vec<BeamId>,
     pub failed_allowed: Vec<BeamId>,
     pub cancelled: Vec<BeamId>,
@@ -86,6 +108,7 @@ impl RunSummary {
     pub(crate) fn record(&mut self, id: BeamId, status: &BeamStatus) {
         match status {
             BeamStatus::Succeeded => self.succeeded.push(id),
+            BeamStatus::Cached => self.cached.push(id),
             BeamStatus::Failed { .. } => self.failed.push(id),
             BeamStatus::FailedAllowed { .. } => self.failed_allowed.push(id),
             BeamStatus::Cancelled => self.cancelled.push(id),

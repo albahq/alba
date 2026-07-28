@@ -47,6 +47,7 @@ fn options(jobs: usize, keep_going: bool) -> RunOptions {
         jobs,
         keep_going,
         params: Vec::new(),
+        cache: None,
     }
 }
 
@@ -387,7 +388,7 @@ beam all { needs [broken, other] run "step all" }
     );
     let reported = only(
         positions(events, |event| {
-            matches!(event, RunEvent::BeamOutput { id, line }
+            matches!(event, RunEvent::BeamOutput { id, line, .. }
                 if id.0 == "broken"
                     && line.stream == Stream::Stderr
                     && line.text.contains("ALBA_MISSING_VAR_XYZ"))
@@ -498,7 +499,7 @@ beam all { needs [broken, other] run "step all" }
     let events = &outcome.events;
     let reported = only(
         positions(events, |event| {
-            matches!(event, RunEvent::BeamOutput { id, line }
+            matches!(event, RunEvent::BeamOutput { id, line, .. }
                 if id.0 == "broken"
                     && line.stream == Stream::Stderr
                     && line.text.contains("failed to spawn `broken command`"))
@@ -718,6 +719,7 @@ beam deploy(target) {
         jobs: 2,
         keep_going: false,
         params: vec!["staging".to_string()],
+        cache: None,
     };
     let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
 
@@ -742,6 +744,7 @@ async fn parameter_count_must_match_the_target() {
             jobs: 1,
             keep_going: false,
             params: vec!["extra".to_string()],
+            cache: None,
         },
         Arc::new(FakeExecutor::new()),
     )

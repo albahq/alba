@@ -863,16 +863,9 @@ fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreErr
         .map(|n| Spanned::new(beam_ref_to_id(&n.value), n.span))
         .collect();
 
-    let inputs = decl
-        .inputs
-        .iter()
-        .map(|t| render_load_time_template("inputs", t, lets, &params))
-        .collect::<Result<Vec<_>, _>>()?;
-    let outputs = decl
-        .outputs
-        .iter()
-        .map(|t| render_load_time_template("outputs", t, lets, &params))
-        .collect::<Result<Vec<_>, _>>()?;
+    let beam_name = decl.name.value.as_str();
+    let inputs = build_patterns("inputs", beam_name, &decl.inputs, lets, &params)?;
+    let outputs = build_patterns("outputs", beam_name, &decl.outputs, lets, &params)?;
 
     for run_template in &decl.run {
         validate_template(run_template, lets, &params, Timing::Schedule)?;
@@ -909,6 +902,42 @@ fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreErr
         source: current_source_id(),
         scope: lets.clone(),
     })
+}
+
+/// Renders a beam's `inputs` or `outputs` templates and checks that each
+/// result is a pattern the matcher can actually compile.
+///
+/// Compiled with `globset`, which is what [`crate::expand_globs`] matches
+/// with — deliberately *not* `glob::Pattern`, the dialect the `glob()`
+/// built-in validates against (see [`validate_glob_pattern`]). The two
+/// accept different languages (`src**/x.rs` compiles under one and not the
+/// other), so checking a pattern against the wrong one either rejects
+/// something the matcher would have handled or lets through something it
+/// cannot compile. The second is the damaging direction: an `inputs`
+/// pattern that only fails at match time silently matches no file, and a
+/// beam whose inputs match no file looks unchanged forever.
+fn build_patterns(
+    field: &str,
+    beam: &str,
+    templates: &[StringTemplate],
+    lets: &Scope,
+    params: &[String],
+) -> Result<Vec<String>, CoreError> {
+    let mut patterns = Vec::with_capacity(templates.len());
+    for template in templates {
+        let pattern = render_load_time_template(field, template, lets, params)?;
+        if let Err(error) = globset::Glob::new(&pattern) {
+            return Err(CoreError::new(
+                format!(
+                    "invalid `{field}` pattern `{pattern}` in beam `{beam}`: {}",
+                    error.kind()
+                ),
+                template.span,
+            ));
+        }
+        patterns.push(pattern);
+    }
+    Ok(patterns)
 }
 
 fn build_executor(
@@ -1267,6 +1296,68 @@ beam b { run "x" }
         )
         .unwrap_err();
         assert!(err.message.contains("invalid glob pattern"));
+    }
+
+    /// `inputs` patterns are matched with `globset` at run time, so they
+    /// are compiled with `globset` here — a pattern that only fails there
+    /// used to match nothing at all, which the cache read as a beam whose
+    /// inputs never change.
+    #[test]
+    fn inputs_reject_a_pattern_that_will_not_compile() {
+        let err = load_str(
+            r#"
+beam b {
+  inputs ["src/**/*.rs", "a[b"]
+  run "x"
+}
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("invalid `inputs` pattern `a[b`"));
+        assert!(err.message.contains("beam `b`"));
+    }
+
+    #[test]
+    fn outputs_reject_a_pattern_that_will_not_compile() {
+        let err = load_str(
+            r#"
+beam b {
+  outputs ["a[b"]
+  run "x"
+}
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("invalid `outputs` pattern `a[b`"));
+    }
+
+    /// The `glob()` built-in and the `inputs`/`outputs` fields validate
+    /// against two different, incompatible dialects — `glob::Pattern` for
+    /// the former, `globset` for the latter, each being what actually
+    /// consumes the pattern later. `src**/x.rs` is legal in one and not
+    /// the other, and neither check may be swapped for the other's
+    /// dialect: doing so would reject patterns the matcher accepts, or
+    /// accept patterns it cannot compile.
+    #[test]
+    fn the_glob_builtin_and_the_inputs_field_keep_their_own_dialects() {
+        let err = load_str(
+            r#"
+let pattern = glob("src**/x.rs")
+beam b { run "{pattern}" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("invalid glob pattern `src**/x.rs`"));
+
+        load_str(
+            r#"
+beam b {
+  inputs ["src**/x.rs"]
+  run "x"
+}
+"#,
+        )
+        .expect("`globset` accepts this, and `globset` is what matches `inputs`");
     }
 
     #[test]

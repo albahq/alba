@@ -12,9 +12,11 @@
 //! [`RunOptions`], an executor, a channel to receive [`RunEvent`]s on, and
 //! a cancellation token, and it reports back a [`RunSummary`].
 
+mod cache;
 mod event;
 mod scheduler;
 
+pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
 pub use scheduler::{RunOptions, run};
 

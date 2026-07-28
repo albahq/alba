@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 alba-core = { path = "../alba-core" }
 alba-executors = { path = "../alba-executors" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -14,3 +17,4 @@ tokio-util.workspace = true
 [dev-dependencies]
 alba-executors = { path = "../alba-executors", features = ["test-util"] }
 async-trait.workspace = true
+tempfile.workspace = true

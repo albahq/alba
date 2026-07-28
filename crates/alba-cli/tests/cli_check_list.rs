@@ -111,6 +111,51 @@ fn file_flag_points_at_a_beamfile_elsewhere() {
         .stdout(predicates::str::contains("1 beam"));
 }
 
+/// `alba cache clean` removes the store `alba run` created, and cleaning
+/// an already-clean project is still a success rather than an error.
+#[test]
+fn cache_clean_removes_the_store_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam gen { inputs [\"data.txt\"] run \"echo generated\" }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("data.txt"), "v1").unwrap();
+
+    alba()
+        .current_dir(&dir)
+        .args(["run", "gen"])
+        .assert()
+        .success();
+    assert!(dir.path().join(".alba/cache").is_dir());
+
+    let clean = || {
+        alba()
+            .current_dir(&dir)
+            .args(["cache", "clean"])
+            .assert()
+            .success()
+    };
+    clean();
+    assert!(!dir.path().join(".alba/cache").exists());
+    clean(); // nothing left to remove is still a success
+}
+
+/// A Beamfile that does not even parse must not block cleaning: the
+/// command only needs the file's location, not its content.
+#[test]
+fn cache_clean_works_with_a_broken_beamfile() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Beamfile"), "beam { this is not valid").unwrap();
+
+    alba()
+        .current_dir(&dir)
+        .args(["cache", "clean"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn file_flag_missing_target_is_exit_2() {
     let dir = tempfile::tempdir().unwrap();

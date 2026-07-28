@@ -15,12 +15,14 @@
 
 mod error;
 mod eval;
+mod files;
 mod graph;
 mod loader;
 mod model;
 
 pub use error::CoreError;
 pub use eval::{Scope, eval_expr, render_template};
+pub use files::{expand_globs, outputs_satisfied};
 pub use graph::{execution_subgraph, validate_graph};
 pub use loader::{LoadError, SourceMap, load_project};
 pub use model::{Beam, BeamId, ExecutorKind, Project, SourceId, Value};

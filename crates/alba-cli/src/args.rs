@@ -41,6 +41,20 @@ pub enum Command {
         #[command(flatten)]
         flags: RunFlags,
     },
+    /// Manage the project's cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+}
+
+/// A subcommand of `alba cache`. `clean` is deliberately the only one for
+/// now; the subcommand level exists so `alba cache status` can join it
+/// without breaking the CLI's shape.
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Remove every cache entry for this project.
+    Clean,
 }
 
 /// Everything that shapes a run, as opposed to what the Beamfile declares.
@@ -63,6 +77,11 @@ pub struct RunFlags {
     /// have not started
     #[arg(long)]
     pub keep_going: bool,
+
+    /// Ignore the cache when reading: run every beam, and rewrite the
+    /// cache entries of the ones that succeed
+    #[arg(long)]
+    pub force: bool,
 
     /// How text output is laid out
     ///

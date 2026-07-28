@@ -35,6 +35,13 @@ fn run(cli: Cli) -> i32 {
         }
     };
 
+    // `cache` needs the Beamfile only to locate the project, never its
+    // content — a Beamfile that does not parse must not block cleaning
+    // the cache next to it.
+    if let Some(Command::Cache { command }) = &cli.command {
+        return commands::cache::run(&beamfile, command);
+    }
+
     // `sources` outlives loading because `run` needs it too: a schedule-time
     // failure (an unknown target, a `run` template that will not render)
     // carries a span into a Beamfile that only this map can resolve.
@@ -47,18 +54,29 @@ fn run(cli: Cli) -> i32 {
     };
 
     match cli.command {
+        // Already handled and returned from above, before the project was
+        // even loaded — see the `if let` there for why.
+        Some(Command::Cache { .. }) => unreachable!("cache is dispatched before loading"),
         Some(Command::Check) => commands::check::run(&project),
         Some(Command::Run {
             beam,
             params,
             flags,
-        }) => commands::run::run(&project, &sources, &alba_core::BeamId(beam), params, &flags),
+        }) => commands::run::run(
+            &project,
+            &sources,
+            &beamfile,
+            &alba_core::BeamId(beam),
+            params,
+            &flags,
+        ),
         // Bare `alba`: run the declared `default` with every run flag left
         // at its default, or fall back to listing when none is declared.
         None => match &project.default {
             Some(target) => commands::run::run(
                 &project,
                 &sources,
+                &beamfile,
                 &target.value,
                 Vec::new(),
                 &RunFlags::default(),

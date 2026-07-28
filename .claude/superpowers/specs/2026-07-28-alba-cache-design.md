@@ -90,15 +90,17 @@ One blake3 hash per beam, fed with:
 - Each file resolved by the `inputs` globs, as a sorted list of
   (project-relative path, blake3 content hash) pairs.
 - The rendered `run` command(s), after interpolation.
+- The resolved `cwd` the commands run in: the same command in another
+  directory is another invocation.
 - The resolved `env` block.
 - The beam arguments, when the beam is parameterized.
 - The fingerprint of each `need`, in a stable order.
 
 For a non-cacheable `need` (one without declared `inputs`), its
-contribution is its static part only: rendered command, resolved
-environment, and arguments. A non-cacheable dependency therefore does
-not poison the cascade; if its actual output changes, the dependent's
-own `inputs` catch the change by content.
+contribution is its static part only: rendered command, working
+directory, resolved environment, and arguments. A non-cacheable
+dependency therefore does not poison the cascade; if its actual output
+changes, the dependent's own `inputs` catch the change by content.
 
 The fingerprint recipe is part of the manifest format version: any
 change to the recipe bumps the version and invalidates existing
@@ -161,10 +163,16 @@ side entirely: everything runs, and successes rewrite their manifests.
   resolution and hashing): the beam is treated as non-cacheable for
   this run, with a warning. Same philosophy: never fail because of the
   cache.
-- An `inputs` glob matching nothing: the fingerprint is computed over
-  an empty list, which is valid; a beam may legitimately have optional
-  inputs. No warning; `alba check` is where such a diagnostic would
-  live if the need ever appears.
+- `inputs` globs matching nothing: the beam is not cacheable for this
+  run, with a warning. The fingerprint of an empty file list is a
+  constant, so caching on it writes a manifest nothing can ever
+  invalidate, and every later run replays it however much the sources
+  changed. The ordinary causes are all mistakes worth naming: a
+  misspelled path, an input directory `.gitignore` excludes, a pattern
+  that does not compile. That last one is caught earlier too: `inputs`
+  and `outputs` patterns are compiled when the Beamfile loads, so
+  `alba check` reports a broken pattern instead of leaving it to match
+  nothing.
 - Concurrent runs in the same project: no lock; atomic manifest writes
   mean the worst case is a manifest overwritten by the last winner,
   hence one superfluous re-execution later. A real lock would be

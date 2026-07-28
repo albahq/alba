@@ -58,7 +58,8 @@ impl Renderer for InterleavedRenderer {
     fn handle(&mut self, event: &RunEvent) {
         match event {
             RunEvent::BeamStarted { id } => self.line(&id.0, "started"),
-            RunEvent::BeamOutput { id, line } => self.line(&id.0, &line.text),
+            RunEvent::BeamCached { id } => self.line(&id.0, "cached — replaying last output"),
+            RunEvent::BeamOutput { id, line, .. } => self.line(&id.0, &line.text),
             RunEvent::BeamFinished {
                 id,
                 status,
@@ -67,7 +68,14 @@ impl Renderer for InterleavedRenderer {
                 // `in` rather than a second parenthesis: a status is
                 // already parenthesized (`failed (exit 7)`), and
                 // `failed (exit 7) (1.2s)` reads as two unrelated asides.
-                let text = format!("{} in {}", status_label(status), format_duration(*duration));
+                // A cached beam's duration belongs to its original run, not
+                // this one, so it gets its own phrasing rather than
+                // `cached in 1.2s` implying the replay itself took that long.
+                let text = if matches!(status, alba_engine::BeamStatus::Cached) {
+                    format!("cached in {} (original run)", format_duration(*duration))
+                } else {
+                    format!("{} in {}", status_label(status), format_duration(*duration))
+                };
                 self.line(&id.0, &text);
             }
             RunEvent::RunFinished { summary } => print_summary(&mut self.err, summary),

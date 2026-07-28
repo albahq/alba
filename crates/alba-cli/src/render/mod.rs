@@ -116,6 +116,7 @@ pub fn format_duration(duration: Duration) -> String {
 pub fn status_label(status: &BeamStatus) -> String {
     match status {
         BeamStatus::Succeeded => "ok".to_string(),
+        BeamStatus::Cached => "cached".to_string(),
         BeamStatus::Failed { exit_code } => format!("failed (exit {exit_code})"),
         BeamStatus::FailedAllowed { .. } => "failed (allowed)".to_string(),
         BeamStatus::Cancelled => "cancelled".to_string(),
@@ -138,6 +139,7 @@ pub fn print_summary(sink: &mut LineSink<io::Stderr>, summary: &RunSummary) {
 fn summary_line(summary: &RunSummary) -> String {
     let counts = [
         ("\u{2713}", summary.succeeded.len(), "succeeded"),
+        ("\u{21ba}", summary.cached.len(), "cached"),
         ("\u{2717}", summary.failed.len(), "failed"),
         ("\u{26a0}", summary.failed_allowed.len(), "failed (allowed)"),
         ("\u{2298}", summary.cancelled.len(), "cancelled"),
@@ -173,6 +175,26 @@ mod tests {
         assert_eq!(
             status_label(&BeamStatus::FailedAllowed { exit_code: 1 }),
             "failed (allowed)"
+        );
+    }
+
+    #[test]
+    fn a_cached_beam_is_labelled_cached() {
+        assert_eq!(status_label(&BeamStatus::Cached), "cached");
+    }
+
+    #[test]
+    fn the_summary_counts_cached_beams() {
+        let summary = RunSummary {
+            succeeded: vec![BeamId("a".to_string())],
+            cached: vec![BeamId("b".to_string()), BeamId("c".to_string())],
+            duration: Duration::from_millis(4100),
+            ..RunSummary::default()
+        };
+
+        assert_eq!(
+            summary_line(&summary),
+            "\u{2713} 1 succeeded \u{b7} \u{21ba} 2 cached \u{b7} 4.1s"
         );
     }
 

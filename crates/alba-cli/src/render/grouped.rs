@@ -50,11 +50,12 @@ impl Renderer for GroupedRenderer {
         match event {
             // A beam that produces no output at all still gets a group,
             // so the header is printed for every beam that ran rather
-            // than only for the talkative ones.
-            RunEvent::BeamStarted { id } => {
+            // than only for the talkative ones. A cache hit is no
+            // exception — it still gets its group.
+            RunEvent::BeamStarted { id } | RunEvent::BeamCached { id } => {
                 self.buffers.entry(id.0.clone()).or_default();
             }
-            RunEvent::BeamOutput { id, line } => {
+            RunEvent::BeamOutput { id, line, .. } => {
                 self.buffers
                     .entry(id.0.clone())
                     .or_default()
@@ -65,12 +66,20 @@ impl Renderer for GroupedRenderer {
                 status,
                 duration,
             } => {
-                let header = format!(
-                    "\u{2500}\u{2500} {} ({}, {}) \u{2500}\u{2500}",
-                    id.0,
-                    format_duration(*duration),
-                    status_label(status)
-                );
+                let header = if matches!(status, alba_engine::BeamStatus::Cached) {
+                    format!(
+                        "\u{2500}\u{2500} {} ({} original run, cached) \u{2500}\u{2500}",
+                        id.0,
+                        format_duration(*duration)
+                    )
+                } else {
+                    format!(
+                        "\u{2500}\u{2500} {} ({}, {}) \u{2500}\u{2500}",
+                        id.0,
+                        format_duration(*duration),
+                        status_label(status)
+                    )
+                };
                 self.flush(&id.0, &header);
             }
             RunEvent::RunFinished { summary } => {
@@ -107,6 +116,7 @@ mod tests {
                 stream: Stream::Stdout,
                 text: text.to_string(),
             },
+            replayed: false,
         }
     }
 
