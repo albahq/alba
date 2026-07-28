@@ -89,7 +89,7 @@
 //!   always built by joining onto a display path, never a canonicalized
 //!   one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use alba_syntax::{File, Span, Spanned};
@@ -178,6 +178,11 @@ pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
     }
 }
 
+/// What one file's load produced: its own beams and everything it
+/// imports, ids and `needs` namespaced relative to that file itself, plus
+/// its own `default`.
+type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>);
+
 #[derive(Default)]
 struct Loader {
     sources: SourceMap,
@@ -185,37 +190,53 @@ struct Loader {
     /// the DFS chain from the root to whichever file is being loaded right
     /// now. Only the canonical half is ever compared (to detect an import
     /// cycle); the display half is what a cycle's error message actually
-    /// shows. Not used to memoize already-finished files — two different
-    /// import sites can legitimately load the same file under different
-    /// aliases, producing differently-namespaced beams each time.
+    /// shows.
     stack: Vec<(PathBuf, PathBuf)>,
+    /// Every file already loaded to completion, keyed by canonical path.
+    ///
+    /// Two import sites can legitimately reach the same file under
+    /// different aliases and must end up with differently-namespaced
+    /// beams — but that difference is applied *afterwards*, by the
+    /// importing file, and is purely textual. Reading, parsing, and
+    /// evaluating the file itself is identical either way, so it happens
+    /// once. Without this, cost is exponential in nesting depth: a chain
+    /// of files that each import the next twice doubles the work per
+    /// level, and nineteen three-line files were enough to make loading
+    /// take half a minute.
+    ///
+    /// A file on `stack` is by definition not in here (nothing is recorded
+    /// until its load returns), so memoization can never mask an import
+    /// cycle. The [`SourceMap`] entry, and therefore what a diagnostic
+    /// about that file shows, comes from whichever import site reached it
+    /// first — the display path the *other* site would have produced names
+    /// the same file, so both point a reader at the same text.
+    loaded: HashMap<PathBuf, LoadedFile>,
 }
 
 impl Loader {
-    /// Resolves and reads `path` (a display path — see the module doc
+    /// The canonical form of `path` (a display path — see the module doc
     /// comment), reporting a failure at `error_span` (stamped with
     /// whichever file is currently loading — the importer, for every call
     /// except the very first).
     ///
-    /// Returns the *canonical* form alongside the source text: canonicalizing
-    /// is what makes cycle detection in [`Loader::load_file`] correct — on a
-    /// case-insensitive filesystem (the default on macOS and Windows),
-    /// `std::fs::canonicalize` normalizes a path to the casing actually on
-    /// disk, so two imports spelling the same file with different casing
-    /// still compare equal on the `stack`. That canonical path is used for
-    /// nothing else: reading goes through `path` as given, and the caller
-    /// never derives `dir` or a [`SourceMap`] entry from the canonical
-    /// form (see the module doc comment for why).
-    fn resolve_and_read(path: &Path, error_span: Span) -> Result<(PathBuf, String), CoreError> {
-        let not_found = |e: std::io::Error| {
-            CoreError::new(
-                format!("cannot read Beamfile `{}`: {e}", path.display()),
-                error_span,
-            )
-        };
-        let source = std::fs::read_to_string(path).map_err(not_found)?;
-        let canonical = std::fs::canonicalize(path).map_err(not_found)?;
-        Ok((canonical, source))
+    /// Canonicalizing is what makes cycle detection and memoization in
+    /// [`Loader::load_file`] correct — on a case-insensitive filesystem
+    /// (the default on macOS and Windows), `std::fs::canonicalize`
+    /// normalizes a path to the casing actually on disk, so two imports
+    /// spelling the same file with different casing still compare equal.
+    /// The canonical path is used for nothing else: reading goes through
+    /// `path` as given, and the caller never derives `dir` or a
+    /// [`SourceMap`] entry from the canonical form (see the module doc
+    /// comment for why).
+    fn canonical(path: &Path, error_span: Span) -> Result<PathBuf, CoreError> {
+        std::fs::canonicalize(path).map_err(|e| unreadable(path, &e, error_span))
+    }
+
+    /// Reads `path` as it was written. Split from [`Loader::canonical`] so
+    /// a file already loaded through another import site can be recognized
+    /// before it is read a second time.
+    fn read(path: &Path, error_span: Span) -> Result<String, CoreError> {
+        std::fs::read_to_string(path).map_err(|e| unreadable(path, &e, error_span))
     }
 
     /// Recursively loads `path` (a display path: already resolved,
@@ -227,16 +248,16 @@ impl Loader {
     /// top-level call uses it, every recursive call for an `import`
     /// discards it).
     ///
+    /// A file already loaded through another import site is returned from
+    /// [`Loader::loaded`] rather than read again — see that field's doc
+    /// comment.
+    ///
     /// `error_span` is where a failure to read `path`, or an import cycle
     /// closing on it, gets reported; it's the span of the `import` that
     /// named `path` for every call except the very first (the root has no
     /// such span, so [`load_project`] passes a zero-width one).
-    fn load_file(
-        &mut self,
-        path: &Path,
-        error_span: Span,
-    ) -> Result<(Vec<Beam>, Option<Spanned<BeamId>>), CoreError> {
-        let (canonical, source) = Self::resolve_and_read(path, error_span)?;
+    fn load_file(&mut self, path: &Path, error_span: Span) -> Result<LoadedFile, CoreError> {
+        let canonical = Self::canonical(path, error_span)?;
 
         if let Some(start) = self.stack.iter().position(|(c, _)| *c == canonical) {
             let mut chain: Vec<String> = self.stack[start..]
@@ -249,6 +270,12 @@ impl Loader {
                 error_span,
             ));
         }
+
+        if let Some(loaded) = self.loaded.get(&canonical) {
+            return Ok(loaded.clone());
+        }
+
+        let source = Self::read(path, error_span)?;
 
         // `import_base` (a display path) is derived from `path`, never
         // from `canonical` — see the module doc comment. `path.parent()`
@@ -268,10 +295,13 @@ impl Loader {
 
         let source_id = self.sources.push(path.to_path_buf(), source.clone());
 
-        self.stack.push((canonical, path.to_path_buf()));
+        self.stack.push((canonical.clone(), path.to_path_buf()));
         let result = self.load_file_body(&source, &import_base, &beam_dir, source_id);
         self.stack.pop();
-        result
+
+        let loaded = result?;
+        self.loaded.insert(canonical, loaded.clone());
+        Ok(loaded)
     }
 
     /// The part of [`Loader::load_file`] that runs once `path` has been
@@ -287,7 +317,7 @@ impl Loader {
         import_base: &Path,
         beam_dir: &Path,
         source_id: SourceId,
-    ) -> Result<(Vec<Beam>, Option<Spanned<BeamId>>), CoreError> {
+    ) -> Result<LoadedFile, CoreError> {
         let _scope = SourceIdScope::enter(source_id);
         let file: File = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
         check_duplicate_aliases(&file)?;
@@ -311,6 +341,16 @@ impl Loader {
 
         Ok((beams, local.default))
     }
+}
+
+/// The single "cannot read this Beamfile" message, shared by the two
+/// filesystem calls [`Loader::load_file`] makes on a file's path, so the
+/// two cannot drift into describing the same missing file differently.
+fn unreadable(path: &Path, error: &std::io::Error, error_span: Span) -> CoreError {
+    CoreError::new(
+        format!("cannot read Beamfile `{}`: {error}", path.display()),
+        error_span,
+    )
 }
 
 /// Computes the directory that becomes `Beam::dir` for every beam declared

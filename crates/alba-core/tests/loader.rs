@@ -131,6 +131,80 @@ fn nested_imports_join_namespaces_with_colon() {
     assert_eq!(build.needs[0].value.0, "api:db:migrate");
 }
 
+/// A file reached from two import sites is read, parsed, and evaluated
+/// once, not once per site. Without that, cost is exponential in nesting
+/// depth: nineteen three-line files that each import the next twice used
+/// to take half a million loads.
+///
+/// The pin is the source map: every load registers one entry, so a second
+/// registration for `shared/Beamfile` (a fourth id here) means the file
+/// was loaded twice. The beams themselves must still be namespaced per
+/// site — that is a purely textual step, applied to the memoized result.
+#[test]
+fn a_file_imported_from_two_sites_is_loaded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"left/Beamfile\" as l\nimport \"right/Beamfile\" as r\n\
+         beam all { needs [l:x, r:x] run \"echo ok\" }",
+    );
+    write(
+        dir.path().join("left/Beamfile"),
+        "import \"../shared/Beamfile\" as s\nbeam x { needs [s:base] run \"echo l\" }",
+    );
+    write(
+        dir.path().join("right/Beamfile"),
+        "import \"../shared/Beamfile\" as s\nbeam x { needs [s:base] run \"echo r\" }",
+    );
+    write(
+        dir.path().join("shared/Beamfile"),
+        "beam base { run \"echo s\" }",
+    );
+
+    let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    let mut ids: Vec<&str> = project.beams.iter().map(|b| b.id.0.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["all", "l:s:base", "l:x", "r:s:base", "r:x"]);
+
+    assert!(
+        sources.get(SourceId(3)).is_some(),
+        "four distinct files were read"
+    );
+    assert!(
+        sources.get(SourceId(4)).is_none(),
+        "`shared/Beamfile` must be read once, not once per import site"
+    );
+}
+
+/// The memoized result must not leak one import site's namespacing into
+/// another's: both copies of a shared beam keep their own prefix, and both
+/// point back at the single file that declared them.
+#[test]
+fn both_copies_of_a_shared_import_keep_their_own_namespace() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"shared/Beamfile\" as a\nimport \"shared/Beamfile\" as b\n\
+         beam all { needs [a:base, b:base] run \"echo ok\" }",
+    );
+    write(
+        dir.path().join("shared/Beamfile"),
+        "beam base { run \"echo s\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    let shared: Vec<&alba_core::Beam> = project
+        .beams
+        .iter()
+        .filter(|beam| beam.id.0.ends_with(":base"))
+        .collect();
+    let ids: Vec<&str> = shared.iter().map(|beam| beam.id.0.as_str()).collect();
+    assert_eq!(ids, ["a:base", "b:base"]);
+    assert_eq!(shared[0].source, shared[1].source);
+}
+
 #[test]
 fn duplicate_import_alias_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
