@@ -1,0 +1,29 @@
+default check
+
+beam check {
+  description "Full verification: format, lints, tests"
+  needs [fmt, lint, test]
+  run "echo all checks passed"
+}
+
+beam fmt {
+  description "Check formatting"
+  run "cargo fmt --check"
+}
+
+beam lint {
+  description "Clippy with warnings denied"
+  run "cargo clippy --all-targets -- -D warnings"
+}
+
+beam test {
+  description "Run the test suite"
+  run "cargo test --workspace"
+}
+
+beam build {
+  description "Release build"
+  inputs ["crates/**/*.rs", "Cargo.toml"]
+  outputs ["target/release/alba"]
+  run "cargo build --release"
+}
