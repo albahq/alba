@@ -162,9 +162,10 @@ disk, the beam also reruns even if its inputs are otherwise unchanged: a
 cache entry only stands in for work whose result is actually still there.
 
 `alba run <beam> --force` ignores the cache on the way in: the beam runs
-regardless of what changed, and its result is written back to the cache
-for the next invocation to read. Use it to force a rebuild without
-clearing history for every other beam.
+regardless of what changed. If it succeeds, its result is written back to
+the cache for the next invocation to read; a forced run that fails leaves
+the previous entry untouched. Use it to force a rebuild without clearing
+history for every other beam.
 
 The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
 `alba cache clean` removes it entirely; the next run of any beam starts
