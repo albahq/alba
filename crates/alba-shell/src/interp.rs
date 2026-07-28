@@ -346,7 +346,17 @@ impl AssignmentOverlay {
     }
 
     fn restore(self, state: &mut ShellState) {
-        for (name, prior) in self.saved {
+        // Undo in reverse: a repeated name in the same prefix (`FOO=1
+        // FOO=2 cmd`) pushes one saved entry per assignment, each
+        // capturing what was there *before that particular assignment*
+        // ran. Replaying them in the order they were saved would apply
+        // the oldest snapshot last, leaving the intermediate value
+        // (`FOO=1`) behind, still exported, instead of the true original.
+        // Replaying newest-saved-first peels each overlay off in the
+        // opposite order it was applied, so the last entry undone is the
+        // very first assignment's saved prior value — the actual
+        // original.
+        for (name, prior) in self.saved.into_iter().rev() {
             match prior {
                 Some(var) => {
                     state.vars.insert(name, var);

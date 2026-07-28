@@ -78,6 +78,12 @@ fn cd(args: &[String], state: &mut ShellState, io: &Lines) -> Flow {
 
     match state.cwd.join(&target).canonicalize() {
         Ok(resolved) if resolved.is_dir() => {
+            // Keep `PWD` in step with the real cwd: it is exported, so a
+            // spawned child's own `current_dir` and the `PWD` it inherits
+            // must agree, and (once Task 4 adds variable expansion)
+            // `$PWD` inside this shell must reflect where `cd` actually
+            // moved to, not the directory the run started in.
+            state.export("PWD", Some(resolved.display().to_string()));
             state.cwd = resolved;
             Flow::Next(0)
         }
