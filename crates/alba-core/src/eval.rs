@@ -19,29 +19,47 @@
 //! [`render_template`] used here) against a [`Scope`] that also has the
 //! beam's parameters bound via [`Scope::with_params`]. Because parameters
 //! aren't bound yet at load time, those templates can't be fully
-//! evaluated up front — but the brief still requires that every name they
-//! reference resolve to *something* (a file-level `let` or one of the
-//! beam's own parameters) at load time, in *every* branch of the
-//! expression (including one an `if` with a statically known condition
-//! doesn't take — a typo hiding in a dead branch must still be caught).
-//! [`validate_deferred_template`] does that without evaluating: it walks
-//! the expression tree via [`check_deferred_expr`], treating a reference
-//! to a file-level `let` as concretely known (since those are already
-//! evaluated; a same-named parameter still shadows it, matching
-//! [`Scope::with_params`]) and a reference to one of the beam's own
-//! parameters as validly-named-but-unknown-until-schedule-time, and
-//! eagerly type-checks (reusing [`eval_binary`]) any sub-expression that
-//! turns out to depend only on `let`s. That is what makes
-//! `if_condition_must_be_bool` (whose `if` condition is a plain `let`,
-//! with no parameter involved) catchable at load time, while a `run`
-//! template that mixes `let`s and parameters only gets its names checked,
-//! not its types, until schedule time.
+//! evaluated up front — but every name they reference must still resolve
+//! to *something* (a file-level `let` or one of the beam's own
+//! parameters) at load time.
 //!
-//! One built-in is deliberately never executed on this deferred path:
-//! `env()` reads the process environment, a side effect that belongs at
-//! schedule time even when its arguments happen to be fully known already
-//! — see `check_deferred_expr`'s `Call` arm. `glob()` has no such side
-//! effect (it only compiles a pattern), so it stays eagerly validated.
+//! ## Validation is a pass of its own, on both paths
+//!
+//! [`validate_template`] walks an expression tree via [`check_expr`]
+//! without evaluating it, treating a reference to a file-level `let` as
+//! concretely known (since those are already evaluated; a same-named
+//! parameter still shadows it, matching [`Scope::with_params`]) and a
+//! reference to one of the beam's own parameters as
+//! validly-named-but-unknown-until-schedule-time, and eagerly type-checks
+//! (reusing [`eval_binary`]) any sub-expression that turns out to depend
+//! only on `let`s. That is what makes `if_condition_must_be_bool` (whose
+//! `if` condition is a plain `let`, with no parameter involved) catchable
+//! at load time, while a `run` template that mixes `let`s and parameters
+//! only gets its names checked, not its types, until schedule time.
+//!
+//! Crucially this pass runs for load-time fields too, *in addition to*
+//! evaluating them. Evaluation alone walks only the branch an `if`
+//! condition selects, and which branch that is can depend on the
+//! environment the file happens to be loaded in (a condition derived from
+//! `env(...)`, say). Validating only the taken branch would therefore make
+//! a diagnostic environment-dependent: a typo hiding in the other branch
+//! would fail on one machine and pass on the next, for a file nobody
+//! edited. [`check_expr`] validates every branch regardless.
+//!
+//! ## `env()` and where it may appear
+//!
+//! `env()` reads the process environment, and [`check_expr`] never
+//! executes it: on the schedule-time path the read belongs to the moment
+//! the beam runs, not to loading. On the load-time path the read does
+//! happen (that is what `let profile = env("PROFILE", "debug")` is for),
+//! but only with a default in hand: `env(name)` with no default is
+//! rejected at its call site there, because otherwise one unset variable
+//! would make the whole project unloadable — including for beams nobody
+//! asked to run — and `alba check` would answer differently depending on
+//! the machine. Without a default, `env()` belongs in `run` or `env`,
+//! where it resolves when the beam runs. `glob()` has no such side effect
+//! (it only compiles a pattern), so it is validated eagerly on both paths
+//! as soon as its argument is known.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -424,25 +442,40 @@ fn eval_glob(
     validate_glob_pattern(pattern, pattern_span)
 }
 
-/// What [`check_deferred_expr`] statically knows about a sub-expression of
-/// a deferred (`run`/`env`) template: either its concrete value (it only
-/// touched file-level `let`s, which are already evaluated) or that it
-/// depends on one of the beam's own parameters and so can't be known until
-/// schedule time.
+/// What [`check_expr`] statically knows about a sub-expression: either its
+/// concrete value (it only touched file-level `let`s, which are already
+/// evaluated) or that it depends on something not known yet — one of the
+/// beam's own parameters, or the process environment.
 enum StaticValue {
     Known(Value),
     Unknown,
 }
 
-/// Walks `expr`, validating variable names and eagerly type-checking
-/// whatever sub-expressions don't depend on `params`. See the module doc
-/// comment for the overall strategy — in particular, *every* branch of an
-/// `if` is validated here, even one a statically known condition doesn't
-/// take, and `env()` is never actually executed on this path.
-fn check_deferred_expr(
+/// When the expression being validated will actually be evaluated, which
+/// is the one thing [`check_expr`] treats differently between the two
+/// paths: whether `env()` may be written without a default. See the module
+/// doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Timing {
+    /// `let` bindings and the beam fields evaluated during the load itself
+    /// (`description`, `inputs`, `outputs`, `cwd`, executor options).
+    Load,
+    /// `run` commands and `env` values, rendered when the beam is about to
+    /// run, with its parameters bound.
+    Schedule,
+}
+
+/// Walks `expr`, validating variable and function names and eagerly
+/// type-checking whatever sub-expressions don't depend on `params` or on
+/// the environment. See the module doc comment for the overall strategy —
+/// in particular, *every* branch of an `if` is validated here, even one a
+/// statically known condition doesn't take, and `env()` is never actually
+/// executed on this path.
+fn check_expr(
     expr: &Expr,
     lets: &Scope,
     params: &[String],
+    timing: Timing,
     fallback: Span,
 ) -> Result<StaticValue, CoreError> {
     match expr {
@@ -475,7 +508,7 @@ fn check_deferred_expr(
                     TemplatePart::Literal(s) => rendered.push_str(s),
                     TemplatePart::Expr(e) => {
                         let span = expr_span(e).unwrap_or(template.span);
-                        match check_deferred_expr(e, lets, params, span)? {
+                        match check_expr(e, lets, params, timing, span)? {
                             StaticValue::Known(v) => rendered.push_str(v.as_display()),
                             StaticValue::Unknown => any_unknown = true,
                         }
@@ -488,61 +521,29 @@ fn check_deferred_expr(
                 Ok(StaticValue::Known(Value::Str(rendered)))
             }
         }
-        Expr::Call { name, args } => {
-            if !BUILTIN_FUNCTIONS.contains(&name.value.as_str()) {
-                return Err(unknown_function_error(name));
-            }
-
-            if name.value == "env" {
-                // Reading the environment is a side effect that belongs
-                // at schedule time, not load time (see the module doc
-                // comment): check the call's arity and the names inside
-                // its arguments, but never execute the read — not even
-                // when every argument turns out to be statically known.
-                // Otherwise a `run` template referencing an unset
-                // variable would fail the *entire project's* load, for a
-                // beam nobody asked to run.
-                if args.is_empty() || args.len() > 2 {
-                    return Err(arity_error(name, 1, 2, args.len()));
-                }
-                for arg in args {
-                    let span = expr_span(arg).unwrap_or(fallback);
-                    check_deferred_expr(arg, lets, params, span)?;
-                }
-                return Ok(StaticValue::Unknown);
-            }
-
-            // Only "glob" remains, and it has no side effect (it only
-            // compiles the pattern), so it's safe — and required, per the
-            // brief's "type errors ... unknown function" list — to
-            // validate it eagerly once every argument is known. Reuses
-            // each argument's already-computed `StaticValue` instead of
-            // evaluating the call a second time via `eval_expr`.
-            let mut arg_values = Vec::with_capacity(args.len());
-            let mut any_unknown = false;
-            for arg in args {
-                let span = expr_span(arg).unwrap_or(fallback);
-                match check_deferred_expr(arg, lets, params, span)? {
-                    StaticValue::Known(v) => arg_values.push(v),
-                    StaticValue::Unknown => any_unknown = true,
-                }
-            }
-            if any_unknown {
-                return Ok(StaticValue::Unknown);
-            }
-            if args.len() != 1 {
-                return Err(arity_error(name, 1, 1, args.len()));
-            }
-            let pattern_span = expr_span(&args[0]).unwrap_or(fallback);
-            let pattern = expect_str_value("glob", arg_values.remove(0), pattern_span)?;
-            Ok(StaticValue::Known(validate_glob_pattern(
-                pattern,
-                pattern_span,
-            )?))
-        }
+        // Dispatched by name, exactly like `eval_call`, so adding a third
+        // built-in cannot silently fall through into another one's
+        // argument handling.
+        Expr::Call { name, args } => match name.value.as_str() {
+            "env" => check_env_call(name, args, lets, params, timing, fallback),
+            "glob" => check_glob_call(name, args, lets, params, timing, fallback),
+            _ => Err(unknown_function_error(name)),
+        },
         Expr::Binary { op, lhs, rhs } => {
-            let l = check_deferred_expr(lhs, lets, params, expr_span(lhs).unwrap_or(fallback))?;
-            let r = check_deferred_expr(rhs, lets, params, expr_span(rhs).unwrap_or(fallback))?;
+            let l = check_expr(
+                lhs,
+                lets,
+                params,
+                timing,
+                expr_span(lhs).unwrap_or(fallback),
+            )?;
+            let r = check_expr(
+                rhs,
+                lets,
+                params,
+                timing,
+                expr_span(rhs).unwrap_or(fallback),
+            )?;
             match (l, r) {
                 (StaticValue::Known(lv), StaticValue::Known(rv)) => {
                     Ok(StaticValue::Known(eval_binary(*op, lv, rv, fallback)?))
@@ -561,7 +562,7 @@ fn check_deferred_expr(
             let cond_span = expr_span(cond).unwrap_or(fallback);
             let then_span = expr_span(then).unwrap_or(fallback);
             let otherwise_span = expr_span(otherwise).unwrap_or(fallback);
-            match check_deferred_expr(cond, lets, params, cond_span)? {
+            match check_expr(cond, lets, params, timing, cond_span)? {
                 StaticValue::Known(Value::Bool(cond_value)) => {
                     // Both branches are validated regardless of which one
                     // the condition picks: an untaken branch can still
@@ -570,8 +571,8 @@ fn check_deferred_expr(
                     // happens to be loaded in (e.g. a condition derived
                     // from `env(...)`) — that must not make the
                     // diagnostic environment-dependent too.
-                    let then_result = check_deferred_expr(then, lets, params, then_span)?;
-                    let else_result = check_deferred_expr(otherwise, lets, params, otherwise_span)?;
+                    let then_result = check_expr(then, lets, params, timing, then_span)?;
+                    let else_result = check_expr(otherwise, lets, params, timing, otherwise_span)?;
                     Ok(if cond_value { then_result } else { else_result })
                 }
                 StaticValue::Known(other) => Err(CoreError::new(
@@ -582,10 +583,10 @@ fn check_deferred_expr(
                     cond_span,
                 )),
                 StaticValue::Unknown => {
-                    // Which branch runs isn't known until schedule time;
-                    // still validate names/types in both.
-                    check_deferred_expr(then, lets, params, then_span)?;
-                    check_deferred_expr(otherwise, lets, params, otherwise_span)?;
+                    // Which branch runs isn't decided yet; still validate
+                    // names and types in both.
+                    check_expr(then, lets, params, timing, then_span)?;
+                    check_expr(otherwise, lets, params, timing, otherwise_span)?;
                     Ok(StaticValue::Unknown)
                 }
             }
@@ -593,20 +594,82 @@ fn check_deferred_expr(
     }
 }
 
-/// Validates a deferred (`run`/`env`) template at load time without fully
-/// evaluating it: every `Var` it references must be either a file-level
-/// `let` or one of `params` (the beam's own parameters, unbound until
-/// schedule time). See the module doc comment for why this also happens
-/// to catch some type errors (like `if_condition_must_be_bool`) early.
-fn validate_deferred_template(
+/// Validates an `env(name)` / `env(name, default)` call without executing
+/// it. Arity is checked before the arguments are walked, so a miscall is
+/// reported as one however little is known about what it was given.
+fn check_env_call(
+    name: &Spanned<String>,
+    args: &[Expr],
+    lets: &Scope,
+    params: &[String],
+    timing: Timing,
+    fallback: Span,
+) -> Result<StaticValue, CoreError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(arity_error(name, 1, 2, args.len()));
+    }
+    for arg in args {
+        let span = expr_span(arg).unwrap_or(fallback);
+        check_expr(arg, lets, params, timing, span)?;
+    }
+    if timing == Timing::Load && args.len() == 1 {
+        return Err(CoreError::new(
+            "`env` requires a default value here",
+            name.span,
+        )
+        .with_help(
+            "add one, e.g. `env(\"NAME\", \"fallback\")`, or read the variable from `run`/`env` \
+             instead, where it resolves when the beam runs",
+        ));
+    }
+    // Never read here: at schedule time the read belongs to the moment the
+    // beam runs, and at load time the value still depends on the ambient
+    // environment, so nothing downstream may be type-checked against it.
+    Ok(StaticValue::Unknown)
+}
+
+/// Validates a `glob(pattern)` call, compiling the pattern when it is
+/// already known. Compiling has no side effect, so unlike `env` this one
+/// really is evaluated here.
+fn check_glob_call(
+    name: &Spanned<String>,
+    args: &[Expr],
+    lets: &Scope,
+    params: &[String],
+    timing: Timing,
+    fallback: Span,
+) -> Result<StaticValue, CoreError> {
+    if args.len() != 1 {
+        return Err(arity_error(name, 1, 1, args.len()));
+    }
+    let pattern_span = expr_span(&args[0]).unwrap_or(fallback);
+    match check_expr(&args[0], lets, params, timing, pattern_span)? {
+        StaticValue::Known(value) => {
+            let pattern = expect_str_value(&name.value, value, pattern_span)?;
+            Ok(StaticValue::Known(validate_glob_pattern(
+                pattern,
+                pattern_span,
+            )?))
+        }
+        StaticValue::Unknown => Ok(StaticValue::Unknown),
+    }
+}
+
+/// Validates a template without rendering it: every `Var` it references
+/// must be either a file-level `let` or one of `params` (the beam's own
+/// parameters, unbound until schedule time), every branch of every `if`
+/// included. See the module doc comment for why this also happens to catch
+/// some type errors (like `if_condition_must_be_bool`) early.
+fn validate_template(
     template: &StringTemplate,
     lets: &Scope,
     params: &[String],
+    timing: Timing,
 ) -> Result<(), CoreError> {
     for part in &template.parts {
         if let TemplatePart::Expr(e) = part {
             let span = expr_span(e).unwrap_or(template.span);
-            check_deferred_expr(e, lets, params, span)?;
+            check_expr(e, lets, params, timing, span)?;
         }
     }
     Ok(())
@@ -664,10 +727,15 @@ fn reject_param_references_in_template(
     })
 }
 
-/// Renders a load-time field's template: `params` may never appear in it
-/// (see the module doc comment), checked explicitly first so a
-/// same-named `let` can't silently mask a forbidden parameter reference;
-/// then rendered against `lets` alone.
+/// Renders a load-time field's template, in three steps.
+///
+/// First, `params` may never appear in it (see the module doc comment),
+/// checked explicitly so a same-named `let` can't silently mask a
+/// forbidden parameter reference. Then the whole template is validated
+/// without being evaluated — rendering alone would only walk the branch an
+/// `if` condition happens to select, which is what would otherwise make a
+/// name error here depend on the machine the file is loaded on. Only then
+/// is it rendered, against `lets` alone.
 fn render_load_time_template(
     field: &str,
     template: &StringTemplate,
@@ -675,6 +743,7 @@ fn render_load_time_template(
     params: &[String],
 ) -> Result<String, CoreError> {
     reject_param_references_in_template(template, params, field)?;
+    validate_template(template, lets, &[], Timing::Load)?;
     render_template(template, lets)
 }
 
@@ -747,6 +816,12 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
 pub(crate) fn build_project(file: &File, dir: &Path) -> Result<Project, CoreError> {
     let mut lets = Scope::empty();
     for binding in &file.lets {
+        // Validated before being evaluated, for the same reason a
+        // load-time field is: evaluation only walks the branch an `if`
+        // condition selects, so a name error hiding in the other one would
+        // otherwise surface (or not) depending on the environment.
+        let fallback = expr_span(&binding.value).unwrap_or(binding.name.span);
+        check_expr(&binding.value, &lets, &[], Timing::Load, fallback)?;
         let value = eval_expr(&binding.value, &lets)?;
         lets.insert(binding.name.value.clone(), value);
     }
@@ -796,10 +871,10 @@ fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreErr
         .collect::<Result<Vec<_>, _>>()?;
 
     for run_template in &decl.run {
-        validate_deferred_template(run_template, lets, &params)?;
+        validate_template(run_template, lets, &params, Timing::Schedule)?;
     }
     for (_, env_template) in &decl.env {
-        validate_deferred_template(env_template, lets, &params)?;
+        validate_template(env_template, lets, &params, Timing::Schedule)?;
     }
 
     let cwd = decl
@@ -1022,9 +1097,70 @@ beam deploy(target) { cwd "{target}" run "echo {target}" }
         assert_eq!(project.beams[0].id.0, "deploy");
     }
 
+    /// A load-time field is validated in full, not just along the branch a
+    /// statically known condition happens to take. Which branch that is can
+    /// depend on the environment the file is loaded in, so a typo hiding in
+    /// the other one must not be reported on one machine and swallowed on
+    /// the next.
     #[test]
-    fn env_without_default_errors_when_absent() {
-        let _guard = EnvVarGuard::absent("ALBA_TEST_ABSENT_XYZ");
+    fn load_time_field_validates_the_not_taken_branch_too() {
+        let err = load_str(
+            r#"
+let flag = false
+beam b { cwd "{if flag then bogus else '.'}" run "echo x" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("unknown variable"));
+        assert!(err.message.contains("bogus"));
+    }
+
+    /// The same rule for an unknown function hiding in an untaken branch of
+    /// a load-time field.
+    #[test]
+    fn load_time_field_rejects_an_unknown_function_in_an_untaken_branch() {
+        let err = load_str(
+            r#"
+let flag = false
+beam b { description "{if flag then nope('x') else 'ok'}" run "echo x" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("unknown function"));
+    }
+
+    /// A `let` binding is a load-time expression too, so its untaken
+    /// branches are validated the same way.
+    #[test]
+    fn let_binding_validates_the_not_taken_branch_too() {
+        let err = load_str(
+            r#"
+let flag = false
+let path = if flag then bogus else "."
+beam b { run "echo {path}" }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("unknown variable"));
+        assert!(err.message.contains("bogus"));
+    }
+
+    /// `env()` without a default is only resolvable when a beam runs, so a
+    /// load-time field must reject it at the call site rather than making
+    /// the whole project's load depend on the ambient environment.
+    #[test]
+    fn env_without_a_default_is_rejected_in_a_load_time_field() {
+        let err = load_str(r#"beam b { description "{env('ALBA_NOPE_XYZ')}" run "echo x" }"#)
+            .unwrap_err();
+        assert!(err.message.contains("requires a default"));
+        assert!(err.help.is_some());
+    }
+
+    /// The same rule for a `let` binding, whatever the ambient environment
+    /// holds — this is what makes `alba check` answer the same way on a
+    /// laptop and in CI.
+    #[test]
+    fn env_without_a_default_is_rejected_in_a_let_binding() {
         let err = load_str(
             r#"
 let x = env("ALBA_TEST_ABSENT_XYZ")
@@ -1032,7 +1168,19 @@ beam b { run "x" }
 "#,
         )
         .unwrap_err();
-        assert!(err.message.contains("is not set"));
+        assert!(err.message.contains("requires a default"));
+    }
+
+    /// `glob`'s arity is checked before its arguments are resolved, so a
+    /// miscall is reported even when one argument only becomes known once
+    /// a beam parameter is bound — matching how `env`'s arity is checked.
+    #[test]
+    fn glob_arity_is_checked_even_when_an_argument_is_unknown() {
+        let err = load_str(r#"beam b(p) { run "{glob(p, 'x')}" }"#).unwrap_err();
+        assert!(
+            err.message
+                .contains("`glob` expects 1 argument(s), found 2")
+        );
     }
 
     #[test]

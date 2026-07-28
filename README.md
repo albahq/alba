@@ -53,6 +53,17 @@ A beam's `run` command is a string template: `{profile}` interpolates the
 fail (`lint` here) without failing the beams that depend on it. `default`
 names the beam a bare `alba` runs when no subcommand is given.
 
+### Reading the environment
+
+`env("NAME", "fallback")` reads an environment variable, using the fallback
+when it is unset. Written without a fallback, `env("NAME")` is resolved only
+when a beam actually runs, so it may appear in `run` commands and in `env`
+values but not in a `let` binding, `description`, `inputs`, `outputs`, `cwd`,
+or an executor option — those are resolved while the Beamfile loads, and one
+unset variable there would make the whole project fail to load, including for
+beams nobody asked to run. Alba rejects that at the call site rather than
+letting `alba check` answer differently depending on the machine it runs on.
+
 ## Usage
 
 ```sh
