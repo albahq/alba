@@ -29,6 +29,22 @@ impl Outcome {
             .map(|c| c.command)
             .collect()
     }
+
+    /// Every stderr line this run emitted, live or replayed — where the
+    /// cache tells the user why a beam is running uncached.
+    fn stderr(&self) -> Vec<String> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                RunEvent::BeamOutput { line, .. }
+                    if line.stream == alba_executors::Stream::Stderr =>
+                {
+                    Some(line.text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 fn options(dir: &Path, force: bool) -> RunOptions {
@@ -62,10 +78,26 @@ async fn run_once(
     options: RunOptions,
     executor: FakeExecutor,
 ) -> Outcome {
+    run_prepared(source, target, dir, options, executor, |_| {}).await
+}
+
+/// [`run_once`] with a hook to amend the loaded project, for a scenario
+/// that cannot be spelled in a Beamfile any more — loading now rejects a
+/// pattern that will not compile, so reaching the engine with one takes a
+/// [`alba_core::Project`] built by hand, as any library consumer may.
+async fn run_prepared(
+    source: &str,
+    target: &str,
+    dir: &Path,
+    options: RunOptions,
+    executor: FakeExecutor,
+    prepare: impl FnOnce(&mut alba_core::Project),
+) -> Outcome {
     let mut project = load_str(source).expect("the test Beamfile must load");
     for beam in &mut project.beams {
         beam.dir = dir.to_path_buf();
     }
+    prepare(&mut project);
     let executor = Arc::new(executor);
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -890,4 +922,180 @@ async fn replayed_lines_sit_between_cached_and_finished() {
     let output = index(&|e| matches!(e, RunEvent::BeamOutput { replayed: true, .. }));
     let finished = index(&|e| matches!(e, RunEvent::BeamFinished { .. }));
     assert!(cached < output && output < finished);
+}
+
+/// The four tests below share one shape: a beam that declares `inputs`
+/// but, for four different ordinary reasons, resolved none of the files
+/// the author meant. Each once produced a permanently cached beam — the
+/// fingerprint of an empty file list is a constant, so the first run
+/// succeeded, wrote a manifest, and every later run replayed it however
+/// much the sources changed. A beam whose `inputs` resolve to nothing is
+/// not cacheable for that run, and says so.
+const SRC: &str = r#"
+beam gen {
+  inputs ["src/**/*.rs"]
+  run "generate"
+}
+"#;
+
+/// One pattern that will not compile must not silence the ones that do:
+/// the globset is built per pattern, so `src/**/*.rs` still resolves.
+#[tokio::test]
+async fn a_pattern_that_will_not_compile_does_not_silence_its_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "src/a.rs", "v1");
+    let broken = |project: &mut alba_core::Project| {
+        project.beams[0].inputs = vec!["src/**/*.rs".to_string(), "a[b".to_string()];
+    };
+
+    run_prepared(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+        broken,
+    )
+    .await;
+    write(dir.path(), "src/a.rs", "v2");
+    let second = run_prepared(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+        broken,
+    )
+    .await;
+
+    assert_eq!(
+        second.executed().len(),
+        1,
+        "an uncompilable sibling must not make every pattern match nothing"
+    );
+}
+
+/// An input directory the project's own `.gitignore` excludes resolves to
+/// nothing: glob expansion is deliberately `.gitignore`-aware.
+#[tokio::test]
+async fn an_ignored_input_directory_is_not_cached_silently() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ".gitignore", "src/\n");
+    write(dir.path(), "src/a.rs", "v1");
+
+    run_once(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    write(dir.path(), "src/a.rs", "v2");
+    let second = run_once(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    assert_eq!(
+        second.executed().len(),
+        1,
+        "an ignored input must not cache"
+    );
+    assert!(second.summary.cached.is_empty());
+}
+
+/// A misspelled path matches nothing, and the beam is told so where the
+/// user is already looking rather than caching forever in silence.
+#[tokio::test]
+async fn a_misspelled_input_path_is_not_cached_silently() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "src/a.rs", "v1");
+    const MISSPELLED: &str = r#"
+beam gen {
+  inputs ["scr/**/*.rs"]
+  run "generate"
+}
+"#;
+
+    run_once(
+        MISSPELLED,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    write(dir.path(), "src/a.rs", "v2");
+    let second = run_once(
+        MISSPELLED,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    assert_eq!(second.executed().len(), 1);
+    assert!(
+        second
+            .stderr()
+            .iter()
+            .any(|line| line.starts_with("cache:") && line.contains("running without cache")),
+        "a beam whose inputs matched nothing must say so, got {:?}",
+        second.stderr()
+    );
+}
+
+/// An input reached through a symbolic link is a real input: it is
+/// followed and hashed by content, so an unchanged run still hits and a
+/// change to the link's target still reruns.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_input_reached_through_a_symbolic_link_is_hashed() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "real/a.rs", "v1");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::os::unix::fs::symlink("../real/a.rs", dir.path().join("src/a.rs")).unwrap();
+
+    run_once(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    let unchanged = run_once(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    write(dir.path(), "real/a.rs", "v2");
+    let changed = run_once(
+        SRC,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    assert_eq!(
+        ids(&unchanged.summary.cached),
+        vec!["gen"],
+        "the linked file is a real input, so an unchanged run hits"
+    );
+    assert_eq!(
+        changed.executed().len(),
+        1,
+        "a change behind the link must rerun"
+    );
 }

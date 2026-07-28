@@ -463,10 +463,11 @@ async fn process(
 /// The cache's verdict for this beam, plus an optional user-facing notice.
 ///
 /// The verdict is `None` when the beam is not cacheable at all: caching
-/// disabled, no declared `inputs`, a template that will not render, a
-/// dependency with no stable contribution, or an input file that cannot
-/// be hashed. Only that last case carries a notice — it is the one worth
-/// telling the user about, emitted as a stderr line once the beam starts.
+/// disabled, no declared `inputs`, `inputs` that resolve to no file at
+/// all, a template that will not render, a dependency with no stable
+/// contribution, or an input file that cannot be hashed. The last two
+/// filesystem cases carry a notice — they are the ones worth telling the
+/// user about, emitted as a stderr line once the beam starts.
 fn assess(
     task: &BeamTask,
     plan: Option<&RenderedBeam>,
@@ -486,8 +487,23 @@ fn assess(
         return (None, None);
     };
 
+    // A beam that declares `inputs` and resolves none of them is not
+    // cacheable for this run. The fingerprint of an empty file list is a
+    // constant, so the first run would write a manifest nothing can ever
+    // invalidate and every later run would replay it — however much the
+    // sources changed. The ordinary causes are all mistakes worth naming:
+    // a misspelled path, an input directory the project's `.gitignore`
+    // excludes, a pattern that will not compile.
+    let matched = expand_globs(&task.beam.dir, &task.beam.inputs);
+    if matched.is_empty() {
+        return (
+            None,
+            Some("cache: `inputs` matched no file; running without cache".to_string()),
+        );
+    }
+
     let mut files = Vec::new();
-    for (relative, absolute) in expand_globs(&task.beam.dir, &task.beam.inputs) {
+    for (relative, absolute) in matched {
         match hash_file(&absolute) {
             Ok(hash) => files.push((relative, hash)),
             // Unreadable between glob resolution and hashing (deleted,
