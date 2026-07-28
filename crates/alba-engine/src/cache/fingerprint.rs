@@ -21,8 +21,9 @@ pub(crate) struct BeamFacts<'a> {
 }
 
 /// The blake3 hex fingerprint of `facts`. Any change to how this feeds
-/// the hasher must bump `store::FORMAT_VERSION` (Task 3): an old manifest
-/// compared against a new recipe would be silently meaningless.
+/// the hasher must bump `store::FORMAT_VERSION`: a manifest written under
+/// the old recipe would be compared against a hash the new one produces,
+/// and the comparison would be silently meaningless.
 pub(crate) fn fingerprint(facts: &BeamFacts<'_>) -> String {
     let mut hasher = blake3::Hasher::new();
 

@@ -441,7 +441,7 @@ async fn process(
         // Released before replaying: a hit occupies a slot only for as
         // long as deciding it takes, never for reading its logs back.
         drop(permit);
-        replay(task, manifest);
+        replay(task);
         return (
             BeamStatus::Cached,
             Duration::from_millis(manifest.duration_ms),
@@ -612,7 +612,7 @@ impl CacheableBeam {
 /// Announces a hit, then replays its stored output lines in order —
 /// `BeamCached` first, so a consumer sees the hit before any of the
 /// original run's lines, mirroring a live beam's started/output order.
-fn replay(task: &BeamTask, _manifest: &Manifest) {
+fn replay(task: &BeamTask) {
     let _ = task.events.send(RunEvent::BeamCached {
         id: task.beam.id.clone(),
     });
