@@ -3,3 +3,13 @@ name = "alba-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+alba-core = { path = "../alba-core" }
+alba-executors = { path = "../alba-executors" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+alba-executors = { path = "../alba-executors", features = ["test-util"] }

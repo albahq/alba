@@ -19,6 +19,13 @@ dependencies = [
 [[package]]
 name = "alba-engine"
 version = "0.1.0"
+dependencies = [
+ "alba-core",
+ "alba-executors",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "alba-executors"
