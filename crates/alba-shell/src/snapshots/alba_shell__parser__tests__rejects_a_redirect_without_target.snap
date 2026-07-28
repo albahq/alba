@@ -1,0 +1,7 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "err(\"echo hi >\")"
+---
+error: expected a file after `>`
+  │ echo hi >
+  │         ^

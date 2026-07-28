@@ -1,0 +1,134 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "ast(\"echo $(git rev-parse HEAD | cut -c1-7)\")"
+---
+Program {
+    items: [
+        AndOrList {
+            first: Pipeline {
+                negated: false,
+                commands: [
+                    Command {
+                        assignments: [],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "echo",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 0,
+                                    end: 4,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    CmdSubst(
+                                        Program {
+                                            items: [
+                                                AndOrList {
+                                                    first: Pipeline {
+                                                        negated: false,
+                                                        commands: [
+                                                            Command {
+                                                                assignments: [],
+                                                                words: [
+                                                                    Word {
+                                                                        parts: [
+                                                                            Text(
+                                                                                "git",
+                                                                            ),
+                                                                        ],
+                                                                        span: Span {
+                                                                            start: 7,
+                                                                            end: 10,
+                                                                        },
+                                                                    },
+                                                                    Word {
+                                                                        parts: [
+                                                                            Text(
+                                                                                "rev-parse",
+                                                                            ),
+                                                                        ],
+                                                                        span: Span {
+                                                                            start: 11,
+                                                                            end: 20,
+                                                                        },
+                                                                    },
+                                                                    Word {
+                                                                        parts: [
+                                                                            Text(
+                                                                                "HEAD",
+                                                                            ),
+                                                                        ],
+                                                                        span: Span {
+                                                                            start: 21,
+                                                                            end: 25,
+                                                                        },
+                                                                    },
+                                                                ],
+                                                                redirects: [],
+                                                                span: Span {
+                                                                    start: 7,
+                                                                    end: 25,
+                                                                },
+                                                            },
+                                                            Command {
+                                                                assignments: [],
+                                                                words: [
+                                                                    Word {
+                                                                        parts: [
+                                                                            Text(
+                                                                                "cut",
+                                                                            ),
+                                                                        ],
+                                                                        span: Span {
+                                                                            start: 28,
+                                                                            end: 31,
+                                                                        },
+                                                                    },
+                                                                    Word {
+                                                                        parts: [
+                                                                            Text(
+                                                                                "-c1-7",
+                                                                            ),
+                                                                        ],
+                                                                        span: Span {
+                                                                            start: 32,
+                                                                            end: 37,
+                                                                        },
+                                                                    },
+                                                                ],
+                                                                redirects: [],
+                                                                span: Span {
+                                                                    start: 28,
+                                                                    end: 37,
+                                                                },
+                                                            },
+                                                        ],
+                                                    },
+                                                    rest: [],
+                                                },
+                                            ],
+                                        },
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 5,
+                                    end: 38,
+                                },
+                            },
+                        ],
+                        redirects: [],
+                        span: Span {
+                            start: 0,
+                            end: 38,
+                        },
+                    },
+                ],
+            },
+            rest: [],
+        },
+    ],
+}

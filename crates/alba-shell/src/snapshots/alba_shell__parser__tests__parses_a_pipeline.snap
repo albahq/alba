@@ -1,0 +1,112 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "ast(\"cat f | grep x | wc -l\")"
+---
+Program {
+    items: [
+        AndOrList {
+            first: Pipeline {
+                negated: false,
+                commands: [
+                    Command {
+                        assignments: [],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "cat",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 0,
+                                    end: 3,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    Text(
+                                        "f",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 4,
+                                    end: 5,
+                                },
+                            },
+                        ],
+                        redirects: [],
+                        span: Span {
+                            start: 0,
+                            end: 5,
+                        },
+                    },
+                    Command {
+                        assignments: [],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "grep",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 8,
+                                    end: 12,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    Text(
+                                        "x",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 13,
+                                    end: 14,
+                                },
+                            },
+                        ],
+                        redirects: [],
+                        span: Span {
+                            start: 8,
+                            end: 14,
+                        },
+                    },
+                    Command {
+                        assignments: [],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "wc",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 17,
+                                    end: 19,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    Text(
+                                        "-l",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 20,
+                                    end: 22,
+                                },
+                            },
+                        ],
+                        redirects: [],
+                        span: Span {
+                            start: 17,
+                            end: 22,
+                        },
+                    },
+                ],
+            },
+            rest: [],
+        },
+    ],
+}

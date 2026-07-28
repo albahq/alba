@@ -1,0 +1,59 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "ast(\"cargo build --release\")"
+---
+Program {
+    items: [
+        AndOrList {
+            first: Pipeline {
+                negated: false,
+                commands: [
+                    Command {
+                        assignments: [],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "cargo",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 0,
+                                    end: 5,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    Text(
+                                        "build",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 6,
+                                    end: 11,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    Text(
+                                        "--release",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 12,
+                                    end: 21,
+                                },
+                            },
+                        ],
+                        redirects: [],
+                        span: Span {
+                            start: 0,
+                            end: 21,
+                        },
+                    },
+                ],
+            },
+            rest: [],
+        },
+    ],
+}

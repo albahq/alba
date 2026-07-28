@@ -1,0 +1,67 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "ast(\"cmd > out.txt 2>&1 < in.txt\")"
+---
+Program {
+    items: [
+        AndOrList {
+            first: Pipeline {
+                negated: false,
+                commands: [
+                    Command {
+                        assignments: [],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "cmd",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 0,
+                                    end: 3,
+                                },
+                            },
+                        ],
+                        redirects: [
+                            Out {
+                                stderr: false,
+                                append: false,
+                                target: Word {
+                                    parts: [
+                                        Text(
+                                            "out.txt",
+                                        ),
+                                    ],
+                                    span: Span {
+                                        start: 6,
+                                        end: 13,
+                                    },
+                                },
+                            },
+                            StderrToStdout,
+                            In {
+                                target: Word {
+                                    parts: [
+                                        Text(
+                                            "in.txt",
+                                        ),
+                                    ],
+                                    span: Span {
+                                        start: 21,
+                                        end: 27,
+                                    },
+                                },
+                            },
+                        ],
+                        span: Span {
+                            start: 0,
+                            end: 27,
+                        },
+                    },
+                ],
+            },
+            rest: [],
+        },
+    ],
+}

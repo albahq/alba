@@ -10,6 +10,11 @@ use crate::token::{Span, Token, TokenKind, Word, WordPart};
 /// error, shared so the copy stays consistent.
 pub(crate) const OUT_OF_SUBSET_HELP: &str = "move the logic into a script invoked by `run`, or declare `executor system_shell` on this beam";
 
+/// Convenience wrapper over `lex_at` for a source with no outer offset.
+/// Production code always goes through `lex_at` (the parser lexes at an
+/// offset when recursing into command substitution), so this is only
+/// exercised by the lexer's own tests.
+#[allow(dead_code)]
 pub(crate) fn lex(source: &str) -> Result<Vec<Token>, ShellParseError> {
     lex_at(source, 0)
 }

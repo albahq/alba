@@ -1,0 +1,7 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "err(\"a &&\")"
+---
+error: expected a command after `&&`
+  │ a &&
+  │   ^^

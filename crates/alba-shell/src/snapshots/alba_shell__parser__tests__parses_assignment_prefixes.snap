@@ -1,0 +1,77 @@
+---
+source: crates/alba-shell/src/parser.rs
+expression: "ast(\"RUST_LOG=debug FOO=$bar cargo test\")"
+---
+Program {
+    items: [
+        AndOrList {
+            first: Pipeline {
+                negated: false,
+                commands: [
+                    Command {
+                        assignments: [
+                            Assignment {
+                                name: "RUST_LOG",
+                                value: Word {
+                                    parts: [
+                                        Text(
+                                            "debug",
+                                        ),
+                                    ],
+                                    span: Span {
+                                        start: 9,
+                                        end: 14,
+                                    },
+                                },
+                            },
+                            Assignment {
+                                name: "FOO",
+                                value: Word {
+                                    parts: [
+                                        Var(
+                                            "bar",
+                                        ),
+                                    ],
+                                    span: Span {
+                                        start: 19,
+                                        end: 23,
+                                    },
+                                },
+                            },
+                        ],
+                        words: [
+                            Word {
+                                parts: [
+                                    Text(
+                                        "cargo",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 24,
+                                    end: 29,
+                                },
+                            },
+                            Word {
+                                parts: [
+                                    Text(
+                                        "test",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 30,
+                                    end: 34,
+                                },
+                            },
+                        ],
+                        redirects: [],
+                        span: Span {
+                            start: 0,
+                            end: 34,
+                        },
+                    },
+                ],
+            },
+            rest: [],
+        },
+    ],
+}
