@@ -10,13 +10,15 @@
 
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+use crate::interp::Out;
 use crate::{ShellOutputLine, ShellStream};
 
 /// How long to wait, after sending the platform's "please stop" signal,
@@ -44,8 +46,10 @@ const GRACE_PERIOD: Duration = Duration::from_secs(5);
 const DRAIN_PERIOD: Duration = Duration::from_secs(2);
 
 /// Runs `path` with `args` and `env` as its complete environment, cwd
-/// `cwd`, streaming stdout/stderr line-by-line to `output` and
-/// honouring `cancel` with a graceful-then-forceful termination.
+/// `cwd`, streaming stderr line-by-line to `output` and stdout to `out`
+/// (the real channel, line-by-line, or an in-memory capture buffer for
+/// command substitution — see `interp::Out`), honouring `cancel` with a
+/// graceful-then-forceful termination.
 ///
 /// Returns the child's exit code; a spawn failure (the resolved path
 /// exists but cannot be executed) reports a stderr line and returns
@@ -57,6 +61,7 @@ pub(crate) async fn run_external(
     args: &[String],
     env: &[(String, String)],
     cwd: &Path,
+    out: &Out,
     output: &UnboundedSender<ShellOutputLine>,
     cancel: &CancellationToken,
 ) -> i32 {
@@ -80,7 +85,10 @@ pub(crate) async fn run_external(
         .take()
         .expect("child spawned with piped stderr");
 
-    let mut stdout_task = tokio::spawn(stream_lines(stdout, ShellStream::Stdout, output.clone()));
+    let mut stdout_task = match out.clone() {
+        Out::Lines(sender) => tokio::spawn(stream_lines(stdout, ShellStream::Stdout, sender)),
+        Out::Capture(buffer) => tokio::spawn(capture_bytes(stdout, buffer)),
+    };
     let mut stderr_task = tokio::spawn(stream_lines(stderr, ShellStream::Stderr, output.clone()));
 
     let status: Option<ExitStatus> = tokio::select! {
@@ -163,6 +171,23 @@ where
         // child is never blocked writing into a full pipe while it
         // still runs.
         let _ = output.send(ShellOutputLine { stream, text });
+    }
+}
+
+/// Reads `reader` to EOF and appends every byte read to `buffer`, for
+/// command substitution: unlike [`stream_lines`], nothing is split into
+/// lines or sent anywhere — the raw bytes are what `expand.rs` needs to
+/// preserve interior newlines while it strips only the trailing ones.
+async fn capture_bytes<R>(mut reader: R, buffer: Arc<Mutex<Vec<u8>>>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut data = Vec::new();
+    if reader.read_to_end(&mut data).await.is_ok() {
+        buffer
+            .lock()
+            .expect("capture buffer poisoned")
+            .extend_from_slice(&data);
     }
 }
 

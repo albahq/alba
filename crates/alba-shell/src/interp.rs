@@ -3,14 +3,16 @@
 //! `ShellStream`, `ShellResult`, `execute`), consumed directly by
 //! `alba-executors` from Task 10 onward.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::ast::{AndOrList, AndOrOp, Command, Pipeline, Program};
 use crate::builtins;
-use crate::expand::expand_word_literal;
+use crate::expand::{self, ExpandCtx};
 use crate::spawn;
 use crate::state::{ShellState, Var};
 
@@ -56,26 +58,53 @@ pub(crate) enum Flow {
     Exit(i32),
 }
 
+/// Where a command's stdout goes: the real output channel for ordinary
+/// execution, or an in-memory buffer while capturing a command
+/// substitution's stdout (see [`execute_captured`]). Threaded through
+/// builtins (via [`Lines`]) and `spawn.rs` alongside the plain
+/// `UnboundedSender` every level already carries for stderr, which
+/// keeps reaching the outer output regardless of capturing — only
+/// stdout is ever redirected into a buffer.
+#[derive(Clone)]
+pub(crate) enum Out {
+    Lines(UnboundedSender<ShellOutputLine>),
+    Capture(Arc<Mutex<Vec<u8>>>),
+}
+
 /// A small sink builtins write whole output lines through, so they
-/// don't need to know about channels or `ShellOutputLine` directly.
+/// don't need to know about channels, capture buffers, or
+/// `ShellOutputLine` directly. Stdout honours `out` (a real channel or
+/// a capture buffer); stderr always reaches `stderr_to`, the real
+/// output channel, whether or not stdout is being captured.
 pub(crate) struct Lines<'a> {
-    output: &'a UnboundedSender<ShellOutputLine>,
+    out: &'a Out,
+    stderr_to: &'a UnboundedSender<ShellOutputLine>,
 }
 
 impl<'a> Lines<'a> {
-    fn new(output: &'a UnboundedSender<ShellOutputLine>) -> Self {
-        Self { output }
+    fn new(out: &'a Out, stderr_to: &'a UnboundedSender<ShellOutputLine>) -> Self {
+        Self { out, stderr_to }
     }
 
     pub(crate) fn stdout(&self, text: impl Into<String>) {
-        let _ = self.output.send(ShellOutputLine {
-            stream: ShellStream::Stdout,
-            text: text.into(),
-        });
+        match self.out {
+            Out::Lines(sender) => {
+                let _ = sender.send(ShellOutputLine {
+                    stream: ShellStream::Stdout,
+                    text: text.into(),
+                });
+            }
+            Out::Capture(buffer) => {
+                let text = text.into();
+                let mut buffer = buffer.lock().expect("capture buffer poisoned");
+                buffer.extend_from_slice(text.as_bytes());
+                buffer.push(b'\n');
+            }
+        }
     }
 
     pub(crate) fn stderr(&self, text: impl Into<String>) {
-        let _ = self.output.send(ShellOutputLine {
+        let _ = self.stderr_to.send(ShellOutputLine {
             stream: ShellStream::Stderr,
             text: text.into(),
         });
@@ -86,16 +115,49 @@ impl<'a> Lines<'a> {
 /// program exits 0.
 pub async fn execute(program: &Program, env: ShellEnv) -> ShellResult {
     let mut state = ShellState::new(env.env, env.cwd);
-    let flow = exec_program(program, &mut state, &env.output, &env.cancel).await;
+    let out = Out::Lines(env.output.clone());
+    let flow = exec_program(program, &mut state, &out, &env.output, &env.cancel).await;
     let exit_code = match flow {
         Flow::Next(code) | Flow::Exit(code) => code,
     };
     ShellResult { exit_code }
 }
 
+/// Runs `program` with its stdout captured into memory instead of sent
+/// to the outer channel, for command substitution. Stderr still
+/// forwards to `ctx.output` as it always does. Returns the exit code
+/// (a frozen simplification: `expand.rs` discards it) and the captured
+/// stdout, CRLF-normalized but with no trailing-newline stripping —
+/// that trim is `expand.rs`'s job, since interior newlines must survive
+/// for later splitting.
+///
+/// A plain `fn` returning `impl Future` (not an `async fn`) so its body
+/// can box the recursive descent back into `exec_program`: without that
+/// indirection, the mutual recursion `exec_command` -> `expand::expand_words`
+/// -> `execute_captured` -> `exec_program` -> ... -> `exec_command` would
+/// require the compiler to lay out an infinitely-sized future type.
+pub(crate) fn execute_captured<'a>(
+    program: &'a Program,
+    state: &'a mut ShellState,
+    ctx: &'a ExpandCtx<'a>,
+) -> impl Future<Output = (i32, String)> + 'a {
+    Box::pin(async move {
+        let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let out = Out::Capture(buffer.clone());
+        let flow = exec_program(program, state, &out, ctx.output, ctx.cancel).await;
+        let code = match flow {
+            Flow::Next(code) | Flow::Exit(code) => code,
+        };
+        let bytes = buffer.lock().expect("capture buffer poisoned").clone();
+        let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+        (code, text)
+    })
+}
+
 async fn exec_program(
     program: &Program,
     state: &mut ShellState,
+    out: &Out,
     output: &UnboundedSender<ShellOutputLine>,
     cancel: &CancellationToken,
 ) -> Flow {
@@ -107,7 +169,7 @@ async fn exec_program(
         if cancel.is_cancelled() {
             return Flow::Exit(130);
         }
-        match exec_and_or_list(item, state, output, cancel).await {
+        match exec_and_or_list(item, state, out, output, cancel).await {
             Flow::Exit(code) => return Flow::Exit(code),
             Flow::Next(next) => code = next,
         }
@@ -118,10 +180,11 @@ async fn exec_program(
 async fn exec_and_or_list(
     list: &AndOrList,
     state: &mut ShellState,
+    out: &Out,
     output: &UnboundedSender<ShellOutputLine>,
     cancel: &CancellationToken,
 ) -> Flow {
-    let mut code = match exec_pipeline(&list.first, state, output, cancel).await {
+    let mut code = match exec_pipeline(&list.first, state, out, output, cancel).await {
         Flow::Exit(code) => return Flow::Exit(code),
         Flow::Next(code) => code,
     };
@@ -134,7 +197,7 @@ async fn exec_and_or_list(
         if !should_run {
             continue;
         }
-        code = match exec_pipeline(pipeline, state, output, cancel).await {
+        code = match exec_pipeline(pipeline, state, out, output, cancel).await {
             Flow::Exit(code) => return Flow::Exit(code),
             Flow::Next(code) => code,
         };
@@ -146,6 +209,7 @@ async fn exec_and_or_list(
 async fn exec_pipeline(
     pipeline: &Pipeline,
     state: &mut ShellState,
+    out: &Out,
     output: &UnboundedSender<ShellOutputLine>,
     cancel: &CancellationToken,
 ) -> Flow {
@@ -154,7 +218,7 @@ async fn exec_pipeline(
     }
 
     if pipeline.commands.len() == 1 {
-        return match exec_command(&pipeline.commands[0], state, output, cancel).await {
+        return match exec_command(&pipeline.commands[0], state, out, output, cancel).await {
             Flow::Exit(code) => Flow::Exit(code),
             Flow::Next(code) => {
                 let code = if pipeline.negated { negate(code) } else { code };
@@ -169,7 +233,7 @@ async fn exec_pipeline(
     // replaces this with real pipe wiring; do not test multi-stage
     // pipelines against this behaviour, it is intentionally temporary.
     for command in &pipeline.commands {
-        if let Flow::Exit(code) = exec_command(command, state, output, cancel).await {
+        if let Flow::Exit(code) = exec_command(command, state, out, output, cancel).await {
             return Flow::Exit(code);
         }
     }
@@ -184,19 +248,25 @@ fn negate(code: i32) -> i32 {
 async fn exec_command(
     command: &Command,
     state: &mut ShellState,
+    out: &Out,
     output: &UnboundedSender<ShellOutputLine>,
     cancel: &CancellationToken,
 ) -> Flow {
-    let assignments: Vec<(String, String)> = command
-        .assignments
-        .iter()
-        .map(|a| (a.name.clone(), expand_word_literal(&a.value, state)))
-        .collect();
-    let words: Vec<String> = command
-        .words
-        .iter()
-        .map(|w| expand_word_literal(w, state))
-        .collect();
+    let ctx = ExpandCtx { output, cancel };
+
+    let mut assignments = Vec::with_capacity(command.assignments.len());
+    for assignment in &command.assignments {
+        let value = match expand::expand_word_single(&assignment.value, state, &ctx).await {
+            Ok(value) => value,
+            Err(flow) => return flow,
+        };
+        assignments.push((assignment.name.clone(), value));
+    }
+
+    let words = match expand::expand_words(&command.words, state, &ctx).await {
+        Ok(words) => words,
+        Err(flow) => return flow,
+    };
 
     if words.is_empty() {
         // An assignment-only command (`FOO=bar`) sets unexported shell
@@ -211,14 +281,14 @@ async fn exec_command(
     let overlay = AssignmentOverlay::apply(state, &assignments);
     let name = words[0].as_str();
     let args = &words[1..];
-    let io = Lines::new(output);
+    let io = Lines::new(out, output);
 
     let flow = if !has_path_separator(name)
         && let Some(builtin) = builtins::find(name)
     {
         builtins::run(builtin, args, state, &io)
     } else {
-        run_external_command(name, args, state, output, cancel).await
+        run_external_command(name, args, state, out, output, cancel).await
     };
 
     overlay.restore(state);
@@ -234,6 +304,7 @@ async fn run_external_command(
     name: &str,
     args: &[String],
     state: &ShellState,
+    out: &Out,
     output: &UnboundedSender<ShellOutputLine>,
     cancel: &CancellationToken,
 ) -> Flow {
@@ -250,13 +321,13 @@ async fn run_external_command(
     };
 
     let Some(path) = resolved else {
-        let io = Lines::new(output);
+        let io = Lines::new(out, output);
         io.stderr(not_found_message(name));
         return Flow::Next(127);
     };
 
     let env = state.exported_env();
-    let code = spawn::run_external(&path, args, &env, &state.cwd, output, cancel).await;
+    let code = spawn::run_external(&path, args, &env, &state.cwd, out, output, cancel).await;
 
     // A cancellation that arrived while the external was running is
     // reported the same way as one caught between commands: exit 130,

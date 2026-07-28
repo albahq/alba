@@ -44,7 +44,7 @@ channel, the cache, and the renderers do not change.
 | Unsupported syntax  | Deterministic error with span and suggestion; no automatic fallback                    |
 | Validation timing   | `alba check` parses statically known commands; every rendered command parses pre-spawn |
 | Crate position      | `alba-shell` is standalone, no dependency on any other Alba crate                      |
-| Non-core primitives | `globset` for globbing, `which` for PATH resolution, `os_pipe`/tokio for pipes        |
+| Non-core primitives | `glob` for globbing, `which` for PATH resolution, `os_pipe`/tokio for pipes           |
 
 ## Supported language
 
@@ -53,7 +53,7 @@ channel, the cache, and the renderers do not change.
 - Redirections: `>`, `>>`, `<`, `2>`, `2>>`, `2>&1`.
 - POSIX quoting: single quotes (literal), double quotes (expansions apply), backslash escapes.
 - Expansions: `$VAR`, `${VAR}`, command substitution `$(...)`, tilde `~` at the start of a word, globbing `*`,
-  `?`, `[...]` via `globset`. Globs resolve against the raw disk; no `.gitignore` filtering (this is a shell, not
+  `?`, `[...]` via `glob`. Globs resolve against the raw disk; no `.gitignore` filtering (this is a shell, not
   the cache).
 - Variables: shell assignment `FOO=bar` (scoped to the current `run` line), environment prefix `FOO=bar cmd`, and
   the `export` / `unset` builtins. Each entry of a `run [...]` list is an independent shell invocation: variables
