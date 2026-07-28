@@ -90,15 +90,17 @@ One blake3 hash per beam, fed with:
 - Each file resolved by the `inputs` globs, as a sorted list of
   (project-relative path, blake3 content hash) pairs.
 - The rendered `run` command(s), after interpolation.
+- The resolved `cwd` the commands run in: the same command in another
+  directory is another invocation.
 - The resolved `env` block.
 - The beam arguments, when the beam is parameterized.
 - The fingerprint of each `need`, in a stable order.
 
 For a non-cacheable `need` (one without declared `inputs`), its
-contribution is its static part only: rendered command, resolved
-environment, and arguments. A non-cacheable dependency therefore does
-not poison the cascade; if its actual output changes, the dependent's
-own `inputs` catch the change by content.
+contribution is its static part only: rendered command, working
+directory, resolved environment, and arguments. A non-cacheable
+dependency therefore does not poison the cascade; if its actual output
+changes, the dependent's own `inputs` catch the change by content.
 
 The fingerprint recipe is part of the manifest format version: any
 change to the recipe bumps the version and invalidates existing

@@ -400,6 +400,19 @@ async fn process(
     task: &BeamTask,
     contributions: &[Option<String>],
 ) -> (BeamStatus, Duration, Option<String>) {
+    // A run that is already stopping starts no beam, and holding a cache
+    // hit is not an exception: this beam never started, so it is cancelled
+    // like any other. `Cached` counts as satisfied, so replaying a hit here
+    // would release this beam's dependents and let an aborting run report a
+    // whole subgraph green. Checked before the assessment, not merely
+    // before the hit is returned, so an aborting run also stops expanding
+    // globs and hashing files instead of fingerprinting its way through the
+    // rest of the graph. `execute` keeps its own check for the beams that
+    // reach it.
+    if task.stop.is_cancelled() {
+        return (BeamStatus::Cancelled, Duration::ZERO, None);
+    }
+
     let plan = render(&task.beam, &task.args).ok();
     let (assessment, notice) = assess(task, plan.as_ref(), contributions);
 
@@ -416,7 +429,12 @@ async fn process(
 
     let contribution = match (&assessment, &plan) {
         (Some(assessment), _) => Some(assessment.fingerprint.clone()),
-        (None, Some(plan)) => Some(static_contribution(&plan.commands, &plan.env, &task.args)),
+        (None, Some(plan)) => Some(static_contribution(
+            &plan.commands,
+            &plan.cwd.to_string_lossy(),
+            &plan.env,
+            &task.args,
+        )),
         (None, None) => None,
     };
 
@@ -488,6 +506,7 @@ fn assess(
     let fingerprint = fingerprint(&BeamFacts {
         files: &files,
         commands: &plan.commands,
+        cwd: &plan.cwd.to_string_lossy(),
         env: &plan.env,
         args: &task.args,
         needs: &needs,

@@ -619,3 +619,136 @@ async fn the_cached_duration_is_the_original_runs() {
         "the reported duration must be the original run's, not the replay's"
     );
 }
+
+#[tokio::test]
+async fn a_changed_cwd_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    let with_cwd = |where_in: &str| {
+        format!(
+            "beam gen {{\n  cwd \"{where_in}\"\n  inputs [\"data.txt\"]\n  run \"generate\"\n}}\n"
+        )
+    };
+
+    run_once(
+        &with_cwd("build"),
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    let same = run_once(
+        &with_cwd("build"),
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    let different = run_once(
+        &with_cwd("dist"),
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    assert!(same.executed().is_empty(), "the same cwd must hit");
+    assert_eq!(
+        different.executed().len(),
+        1,
+        "a beam that now runs somewhere else must rerun"
+    );
+}
+
+/// A beam holding a valid manifest must still report `Cancelled` once
+/// fail-fast has stopped the run: a hit is not a licence to keep walking a
+/// subgraph the run has abandoned.
+///
+/// `build` is gated behind `slow` so the assertion does not depend on
+/// which of two independent beams its task happens to be polled first —
+/// the cache decision is taken as soon as a beam's dependencies are
+/// satisfied, so an ungated sibling would race `broken`'s failure. The
+/// control run in the middle proves the manifest really is a hit, without
+/// which the last assertion would hold vacuously.
+#[tokio::test]
+async fn a_pending_hit_is_cancelled_when_the_run_is_already_stopping() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app.txt", "v1");
+    const SOURCE: &str = r#"
+beam broken {
+  run "explode"
+}
+
+beam slow {
+  run "wait"
+}
+
+beam build {
+  needs [slow]
+  inputs ["app.txt"]
+  run "compile"
+}
+
+beam all {
+  needs [broken, build]
+  run "finish"
+}
+"#;
+    let gated = || {
+        FakeExecutor::new().on(
+            "wait",
+            FakeBehavior {
+                delay: Duration::from_millis(200),
+                ..Default::default()
+            },
+        )
+    };
+
+    run_once(
+        SOURCE,
+        "all",
+        dir.path(),
+        options(dir.path(), false),
+        gated(),
+    )
+    .await;
+    let control = run_once(
+        SOURCE,
+        "all",
+        dir.path(),
+        options(dir.path(), false),
+        gated(),
+    )
+    .await;
+    let stopping = run_once(
+        SOURCE,
+        "all",
+        dir.path(),
+        options(dir.path(), false),
+        gated().on(
+            "explode",
+            FakeBehavior {
+                exit_code: 1,
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    assert_eq!(ids(&control.summary.cached), vec!["build"]);
+    assert_eq!(ids(&stopping.summary.failed), vec!["broken"]);
+    assert!(
+        stopping.summary.cached.is_empty(),
+        "a stopping run must report no hit"
+    );
+    assert_eq!(ids(&stopping.summary.cancelled), vec!["build", "all"]);
+    assert!(
+        !stopping
+            .events
+            .iter()
+            .any(|event| matches!(event, RunEvent::BeamCached { .. }))
+    );
+}

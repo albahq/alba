@@ -9,10 +9,12 @@ use std::path::Path;
 
 /// Everything that participates in a beam's fingerprint. `files` is the
 /// sorted `(relative path, content hash)` list `expand_globs` + [`hash_file`]
-/// produce; `needs` is each dependency's contribution, in `needs` order.
+/// produce; `cwd` is the rendered directory the commands run in; `needs` is
+/// each dependency's contribution, in `needs` order.
 pub(crate) struct BeamFacts<'a> {
     pub files: &'a [(String, String)],
     pub commands: &'a [String],
+    pub cwd: &'a str,
     pub env: &'a [(String, String)],
     pub args: &'a [String],
     pub needs: &'a [String],
@@ -33,6 +35,10 @@ pub(crate) fn fingerprint(facts: &BeamFacts<'_>) -> String {
     for command in facts.commands {
         item(&mut hasher, command);
     }
+    // Right after the commands: where they run completes what runs, and
+    // the same command in another directory is another invocation.
+    item(&mut hasher, "cwd");
+    item(&mut hasher, facts.cwd);
     item(&mut hasher, "env");
     for (name, value) in facts.env {
         item(&mut hasher, name);
@@ -51,17 +57,20 @@ pub(crate) fn fingerprint(facts: &BeamFacts<'_>) -> String {
 }
 
 /// What a beam that cannot be cached (no declared `inputs`) contributes to
-/// its dependents' fingerprints: its static parts only. This keeps a
-/// non-cacheable dependency from poisoning the cascade — if its actual
-/// output changes, the dependent's own `inputs` catch that by content.
+/// its dependents' fingerprints: its static parts only — what it runs,
+/// where, and with what. This keeps a non-cacheable dependency from
+/// poisoning the cascade — if its actual output changes, the dependent's
+/// own `inputs` catch that by content.
 pub(crate) fn static_contribution(
     commands: &[String],
+    cwd: &str,
     env: &[(String, String)],
     args: &[String],
 ) -> String {
     fingerprint(&BeamFacts {
         files: &[],
         commands,
+        cwd,
         env,
         args,
         needs: &[],
@@ -98,6 +107,7 @@ mod tests {
     fn facts_fingerprint(
         files: &[(&str, &str)],
         commands: &[&str],
+        cwd: &str,
         env: &[(&str, &str)],
         args: &[&str],
         needs: &[&str],
@@ -105,6 +115,7 @@ mod tests {
         fingerprint(&BeamFacts {
             files: &pairs(files),
             commands: &strings(commands),
+            cwd,
             env: &pairs(env),
             args: &strings(args),
             needs: &strings(needs),
@@ -113,22 +124,93 @@ mod tests {
 
     #[test]
     fn identical_facts_produce_identical_fingerprints() {
-        let a = facts_fingerprint(&[("src/a.rs", "h1")], &["build"], &[("K", "v")], &[], &[]);
-        let b = facts_fingerprint(&[("src/a.rs", "h1")], &["build"], &[("K", "v")], &[], &[]);
+        let a = facts_fingerprint(
+            &[("src/a.rs", "h1")],
+            &["build"],
+            "/p",
+            &[("K", "v")],
+            &[],
+            &[],
+        );
+        let b = facts_fingerprint(
+            &[("src/a.rs", "h1")],
+            &["build"],
+            "/p",
+            &[("K", "v")],
+            &[],
+            &[],
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn every_field_participates_in_the_fingerprint() {
-        let base = facts_fingerprint(&[("a", "h1")], &["cmd"], &[("K", "v")], &["arg"], &["n1"]);
+        let base = facts_fingerprint(
+            &[("a", "h1")],
+            &["cmd"],
+            "/p",
+            &[("K", "v")],
+            &["arg"],
+            &["n1"],
+        );
 
         let variants = [
-            facts_fingerprint(&[("a", "h2")], &["cmd"], &[("K", "v")], &["arg"], &["n1"]),
-            facts_fingerprint(&[("b", "h1")], &["cmd"], &[("K", "v")], &["arg"], &["n1"]),
-            facts_fingerprint(&[("a", "h1")], &["cmd2"], &[("K", "v")], &["arg"], &["n1"]),
-            facts_fingerprint(&[("a", "h1")], &["cmd"], &[("K", "w")], &["arg"], &["n1"]),
-            facts_fingerprint(&[("a", "h1")], &["cmd"], &[("K", "v")], &["other"], &["n1"]),
-            facts_fingerprint(&[("a", "h1")], &["cmd"], &[("K", "v")], &["arg"], &["n2"]),
+            facts_fingerprint(
+                &[("a", "h2")],
+                &["cmd"],
+                "/p",
+                &[("K", "v")],
+                &["arg"],
+                &["n1"],
+            ),
+            facts_fingerprint(
+                &[("b", "h1")],
+                &["cmd"],
+                "/p",
+                &[("K", "v")],
+                &["arg"],
+                &["n1"],
+            ),
+            facts_fingerprint(
+                &[("a", "h1")],
+                &["cmd2"],
+                "/p",
+                &[("K", "v")],
+                &["arg"],
+                &["n1"],
+            ),
+            facts_fingerprint(
+                &[("a", "h1")],
+                &["cmd"],
+                "/q",
+                &[("K", "v")],
+                &["arg"],
+                &["n1"],
+            ),
+            facts_fingerprint(
+                &[("a", "h1")],
+                &["cmd"],
+                "/p",
+                &[("K", "w")],
+                &["arg"],
+                &["n1"],
+            ),
+            facts_fingerprint(
+                &[("a", "h1")],
+                &["cmd"],
+                "/p",
+                &[("K", "v")],
+                &["other"],
+                &["n1"],
+            ),
+            facts_fingerprint(
+                &[("a", "h1")],
+                &["cmd"],
+                "/p",
+                &[("K", "v")],
+                &["arg"],
+                &["n2"],
+            ),
         ];
         for variant in variants {
             assert_ne!(base, variant);
@@ -139,17 +221,18 @@ mod tests {
     /// plain concatenation would collide them.
     #[test]
     fn adjacent_items_cannot_collide_by_concatenation() {
-        let joined = facts_fingerprint(&[], &["ab"], &[], &[], &[]);
-        let split = facts_fingerprint(&[], &["a", "b"], &[], &[], &[]);
+        let joined = facts_fingerprint(&[], &["ab"], "/p", &[], &[], &[]);
+        let split = facts_fingerprint(&[], &["a", "b"], "/p", &[], &[], &[]);
         assert_ne!(joined, split);
     }
 
     #[test]
     fn the_static_contribution_ignores_files_and_needs() {
-        let contribution = static_contribution(&strings(&["cmd"]), &pairs(&[("K", "v")]), &[]);
+        let contribution =
+            static_contribution(&strings(&["cmd"]), "/p", &pairs(&[("K", "v")]), &[]);
         assert_eq!(
             contribution,
-            facts_fingerprint(&[], &["cmd"], &[("K", "v")], &[], &[])
+            facts_fingerprint(&[], &["cmd"], "/p", &[("K", "v")], &[], &[])
         );
     }
 
