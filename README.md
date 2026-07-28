@@ -83,6 +83,11 @@ all checks passed
 ✓ 3 succeeded · ⚠ 1 failed (allowed) · 0.0s
 ```
 
+`build` and `lint` have no `needs` of their own, so they run concurrently and
+race to finish first — running this yourself, don't be surprised if their
+lines come out in the opposite order. The rest (`test` waiting on `build`,
+`check` waiting on both) is always ordered the same way.
+
 ### Flags
 
 Common to every subcommand:
