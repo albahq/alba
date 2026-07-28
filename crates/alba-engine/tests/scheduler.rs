@@ -12,12 +12,16 @@
 //! current-thread runtime, where tasks are polled in spawn order; the ones
 //! asserting real concurrency run on a multi-threaded one.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
 use alba_engine::{BeamStatus, EngineError, RunEvent, RunOptions, RunSummary, run};
-use alba_executors::{FakeBehavior, FakeExecutor, OutputLine, Stream};
+use alba_executors::{
+    CommandSpec, ExecContext, ExecError, ExecResult, Executor, FakeBehavior, FakeExecutor,
+    OutputLine, Stream,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Everything one `run` produced: its result and every event it emitted,
@@ -65,7 +69,7 @@ async fn run_target(
     source: &str,
     target: &str,
     options: RunOptions,
-    executor: Arc<FakeExecutor>,
+    executor: Arc<dyn Executor>,
 ) -> Outcome {
     run_target_with_cancel(source, target, options, executor, CancellationToken::new()).await
 }
@@ -74,7 +78,7 @@ async fn run_target_with_cancel(
     source: &str,
     target: &str,
     options: RunOptions,
-    executor: Arc<FakeExecutor>,
+    executor: Arc<dyn Executor>,
     cancel: CancellationToken,
 ) -> Outcome {
     let project = load_str(source).expect("the test Beamfile must load");
@@ -130,8 +134,13 @@ fn only(indexes: Vec<usize>, what: &str) -> usize {
     indexes[0]
 }
 
+/// Dependency order, and that independent beams are not accidentally
+/// serialized. The `jobs` bound itself is pinned by
+/// [`parallelism_never_exceeds_the_jobs_limit`]: this diamond can never
+/// exceed two concurrent beams by its own shape, so its `running_peak`
+/// assertion would survive the semaphore being removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn respects_dependency_order_and_parallelism_limit() {
+async fn respects_dependency_order_and_runs_independent_beams_concurrently() {
     const SOURCE: &str = r#"
 beam a { run "step a" }
 beam b { needs [a] run "step b" }
@@ -140,7 +149,7 @@ beam d { needs [b, c] run "step d" }
 "#;
 
     let executor = Arc::new(FakeExecutor::new().on("step", behavior(0, 50)));
-    let outcome = run_target(SOURCE, "d", options(2, false), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "d", options(2, false), executor.clone()).await;
 
     let commands = commands(&executor);
     assert_eq!(
@@ -167,6 +176,38 @@ beam d { needs [b, c] run "step d" }
     assert_eq!(summary.exit_code(), 0);
 }
 
+/// `--jobs N` really bounds how many beams run at once. Four mutually
+/// independent beams would all overlap if nothing held them back, so the
+/// peak is the bound itself and not an artifact of the graph's shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallelism_never_exceeds_the_jobs_limit() {
+    const SOURCE: &str = r#"
+beam one { run "step one" }
+beam two { run "step two" }
+beam three { run "step three" }
+beam four { run "step four" }
+beam all { needs [one, two, three, four] run "step all" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("step", behavior(0, 50)));
+    let outcome = run_target(SOURCE, "all", options(2, false), executor.clone()).await;
+    assert_eq!(outcome.summary().cancelled.len(), 0);
+    assert_eq!(
+        executor.running_peak(),
+        2,
+        "four independent beams under jobs=2 must never exceed two at once"
+    );
+
+    let executor = Arc::new(FakeExecutor::new().on("step", behavior(0, 20)));
+    let outcome = run_target(SOURCE, "all", options(1, false), executor.clone()).await;
+    assert_eq!(outcome.summary().succeeded.len(), 5);
+    assert_eq!(
+        executor.running_peak(),
+        1,
+        "jobs=1 must serialize the run completely"
+    );
+}
+
 /// Fail-fast cancels every beam that has not started yet, but a beam that
 /// already holds a permit keeps running to completion. Note the
 /// counter-intuitive consequence the rule implies and this test pins:
@@ -187,7 +228,7 @@ beam all { needs [b, d] run "step all" }
             .on("fail b", behavior(1, 50))
             .on("slow c", behavior(0, 300)),
     );
-    let outcome = run_target(SOURCE, "all", options(2, false), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "all", options(2, false), executor.clone()).await;
 
     let summary = outcome.summary();
     assert_eq!(ids(&summary.failed), ["b"]);
@@ -233,7 +274,7 @@ beam all { needs [d, e] run "step all" }
             .on("fail b", behavior(1, 10))
             .on("step d", behavior(0, 10)),
     );
-    let outcome = run_target(SOURCE, "all", options(1, true), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "all", options(1, true), executor.clone()).await;
 
     let summary = outcome.summary();
     assert_eq!(ids(&summary.failed), ["b"]);
@@ -256,7 +297,7 @@ beam build { needs [lint] run "run build" }
 "#;
 
     let executor = Arc::new(FakeExecutor::new().on("run lint", behavior(1, 0)));
-    let outcome = run_target(SOURCE, "build", options(2, false), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
 
     let summary = outcome.summary();
     assert_eq!(ids(&summary.failed_allowed), ["lint"]);
@@ -270,6 +311,154 @@ beam build { needs [lint] run "run build" }
     );
 
     assert_eq!(commands(&executor), ["run lint", "run build"]);
+}
+
+/// A beam's commands run one after another and stop at the first failure:
+/// a beam declaring `["build", "deploy"]` must not deploy what did not
+/// build.
+#[tokio::test]
+async fn a_failing_command_skips_the_rest_of_its_beam() {
+    const SOURCE: &str = r#"
+beam release { run ["fail first", "never second"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("fail first", behavior(3, 0)));
+    let outcome = run_target(SOURCE, "release", options(2, false), executor.clone()).await;
+
+    assert_eq!(
+        commands(&executor),
+        ["fail first"],
+        "the second command must never run"
+    );
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed), ["release"]);
+    assert_eq!(summary.exit_code(), 1);
+}
+
+/// The same rule under `allow_failure`: the beam's outcome is forgiving,
+/// its remaining commands are not still run.
+#[tokio::test]
+async fn a_failing_command_skips_the_rest_even_when_failure_is_allowed() {
+    const SOURCE: &str = r#"
+beam lint { allow_failure true run ["fail first", "never second"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("fail first", behavior(1, 0)));
+    let outcome = run_target(SOURCE, "lint", options(2, false), executor.clone()).await;
+
+    assert_eq!(commands(&executor), ["fail first"]);
+    assert_eq!(ids(&outcome.summary().failed_allowed), ["lint"]);
+}
+
+/// An `Executor` that cannot spawn a command at all — a missing shell, a
+/// `cwd` that does not exist. Scriptable behaviour `FakeExecutor` does not
+/// offer today (see the task report), so this test drives the case
+/// directly through the trait.
+struct SpawnFailureExecutor;
+
+#[async_trait::async_trait]
+impl Executor for SpawnFailureExecutor {
+    async fn execute(&self, cmd: CommandSpec, _ctx: ExecContext) -> Result<ExecResult, ExecError> {
+        if cmd.command.contains("broken") {
+            return Err(ExecError {
+                message: format!("failed to spawn `{}`", cmd.command),
+            });
+        }
+        Ok(ExecResult { exit_code: 0 })
+    }
+}
+
+/// A command that never produced an exit code is that beam's failure, not
+/// the run's: it is reported like any other failure, its message reaches
+/// the user as stderr output, and `--keep-going` still runs what does not
+/// depend on it.
+#[tokio::test]
+async fn a_command_that_cannot_be_spawned_fails_only_its_own_beam() {
+    const SOURCE: &str = r#"
+beam broken { run "broken command" }
+beam other { run "step other" }
+beam all { needs [broken, other] run "step all" }
+"#;
+
+    let outcome = run_target(
+        SOURCE,
+        "all",
+        options(2, true),
+        Arc::new(SpawnFailureExecutor),
+    )
+    .await;
+
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed), ["broken"]);
+    assert_eq!(
+        ids(&summary.succeeded),
+        ["other"],
+        "a beam that cannot spawn must not stop the rest of the run"
+    );
+    assert_eq!(ids(&summary.cancelled), ["all"]);
+    assert_eq!(summary.exit_code(), 1);
+
+    let events = &outcome.events;
+    let reported = only(
+        positions(events, |event| {
+            matches!(event, RunEvent::BeamOutput { id, line }
+                if id.0 == "broken"
+                    && line.stream == Stream::Stderr
+                    && line.text.contains("failed to spawn `broken command`"))
+        }),
+        "spawn failure reported as stderr output",
+    );
+    let finished = only(
+        positions(
+            events,
+            |event| matches!(event, RunEvent::BeamFinished { id, .. } if id.0 == "broken"),
+        ),
+        "`broken` finished event",
+    );
+    assert!(
+        reported < finished,
+        "the failure message must reach the user before the beam finishes"
+    );
+}
+
+/// Commands run in their Beamfile's directory, which `cwd` overrides —
+/// relatively to that directory, or absolutely.
+#[tokio::test]
+async fn commands_run_in_the_beams_directory_unless_cwd_overrides_it() {
+    // `load_str` has no file on disk, so every beam's directory is `.`.
+    #[cfg(windows)]
+    const ABSOLUTE: &str = "C:/opt/alba";
+    #[cfg(not(windows))]
+    const ABSOLUTE: &str = "/opt/alba";
+
+    let source = format!(
+        r#"
+beam plain {{ run "step plain" }}
+beam relative {{ cwd "sub/dir" run "step relative" }}
+beam absolute {{ cwd "{ABSOLUTE}" run "step absolute" }}
+beam all {{ needs [plain, relative, absolute] run "step all" }}
+"#
+    );
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(&source, "all", options(4, false), executor.clone()).await;
+    assert_eq!(outcome.summary().succeeded.len(), 4);
+
+    let cwd_of = |command: &str| -> PathBuf {
+        executor
+            .calls()
+            .into_iter()
+            .find(|call| call.command == command)
+            .unwrap_or_else(|| panic!("`{command}` was never executed"))
+            .cwd
+    };
+    assert_eq!(cwd_of("step plain"), Path::new("."));
+    assert_eq!(cwd_of("step relative"), Path::new(".").join("sub/dir"));
+    assert_eq!(
+        cwd_of("step absolute"),
+        Path::new(ABSOLUTE),
+        "an absolute `cwd` replaces the Beamfile's directory"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -289,14 +478,8 @@ beam b { needs [a] run "slow b" }
     });
 
     let started = Instant::now();
-    let outcome = run_target_with_cancel(
-        SOURCE,
-        "b",
-        options(2, false),
-        Arc::clone(&executor),
-        cancel,
-    )
-    .await;
+    let outcome =
+        run_target_with_cancel(SOURCE, "b", options(2, false), executor.clone(), cancel).await;
     let elapsed = started.elapsed();
 
     assert!(
@@ -338,7 +521,7 @@ beam b { needs [a] run "step b" }
                 behavior
             }),
     );
-    let outcome = run_target(SOURCE, "b", options(2, false), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "b", options(2, false), executor.clone()).await;
     let events = &outcome.events;
 
     for beam in ["a", "b"] {
@@ -411,7 +594,7 @@ beam deploy {
 "#;
 
     let executor = Arc::new(FakeExecutor::new());
-    let outcome = run_target(SOURCE, "deploy", options(2, false), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "deploy", options(2, false), executor.clone()).await;
 
     assert_eq!(
         outcome.error().to_string(),
@@ -439,7 +622,7 @@ beam deploy(target) {
         keep_going: false,
         params: vec!["staging".to_string()],
     };
-    let outcome = run_target(SOURCE, "deploy", options, Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
 
     assert_eq!(ids(&outcome.summary().succeeded), ["deploy"]);
     let calls = executor.calls();
@@ -492,7 +675,7 @@ beam build { needs [helper] run "step build" }
 "#;
 
     let executor = Arc::new(FakeExecutor::new());
-    let outcome = run_target(SOURCE, "build", options(2, false), Arc::clone(&executor)).await;
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
 
     assert_eq!(
         outcome.error().to_string(),

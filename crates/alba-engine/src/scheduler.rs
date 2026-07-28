@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use alba_core::{
     Beam, BeamId, CoreError, ExecutorKind, Project, execution_subgraph, render_template,
 };
-use alba_executors::{CommandSpec, ExecContext, Executor, OutputLine};
+use alba_executors::{CommandSpec, ExecContext, Executor, OutputLine, Stream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
@@ -98,12 +98,21 @@ pub async fn run(
     let mut tasks = Vec::with_capacity(beams.len());
     for (beam, status) in beams.iter().zip(senders) {
         // Every `needs` entry resolves: the project passed graph
-        // validation and `beams` is the target's transitive closure.
-        let dependencies = beam
+        // validation and `beams` is the target's transitive closure. The
+        // assertion makes that an enforced invariant rather than a comment
+        // — silently dropping an entry would let this beam run without
+        // waiting for a dependency.
+        let dependencies: Vec<_> = beam
             .needs
             .iter()
             .filter_map(|need| receivers.get(need.0.as_str()).cloned())
             .collect();
+        debug_assert_eq!(
+            dependencies.len(),
+            beam.needs.len(),
+            "every `needs` entry of `{}` must resolve within its own subgraph",
+            beam.id.0
+        );
 
         let task = BeamTask {
             args: if beam.id == *target {
@@ -369,11 +378,11 @@ async fn execute(task: &BeamTask) -> Result<(BeamStatus, Duration), EngineError>
         task.events.clone(),
     ));
 
-    let outcome = run_commands(task, &plan, &lines).await;
+    let status = run_commands(task, &plan, &lines).await;
     drop(lines);
     let _ = forwarder.await;
 
-    Ok((outcome?, started_at.elapsed()))
+    Ok((status, started_at.elapsed()))
 }
 
 /// A beam's commands and the environment they run in, all rendered.
@@ -415,13 +424,25 @@ fn render(beam: &Beam, args: &[String]) -> Result<RenderedBeam, EngineError> {
     Ok(RenderedBeam { commands, env, cwd })
 }
 
+/// The exit code reported for a command that never produced one, because
+/// the executor could not run it at all. Matches `SystemShellExecutor`'s
+/// own fallback for a child with no discrete exit code.
+const NO_EXIT_CODE: i32 = -1;
+
 /// Runs the beam's commands one after another, stopping at the first
 /// failure, and classifies the outcome.
+///
+/// A command that could not be spawned at all is that beam's failure, not
+/// the run's: a missing shell or a `cwd` that does not exist is a per-beam
+/// problem, which is exactly what `keep_going` and `allow_failure` are
+/// about. The executor's message would otherwise be lost, so it is emitted
+/// as a stderr line first — the CLI already renders those where the user
+/// is looking.
 async fn run_commands(
     task: &BeamTask,
     plan: &RenderedBeam,
     output: &UnboundedSender<OutputLine>,
-) -> Result<BeamStatus, EngineError> {
+) -> BeamStatus {
     for command in &plan.commands {
         let spec = CommandSpec {
             command: command.clone(),
@@ -432,35 +453,32 @@ async fn run_commands(
             output: output.clone(),
             cancel: task.cancel.clone(),
         };
-        let result = task
-            .executor
-            .execute(spec, context)
-            .await
-            .map_err(|source| EngineError::Executor {
-                beam: task.beam.id.clone(),
-                source,
-            })?;
 
-        if result.exit_code == 0 {
-            continue;
-        }
+        let exit_code = match task.executor.execute(spec, context).await {
+            Ok(result) if result.exit_code == 0 => continue,
+            Ok(result) => result.exit_code,
+            Err(error) => {
+                let _ = output.send(OutputLine {
+                    stream: Stream::Stderr,
+                    text: error.to_string(),
+                });
+                NO_EXIT_CODE
+            }
+        };
+
         // A cancelled command still reports an exit code, and no code is
         // reserved to mean "was killed" (`-1` is a legitimate one on
         // windows), so the token — not the code — is what tells a
         // cancellation apart from a genuine failure.
-        return Ok(if task.cancel.is_cancelled() {
+        return if task.cancel.is_cancelled() {
             BeamStatus::Cancelled
         } else if task.beam.allow_failure {
-            BeamStatus::FailedAllowed {
-                exit_code: result.exit_code,
-            }
+            BeamStatus::FailedAllowed { exit_code }
         } else {
-            BeamStatus::Failed {
-                exit_code: result.exit_code,
-            }
-        });
+            BeamStatus::Failed { exit_code }
+        };
     }
-    Ok(BeamStatus::Succeeded)
+    BeamStatus::Succeeded
 }
 
 /// Relabels an executor's output lines as this beam's output events, until

@@ -22,6 +22,7 @@ version = "0.1.0"
 dependencies = [
  "alba-core",
  "alba-executors",
+ "async-trait",
  "thiserror",
  "tokio",
  "tokio-util",
