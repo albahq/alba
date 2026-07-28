@@ -122,6 +122,95 @@ fn json_log_format_emits_one_json_object_per_line() {
     }
 }
 
+/// The whole cache loop through the real binary: a first run executes and
+/// stores, an unchanged second run is cached and replays the output, a
+/// changed input runs again, and `--force` bypasses the read side.
+#[test]
+fn an_unchanged_run_is_cached_and_replays_its_output() {
+    let dir = project("beam gen { inputs [\"data.txt\"] run \"echo generated\" }\n");
+    std::fs::write(dir.path().join("data.txt"), "v1").unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut args = vec!["run", "gen"];
+        args.extend_from_slice(extra);
+        let assert = alba().current_dir(&dir).args(args).assert().success();
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    let first = run(&[]);
+    assert!(
+        !first.contains("cached"),
+        "a first run cannot be cached:\n{first}"
+    );
+    assert!(first.contains("generated"));
+    assert!(
+        dir.path().join(".alba/cache").is_dir(),
+        "the store must exist after a success"
+    );
+
+    let second = run(&[]);
+    assert!(
+        second.contains("cached"),
+        "unchanged inputs must hit:\n{second}"
+    );
+    assert!(
+        second.contains("generated"),
+        "the stored output must replay:\n{second}"
+    );
+
+    std::fs::write(dir.path().join("data.txt"), "v2").unwrap();
+    let third = run(&[]);
+    assert!(
+        !third.contains("cached"),
+        "a changed input must rerun:\n{third}"
+    );
+
+    let forced = run(&["--force"]);
+    assert!(
+        !forced.contains("cached"),
+        "--force must execute:\n{forced}"
+    );
+}
+
+/// The JSON stream's cache contract: a `beam_cached` event, and replayed
+/// output lines marked `"replayed": true`.
+#[test]
+fn the_json_stream_marks_cached_beams_and_replayed_lines() {
+    let dir = project("beam gen { inputs [\"data.txt\"] run \"echo generated\" }\n");
+    std::fs::write(dir.path().join("data.txt"), "v1").unwrap();
+
+    let run_json = || {
+        let assert = alba()
+            .current_dir(&dir)
+            .args(["run", "gen", "--log-format", "json"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        stdout
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    let first = run_json();
+    assert!(
+        first
+            .iter()
+            .any(|event| event["event"] == "beam_output" && event["replayed"] == false)
+    );
+
+    let second = run_json();
+    assert!(second.iter().any(|event| event["event"] == "beam_cached"));
+    assert!(second.iter().any(|event| event["event"] == "beam_output"
+        && event["replayed"] == true
+        && event["text"] == "generated"));
+    let finished = second
+        .iter()
+        .find(|event| event["event"] == "run_finished")
+        .expect("the stream must end with run_finished");
+    assert_eq!(finished["cached"][0], "gen");
+}
+
 /// A beam whose `run` template cannot be rendered when the run reaches it
 /// — `env(NAME)` without a default is deliberately resolved that late —
 /// fails like any other beam. The JSON stream must still end with

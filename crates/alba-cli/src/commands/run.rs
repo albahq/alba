@@ -17,10 +17,11 @@
 
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
-use alba_engine::{EngineError, RunEvent, RunOptions, RunSummary};
+use alba_engine::{CacheOptions, EngineError, RunEvent, RunOptions, RunSummary};
 use alba_executors::SystemShellExecutor;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,7 @@ use crate::render::{GroupedRenderer, InterleavedRenderer, JsonRenderer, LineSink
 pub fn run(
     project: &Project,
     sources: &SourceMap,
+    beamfile: &Path,
     target: &BeamId,
     params: Vec<String>,
     flags: &RunFlags,
@@ -56,12 +58,13 @@ pub fn run(
         }
     };
 
-    runtime.block_on(execute(project, sources, target, params, flags))
+    runtime.block_on(execute(project, sources, beamfile, target, params, flags))
 }
 
 async fn execute(
     project: &Project,
     sources: &SourceMap,
+    beamfile: &Path,
     target: &BeamId,
     params: Vec<String>,
     flags: &RunFlags,
@@ -70,9 +73,10 @@ async fn execute(
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
         params,
-        // The cache is not exposed on the command line yet, so every run
-        // still executes every beam.
-        cache: None,
+        cache: Some(CacheOptions {
+            dir: cache_dir(beamfile),
+            force: flags.force,
+        }),
     };
 
     let (events, incoming) = unbounded_channel();
@@ -204,6 +208,18 @@ async fn watch_interrupts(cancel: CancellationToken) {
     }
     LineSink::stderr().line("aborting");
     std::process::exit(EXIT_INTERRUPTED);
+}
+
+/// The cache directory for the project `beamfile` defines: `.alba/cache`
+/// next to the Beamfile. A bare `Beamfile` path has an empty parent,
+/// which means the current directory.
+pub(crate) fn cache_dir(beamfile: &Path) -> std::path::PathBuf {
+    beamfile
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(".alba")
+        .join("cache")
 }
 
 /// How many beams may run at once, for this machine.

@@ -64,6 +64,11 @@ pub struct RunFlags {
     #[arg(long)]
     pub keep_going: bool,
 
+    /// Ignore the cache when reading: run every beam, and rewrite the
+    /// cache entries of the ones that succeed
+    #[arg(long)]
+    pub force: bool,
+
     /// How text output is laid out
     ///
     /// Defaults to `interleaved` on a terminal and `grouped` otherwise.

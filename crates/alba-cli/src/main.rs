@@ -52,13 +52,21 @@ fn run(cli: Cli) -> i32 {
             beam,
             params,
             flags,
-        }) => commands::run::run(&project, &sources, &alba_core::BeamId(beam), params, &flags),
+        }) => commands::run::run(
+            &project,
+            &sources,
+            &beamfile,
+            &alba_core::BeamId(beam),
+            params,
+            &flags,
+        ),
         // Bare `alba`: run the declared `default` with every run flag left
         // at its default, or fall back to listing when none is declared.
         None => match &project.default {
             Some(target) => commands::run::run(
                 &project,
                 &sources,
+                &beamfile,
                 &target.value,
                 Vec::new(),
                 &RunFlags::default(),
