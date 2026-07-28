@@ -9,10 +9,14 @@ license = "MIT"
 repository = "https://github.com/jdevelop-io/alba"
 
 [workspace.dependencies]
+assert_cmd = "2"
 async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 miette = "7"
 nix = "0.29"
+owo-colors = "4"
+predicates = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

@@ -7,3 +7,16 @@ license.workspace = true
 [[bin]]
 name = "alba"
 path = "src/main.rs"
+
+[dependencies]
+alba-core = { path = "../alba-core" }
+alba-engine = { path = "../alba-engine" }
+alba-executors = { path = "../alba-executors" }
+alba-syntax = { path = "../alba-syntax" }
+clap.workspace = true
+owo-colors.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
