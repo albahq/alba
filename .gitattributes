@@ -1,0 +1,10 @@
+# Normalize all text files to LF on checkout, regardless of the platform
+# or the local core.autocrlf setting. Without this, a Windows runner with
+# core.autocrlf=true rewrites checked-in text (including insta snapshots
+# under crates/alba-syntax/**/snapshots/*.snap) to CRLF on checkout, and
+# every exact-content assertion against those files then fails.
+* text=auto eol=lf
+
+# Snapshot fixtures are compared byte-for-byte by insta; keep them LF
+# explicitly so this stays correct even if the blanket rule above changes.
+*.snap text eol=lf

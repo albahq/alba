@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` already pins `channel = "stable"` with the
+      # `rustfmt` and `clippy` components. Requesting the same channel and
+      # components here is intentionally redundant, not conflicting: both
+      # resolve to the same rustup toolchain, so this step just guarantees
+      # that toolchain is installed and up to date before rustup picks it
+      # up via the toolchain file for every subsequent `cargo` invocation.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--all-features` matters here: `alba-executors`'s `test-util`
+      # feature (enabled by `alba-engine`'s dev-dependencies) gates code
+      # that a bare `--workspace` build, clippy pass, or test run would
+      # silently skip. This is the same gate used throughout local
+      # development, so CI checks exactly what was developed against.
+      - name: Build
+        run: cargo build --workspace --all-features
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features
