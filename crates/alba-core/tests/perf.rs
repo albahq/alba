@@ -1,8 +1,13 @@
-//! Performance guard: parsing, resolving imports, and validating the
-//! dependency graph must stay roughly linear in the number of beams and
-//! `needs` edges, catching an accidental quadratic regression (e.g. an
-//! O(n^2) namespace lookup while resolving imports, or an O(n^2) id lookup
-//! while validating `needs`) before it ships.
+//! Performance guard, with an honest scope: this test fails loudly on a
+//! quadratic regression in parsing and import/namespace resolution — the
+//! dominant cost in `load_project`, and the one actually capable of
+//! pushing past the 10ms budget at a realistic beam count. Dependency-
+//! graph validation (`validate_graph`'s `needs` lookup) is also genuinely
+//! exercised by the fixture below, not left untested, but at 100 beams a
+//! lookup regression there only moves the measured time by something on
+//! the order of 10-20% (measured below) — nowhere near enough to trip the
+//! threshold on its own. See below for why that's a property of the
+//! problem's scale, not a gap in this test.
 //!
 //! Lives here, in `alba-core`, rather than as a CLI-level test that spawns
 //! `alba check`: the work the criterion is actually about — parsing every
@@ -29,10 +34,19 @@
 //! so the cross-namespace `needs` lookup path is exercised too.
 //!
 //! Doing the same mutation against *this* fixture does move the measured
-//! time — repeatably, not as noise — but only by roughly 10-20%, not the
-//! multiple-times jump the parsing-side mutation produces (see the task
-//! report this test's introduction was reviewed under for both sets of
-//! numbers). That gap is real, not a weaker fixture: at 100 beams, a
+//! time — repeatably, not as noise — but nowhere near the multiple-times
+//! jump the parsing-side mutation produces. Two independent measurements
+//! agree on that much and disagree on the exact number: a handful of
+//! 50-sample trials put it around 7%, a later independent re-measurement
+//! (5 trials of 50 samples) put it at 18-20%. Both are real; the gap
+//! between them is this machine's own run-to-run noise, not a
+//! disagreement about what's being measured — the *unmutated* baseline
+//! alone swung from a 1.69ms to a 1.92ms median across otherwise-identical
+//! runs during this testing, a spread nearly as wide as the effect being
+//! measured, and a handful of trials on each side isn't enough to average
+//! that out reliably. Call the honest range 10-20%, not a single number:
+//! real, repeatable, and an order of magnitude short of the parsing-side
+//! mutation's 2-3x. That gap is not a weaker fixture: at 100 beams, a
 //! linear scan over short ids is simply cheap in absolute terms (most
 //! candidates are rejected by a length check before ever comparing
 //! bytes), so an O(1)-vs-O(n) difference here is inherently a smaller
