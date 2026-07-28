@@ -1099,3 +1099,57 @@ async fn an_input_reached_through_a_symbolic_link_is_hashed() {
         "a change behind the link must rerun"
     );
 }
+
+/// An input that exists but cannot be read is the other way the cache
+/// degrades rather than fails: the beam runs, uncached, and says why.
+///
+/// Unix only — `chmod` is what makes a file unreadable here — and skipped
+/// where the mode turns out not to be enforced, which is the case for
+/// root and would make the whole scenario vacuous. Probed rather than
+/// deduced from the user id: the question is whether the read fails, and
+/// that is exactly what the probe asks.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_input_runs_the_beam_uncached_with_a_notice() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    let input = dir.path().join("data.txt");
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&input).is_ok() {
+        return;
+    }
+
+    let first = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    let second = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    assert_eq!(ids(&first.summary.succeeded), vec!["gen"]);
+    assert!(
+        first
+            .stderr()
+            .iter()
+            .any(|line| line.starts_with("cache: cannot hash input `data.txt`")),
+        "an unhashable input must say so, got {:?}",
+        first.stderr()
+    );
+    assert_eq!(
+        second.executed().len(),
+        1,
+        "an unhashable input leaves nothing to hit on"
+    );
+}
