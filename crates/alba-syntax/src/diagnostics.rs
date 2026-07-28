@@ -16,8 +16,8 @@ use std::fmt;
 use crate::parser::ParseError;
 use crate::token::Span;
 
-/// A renderable diagnostic: a message, a label on the offending span, and
-/// optional help text. Built from a [`ParseError`] via
+/// A renderable diagnostic: a message, an optional label on the offending
+/// span, and optional help text. Built from a [`ParseError`] via
 /// [`ParseError::into_diagnostic`].
 ///
 /// Deliberately does not carry the source text or a display path: those are
@@ -27,27 +27,33 @@ use crate::token::Span;
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     message: String,
-    span: SourceSpan,
+    span: Option<SourceSpan>,
     help: Option<String>,
 }
 
 impl Diagnostic {
-    /// Creates a diagnostic from a message, a byte-offset span into the
-    /// source, and optional help text.
+    /// Creates a diagnostic from a message, an optional byte-offset span
+    /// into the source, and optional help text.
     ///
-    /// This is the constructor other crates use to lift their own spanned
-    /// errors into something [`render_diagnostic`] can render, without this
-    /// crate exposing `Diagnostic`'s fields (deliberately private — see the
+    /// This is the constructor other crates use to lift their own errors
+    /// into something [`render_diagnostic`] can render, without this crate
+    /// exposing `Diagnostic`'s fields (deliberately private — see the
     /// struct's doc comment). `alba-core`'s `CoreError::into_diagnostic` is
-    /// the first such caller: `CoreError` already carries a message, a
-    /// [`Span`], and optional help in the same shape a [`ParseError`] does,
-    /// so it goes through this constructor rather than duplicating
-    /// `Diagnostic`'s internals or `alba-syntax` growing a dependency on
-    /// `alba-core`'s error type.
-    pub fn new(message: impl Into<String>, span: Span, help: Option<String>) -> Self {
+    /// the first such caller: `CoreError` already carries a message, an
+    /// optional [`Span`], and optional help in the same shape a
+    /// [`ParseError`] does, so it goes through this constructor rather than
+    /// duplicating `Diagnostic`'s internals or `alba-syntax` growing a
+    /// dependency on `alba-core`'s error type.
+    ///
+    /// `span` is `None` for a failure that has no place in the source to
+    /// point at — a beam named on the command line that does not exist, for
+    /// instance. Such a diagnostic renders as the message and its help
+    /// alone: asserting a source position that is not where the mistake is
+    /// misleads a reader more than showing none does.
+    pub fn new(message: impl Into<String>, span: Option<Span>, help: Option<String>) -> Self {
         Self {
             message: message.into(),
-            span: to_source_span(span),
+            span: span.map(to_source_span),
             help,
         }
     }
@@ -79,7 +85,8 @@ impl MietteDiagnostic for Diagnostic {
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
-        Some(Box::new(std::iter::once(LabeledSpan::underline(self.span))))
+        let span = self.span?;
+        Some(Box::new(std::iter::once(LabeledSpan::underline(span))))
     }
 }
 
@@ -91,7 +98,7 @@ impl ParseError {
     /// so this single conversion covers both lexing and parsing failures in
     /// practice.
     pub fn into_diagnostic(self) -> Diagnostic {
-        Diagnostic::new(self.message, self.span, self.help)
+        Diagnostic::new(self.message, Some(self.span), self.help)
     }
 }
 
@@ -182,5 +189,26 @@ mod tests {
 
         assert!(!rendered.is_empty());
         assert!(rendered.contains("Beamfile"));
+    }
+
+    /// A diagnostic with no span renders as a plain sentence: the message
+    /// and its help, with no source excerpt and no caret pointing at a
+    /// place that has nothing to do with the failure.
+    #[test]
+    fn renders_a_diagnostic_without_a_span_as_a_plain_sentence() {
+        let diagnostic = Diagnostic::new(
+            "unknown beam `biuld`",
+            None,
+            Some("did you mean `build`?".to_string()),
+        );
+
+        let rendered = render_diagnostic("beam build { run \"x\" }", "Beamfile", &diagnostic);
+
+        assert!(rendered.contains("unknown beam `biuld`"));
+        assert!(rendered.contains("did you mean `build`?"));
+        assert!(
+            !rendered.contains("Beamfile:"),
+            "no source position may be asserted, got: {rendered}"
+        );
     }
 }

@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use alba_syntax::{Span, StringTemplate};
+use alba_syntax::{Span, Spanned, StringTemplate};
 
 use crate::eval::Scope;
 
@@ -83,7 +83,10 @@ impl Value {
 pub struct Beam {
     pub id: BeamId,
     pub description: Option<String>,
-    pub needs: Vec<BeamId>,
+    /// Each entry keeps the span of the reference that produced it, so a
+    /// `needs` entry that does not resolve is underlined exactly, rather
+    /// than the whole beam declaration containing it.
+    pub needs: Vec<Spanned<BeamId>>,
     pub params: Vec<String>,
     /// Evaluated but inert in this crate: the cache (out of scope here) is
     /// the only intended consumer.
@@ -117,5 +120,8 @@ pub struct Beam {
 #[derive(Debug, Clone)]
 pub struct Project {
     pub beams: Vec<Beam>,
-    pub default: Option<BeamId>,
+    /// The beam a bare `alba` runs, with the span of the `default`
+    /// declaration that named it — [`crate::validate_graph`] checks it
+    /// resolves and points at that span when it does not.
+    pub default: Option<Spanned<BeamId>>,
 }

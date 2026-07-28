@@ -1,8 +1,9 @@
 //! Dependency-graph validation and subgraph extraction, the last piece a
 //! [`Project`] needs before an engine can schedule it: [`validate_graph`]
-//! checks that every `needs` entry names a beam that actually exists and
-//! that no beam (transitively) needs itself, and [`execution_subgraph`]
-//! extracts the transitive closure of a target beam.
+//! checks that every `needs` entry — and the file's `default`, if it
+//! declares one — names a beam that actually exists, and that no beam
+//! (transitively) needs itself; [`execution_subgraph`] extracts the
+//! transitive closure of a target beam.
 //!
 //! [`validate_graph`] is called by [`crate::loader::load_project`] and
 //! [`crate::eval::load_str`] before either hands a [`Project`] back to its
@@ -47,15 +48,21 @@ fn by_id(project: &Project) -> HashMap<&str, &Beam> {
 
 /// Builds the "unknown beam `name`" error `validate_graph` and
 /// `execution_subgraph` both need, with a "did you mean...?" suggestion
-/// attached when a close-enough candidate exists. The caller stamps the
-/// right `source_id` afterward (see [`CoreError::with_source_id`]) since
-/// this helper has no beam of its own to read one from.
+/// attached when a close-enough candidate exists. `span` is `None` when
+/// the name came from outside the Beamfile and so has no declaration site
+/// to underline. The caller stamps the right `source_id` afterward (see
+/// [`CoreError::with_source_id`]) since this helper has no beam of its own
+/// to read one from.
 fn unknown_beam_error<'a>(
     name: &str,
     candidates: impl Iterator<Item = &'a str>,
-    span: Span,
+    span: Option<Span>,
 ) -> CoreError {
-    let err = CoreError::new(format!("unknown beam `{name}`"), span);
+    let message = format!("unknown beam `{name}`");
+    let err = match span {
+        Some(span) => CoreError::new(message, span),
+        None => CoreError::unlocated(message),
+    };
     match suggest(name, candidates) {
         Some(candidate) => err.with_help(format!("did you mean `{candidate}`?")),
         None => err,
@@ -63,29 +70,45 @@ fn unknown_beam_error<'a>(
 }
 
 /// Checks that every `needs` entry in `project` names a beam that actually
-/// exists, and that no beam (transitively) needs itself.
+/// exists, that `project`'s `default` (if it declares one) does too, and
+/// that no beam (transitively) needs itself.
 ///
-/// The two checks run as separate passes over [`Project::beams`], in
+/// The checks run as separate passes over [`Project::beams`], in
 /// declaration order: first every `needs` entry against the full set of
-/// declared ids, then cycle detection (which assumes every `needs` entry
-/// already resolves, since the first pass would have already returned an
-/// error otherwise). Both passes report against whichever beam declared
-/// the offending `needs` entry — its own `span` and `source`, via
-/// [`CoreError::with_source_id`] — never the caller's; this function runs
-/// after every file has finished loading, when no `SourceIdScope` is
-/// active, so leaving `source_id` at its default would always point a
-/// multi-file project's error at the root file regardless of which
-/// imported file actually declared the problem.
+/// declared ids, then the `default`, then cycle detection (which assumes
+/// every `needs` entry already resolves, since the first pass would have
+/// already returned an error otherwise). Each reports at the exact
+/// reference that does not resolve, and against whichever beam declared
+/// it — its own `source`, via [`CoreError::with_source_id`] — never the
+/// caller's; this function runs after every file has finished loading,
+/// when no `SourceIdScope` is active, so leaving `source_id` at its
+/// default would always point a multi-file project's error at the root
+/// file regardless of which imported file actually declared the problem.
+/// The `default` needs no such correction: only the root file's `default`
+/// is ever kept (see [`crate::loader::load_project`]), so it always
+/// belongs to the file `SourceId`'s own default already names.
 pub fn validate_graph(project: &Project) -> Result<(), CoreError> {
     let by_id = by_id(project);
 
     for beam in &project.beams {
         for need in &beam.needs {
-            if !by_id.contains_key(need.0.as_str()) {
-                return Err(unknown_beam_error(&need.0, all_ids(project), beam.span)
-                    .with_source_id(beam.source));
+            if !by_id.contains_key(need.value.0.as_str()) {
+                return Err(
+                    unknown_beam_error(&need.value.0, all_ids(project), Some(need.span))
+                        .with_source_id(beam.source),
+                );
             }
         }
+    }
+
+    if let Some(default) = &project.default
+        && !by_id.contains_key(default.value.0.as_str())
+    {
+        return Err(unknown_beam_error(
+            &default.value.0,
+            all_ids(project),
+            Some(default.span),
+        ));
     }
 
     let mut done: HashSet<&str> = HashSet::new();
@@ -178,7 +201,7 @@ fn detect_cycle<'a>(
             // Safe to index directly: `validate_graph`'s first pass already
             // rejected any `needs` entry that doesn't resolve, and
             // `execution_subgraph` never calls this function.
-            stack.push(Step::Enter(by_id[need.0.as_str()]));
+            stack.push(Step::Enter(by_id[need.value.0.as_str()]));
         }
     }
 
@@ -191,11 +214,11 @@ fn detect_cycle<'a>(
 /// closure once, not twice.
 ///
 /// An unknown `target` is an error, with the same "did you mean...?"
-/// treatment [`validate_graph`] gives an unknown `needs` entry — but
-/// stamped with the default `source_id` ([`crate::model::SourceId`]'s
-/// `Default`, id `0`) rather than a beam's, since `target` is a plain
-/// caller-supplied [`BeamId`] with no declaration site of its own to
-/// attribute the error to.
+/// treatment [`validate_graph`] gives an unknown `needs` entry — but with
+/// no span at all, since `target` is a plain caller-supplied [`BeamId`]
+/// (typically typed on a command line) with no declaration site of its own
+/// to point at. Underlining an arbitrary beam declaration instead would
+/// assert a source position that is not where the mistake is.
 ///
 /// Every `needs` entry this walks is assumed to resolve: any [`Project`]
 /// a caller can actually hold came from [`crate::loader::load_project`] or
@@ -209,11 +232,7 @@ pub fn execution_subgraph(project: &Project, target: &BeamId) -> Result<Vec<Beam
     let by_id = by_id(project);
 
     let Some(&start) = by_id.get(target.0.as_str()) else {
-        return Err(unknown_beam_error(
-            &target.0,
-            all_ids(project),
-            Span::new(0, 0),
-        ));
+        return Err(unknown_beam_error(&target.0, all_ids(project), None));
     };
 
     let mut seen: HashSet<&str> = HashSet::new();
@@ -226,8 +245,8 @@ pub fn execution_subgraph(project: &Project, target: &BeamId) -> Result<Vec<Beam
         closure.push(BeamId(id.to_string()));
         if let Some(&beam) = by_id.get(id) {
             for need in &beam.needs {
-                if seen.insert(need.0.as_str()) {
-                    queue.push_back(need.0.as_str());
+                if seen.insert(need.value.0.as_str()) {
+                    queue.push_back(need.value.0.as_str());
                 }
             }
         }
@@ -272,6 +291,56 @@ mod tests {
             load_str("beam build { needs [tset] run \"x\" }\nbeam test { run \"y\" }").unwrap_err();
         assert!(err.message.contains("unknown beam `tset`"));
         assert_eq!(err.help.as_deref(), Some("did you mean `test`?"));
+    }
+
+    /// The caret lands on the entry that does not resolve, not on the beam
+    /// declaration that happens to contain it — every other diagnostic in
+    /// this workspace is token-precise, and a `needs` entry is a token.
+    #[test]
+    fn unknown_need_points_at_the_offending_entry() {
+        const SOURCE: &str = "beam build { needs [test, tset] run \"x\" }\nbeam test { run \"y\" }";
+
+        let err = load_str(SOURCE).unwrap_err();
+
+        let span = err.span.expect("a declared `needs` entry has a location");
+        assert_eq!(&SOURCE[span.start..span.end], "tset");
+    }
+
+    /// A namespaced entry is underlined whole, alias included.
+    #[test]
+    fn unknown_namespaced_need_points_at_the_whole_reference() {
+        const SOURCE: &str = "beam build { needs [api:tset] run \"x\" }";
+
+        let err = load_str(SOURCE).unwrap_err();
+
+        let span = err.span.expect("a declared `needs` entry has a location");
+        assert_eq!(&SOURCE[span.start..span.end], "api:tset");
+    }
+
+    /// `default` is part of the graph too: naming a beam that does not
+    /// exist must fail the load, not wait until a bare `alba` tries to run
+    /// it.
+    #[test]
+    fn unknown_default_is_rejected_at_its_own_span() {
+        const SOURCE: &str = "default biuld\nbeam build { run \"x\" }";
+
+        let err = load_str(SOURCE).unwrap_err();
+
+        assert!(err.message.contains("unknown beam `biuld`"));
+        assert_eq!(err.help.as_deref(), Some("did you mean `build`?"));
+        let span = err.span.expect("a declared `default` has a location");
+        assert_eq!(&SOURCE[span.start..span.end], "biuld");
+    }
+
+    /// A `default` that resolves is not disturbed by the check.
+    #[test]
+    fn a_default_naming_a_declared_beam_loads() {
+        let project = load_str("default build\nbeam build { run \"x\" }").unwrap();
+
+        assert_eq!(
+            project.default.as_ref().map(|d| d.value.0.as_str()),
+            Some("build")
+        );
     }
 
     #[test]
@@ -340,12 +409,21 @@ beam b { needs [a, a] run \"x\" }
         assert_eq!(sorted(ids), vec!["a", "b"]);
     }
 
+    /// A target is supplied by whoever asked for the run, not written in
+    /// the Beamfile, so it has no location to underline — drawing a caret
+    /// at the first beam declaration asserted a source position that is
+    /// simply not where the mistake is. The "did you mean...?" help, which
+    /// is the useful half, survives.
     #[test]
-    fn unknown_target_suggests_closest() {
+    fn unknown_target_suggests_closest_without_a_source_location() {
         let project = load_str("beam build { run \"x\" }").unwrap();
         let err = execution_subgraph(&project, &BeamId("biuld".into())).unwrap_err();
         assert!(err.message.contains("unknown beam `biuld`"));
         assert_eq!(err.help.as_deref(), Some("did you mean `build`?"));
+        assert!(
+            err.span.is_none(),
+            "a target named outside the Beamfile has no span"
+        );
     }
 
     /// Guards against the class of bug this crate has already hit once:

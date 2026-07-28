@@ -832,7 +832,10 @@ pub(crate) fn build_project(file: &File, dir: &Path) -> Result<Project, CoreErro
         .map(|decl| build_beam(decl, &lets, dir))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let default = file.default.as_ref().map(|d| BeamId(d.value.clone()));
+    let default = file
+        .default
+        .as_ref()
+        .map(|d| Spanned::new(BeamId(d.value.clone()), d.span));
 
     Ok(Project { beams, default })
 }
@@ -856,7 +859,7 @@ fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreErr
     let needs = decl
         .needs
         .iter()
-        .map(|n| beam_ref_to_id(&n.value))
+        .map(|n| Spanned::new(beam_ref_to_id(&n.value), n.span))
         .collect();
 
     let inputs = decl

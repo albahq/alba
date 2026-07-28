@@ -92,7 +92,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use alba_syntax::{File, Span};
+use alba_syntax::{File, Span, Spanned};
 
 use crate::error::{CoreError, SourceIdScope};
 use crate::eval::{build_project, parse_error_to_core_error};
@@ -235,7 +235,7 @@ impl Loader {
         &mut self,
         path: &Path,
         error_span: Span,
-    ) -> Result<(Vec<Beam>, Option<BeamId>), CoreError> {
+    ) -> Result<(Vec<Beam>, Option<Spanned<BeamId>>), CoreError> {
         let (canonical, source) = Self::resolve_and_read(path, error_span)?;
 
         if let Some(start) = self.stack.iter().position(|(c, _)| *c == canonical) {
@@ -287,7 +287,7 @@ impl Loader {
         import_base: &Path,
         beam_dir: &Path,
         source_id: SourceId,
-    ) -> Result<(Vec<Beam>, Option<BeamId>), CoreError> {
+    ) -> Result<(Vec<Beam>, Option<Spanned<BeamId>>), CoreError> {
         let _scope = SourceIdScope::enter(source_id);
         let file: File = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
         check_duplicate_aliases(&file)?;
@@ -303,7 +303,7 @@ impl Loader {
             for beam in &mut child_beams {
                 beam.id.0 = format!("{alias}:{}", beam.id.0);
                 for need in &mut beam.needs {
-                    need.0 = format!("{alias}:{}", need.0);
+                    need.value.0 = format!("{alias}:{}", need.value.0);
                 }
             }
             beams.extend(child_beams);

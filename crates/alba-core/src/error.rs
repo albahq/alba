@@ -68,29 +68,45 @@ impl Drop for SourceIdScope {
 }
 
 /// An error produced while evaluating a Beamfile: an unknown variable, a
-/// type mismatch, an unresolvable built-in call, and so on. Always carries
-/// a source span (and, when a nearby valid name exists, help text) so it
-/// can be rendered the same way `alba_syntax::Diagnostic` renders parse
-/// errors.
+/// type mismatch, an unresolvable built-in call, and so on. Carries the
+/// span of the offending source text (and, when a nearby valid name
+/// exists, help text) so it can be rendered the same way
+/// `alba_syntax::Diagnostic` renders parse errors.
+///
+/// `span` is `None` for the rare failure that is *about* the Beamfile
+/// without being *in* it — a beam named by whoever asked for the run,
+/// which has no declaration site. Underlining an arbitrary declaration in
+/// that case asserts a source position that is not where the mistake is.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("{message}")]
 pub struct CoreError {
     pub message: String,
-    pub span: Span,
+    pub span: Option<Span>,
     pub help: Option<String>,
     pub source_id: SourceId,
 }
 
 impl CoreError {
-    /// A new error with no help text, stamped with whichever file is
-    /// currently being loaded (see [`SourceIdScope`]). The one place every
-    /// error-construction site in this crate goes through, instead of
-    /// repeating the `CoreError { .. }` literal (including its
-    /// `source_id`) at each of them.
+    /// A new error with no help text, pointing at `span` and stamped with
+    /// whichever file is currently being loaded (see [`SourceIdScope`]).
+    /// The one place every error-construction site in this crate goes
+    /// through, instead of repeating the `CoreError { .. }` literal
+    /// (including its `source_id`) at each of them.
     pub(crate) fn new(message: impl Into<String>, span: Span) -> Self {
         Self {
             message: message.into(),
-            span,
+            span: Some(span),
+            help: None,
+            source_id: current_source_id(),
+        }
+    }
+
+    /// A new error with nowhere in the source to point at — see the
+    /// struct's doc comment.
+    pub(crate) fn unlocated(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            span: None,
             help: None,
             source_id: current_source_id(),
         }
@@ -152,5 +168,18 @@ mod tests {
 
         assert!(rendered.contains("boom"));
         assert!(rendered.contains("try this"));
+    }
+
+    /// An error with nothing in the source to point at keeps its message
+    /// and its help, and renders no caret.
+    #[test]
+    fn an_unlocated_error_renders_without_a_source_position() {
+        let err = CoreError::unlocated("boom").with_help("try this");
+
+        let rendered = render_diagnostic("xx boom xx", "Beamfile", &err.into_diagnostic());
+
+        assert!(rendered.contains("boom"));
+        assert!(rendered.contains("try this"));
+        assert!(!rendered.contains("Beamfile:"));
     }
 }

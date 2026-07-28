@@ -34,7 +34,7 @@ fn imports_namespace_beams_and_resolve_local_needs() {
     let ids: Vec<&str> = project.beams.iter().map(|b| b.id.0.as_str()).collect();
     assert!(ids.contains(&"api:build") && ids.contains(&"api:test") && ids.contains(&"all"));
     let api_test = project.beams.iter().find(|b| b.id.0 == "api:test").unwrap();
-    assert_eq!(api_test.needs[0].0, "api:build"); // local need namespaced
+    assert_eq!(api_test.needs[0].value.0, "api:build"); // local need namespaced
 }
 
 #[test]
@@ -91,7 +91,10 @@ fn root_default_is_kept() {
 
     let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
 
-    assert_eq!(project.default.as_ref().map(|d| d.0.as_str()), Some("all"));
+    assert_eq!(
+        project.default.as_ref().map(|d| d.value.0.as_str()),
+        Some("all")
+    );
 }
 
 #[test]
@@ -125,7 +128,7 @@ fn nested_imports_join_namespaces_with_colon() {
         .iter()
         .find(|b| b.id.0 == "api:build")
         .unwrap();
-    assert_eq!(build.needs[0].0, "api:db:migrate");
+    assert_eq!(build.needs[0].value.0, "api:db:migrate");
 }
 
 #[test]
@@ -157,7 +160,7 @@ fn missing_import_reports_span_and_importing_source_id() {
     // reported against the *importing* file, i.e. the root.
     assert_eq!(err.error.source_id, SourceId(0));
     // The span points at the import's path text, not the start of the file.
-    assert!(err.error.span.start > 0);
+    assert!(err.error.span.expect("the import path has a span").start > 0);
     // The root source is still available for rendering even though
     // loading failed on one of its imports.
     assert!(err.sources.get(err.error.source_id).is_some());

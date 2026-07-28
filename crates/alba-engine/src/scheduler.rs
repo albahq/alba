@@ -113,7 +113,7 @@ pub async fn run(
         let dependencies: Vec<_> = beam
             .needs
             .iter()
-            .filter_map(|need| receivers.get(need.0.as_str()).cloned())
+            .filter_map(|need| receivers.get(need.value.0.as_str()).cloned())
             .collect();
         debug_assert_eq!(
             dependencies.len(),

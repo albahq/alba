@@ -11,7 +11,11 @@ use alba_syntax::{Diagnostic, Span, parse, render_diagnostic};
 /// to compile instead of silently only being caught inside `alba-core`.
 #[test]
 fn diagnostic_new_is_a_public_constructor_for_external_crates() {
-    let diagnostic = Diagnostic::new("custom error", Span::new(1, 4), Some("try this".into()));
+    let diagnostic = Diagnostic::new(
+        "custom error",
+        Some(Span::new(1, 4)),
+        Some("try this".into()),
+    );
     let rendered = render_diagnostic("a boom b", "Beamfile", &diagnostic);
 
     assert!(rendered.contains("custom error"));

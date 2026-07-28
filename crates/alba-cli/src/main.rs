@@ -56,9 +56,13 @@ fn run(cli: Cli) -> i32 {
         // Bare `alba`: run the declared `default` with every run flag left
         // at its default, or fall back to listing when none is declared.
         None => match &project.default {
-            Some(target) => {
-                commands::run::run(&project, &sources, target, Vec::new(), &RunFlags::default())
-            }
+            Some(target) => commands::run::run(
+                &project,
+                &sources,
+                &target.value,
+                Vec::new(),
+                &RunFlags::default(),
+            ),
             None => commands::list::run(&project),
         },
     }

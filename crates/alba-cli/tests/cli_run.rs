@@ -204,7 +204,10 @@ fn docker_executor_is_rejected() {
 }
 
 /// A misspelled target is an Alba error (exit 2) with the loader's
-/// "did you mean...?" suggestion rendered as a diagnostic.
+/// "did you mean...?" suggestion rendered as a diagnostic — and, because
+/// the name was typed on the command line rather than written in the
+/// Beamfile, with no caret drawn at a source position that has nothing to
+/// do with the mistake.
 #[test]
 fn unknown_beam_suggests_closest() {
     let dir = project("beam build { run \"echo ok\" }\n");
@@ -214,6 +217,23 @@ fn unknown_beam_suggests_closest() {
         .args(["run", "biuld"])
         .assert()
         .code(2)
+        .stderr(predicates::str::contains("did you mean `build`?"))
+        .stderr(predicates::str::contains("Beamfile:").not());
+}
+
+/// A `default` naming a beam that does not exist is a load failure, so
+/// `alba check` reports it instead of green-lighting a project where a
+/// bare `alba` cannot work.
+#[test]
+fn a_default_naming_an_unknown_beam_fails_check() {
+    let dir = project("default biuld\nbeam build { run \"echo ok\" }\n");
+
+    alba()
+        .current_dir(&dir)
+        .arg("check")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("unknown beam `biuld`"))
         .stderr(predicates::str::contains("did you mean `build`?"));
 }
 
