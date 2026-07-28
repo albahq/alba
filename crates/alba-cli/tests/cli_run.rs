@@ -122,6 +122,51 @@ fn json_log_format_emits_one_json_object_per_line() {
     }
 }
 
+/// A beam whose `run` template cannot be rendered when the run reaches it
+/// — `env(NAME)` without a default is deliberately resolved that late —
+/// fails like any other beam. The JSON stream must still end with
+/// `run_finished`, which is the machine contract consumers read the run's
+/// outcome from, and the process must report the failure rather than an
+/// Alba-level error.
+#[test]
+fn a_template_that_fails_at_run_time_still_ends_the_json_stream() {
+    let dir = project(
+        "beam good { run \"echo ok\" }\n\
+         beam broken { run \"echo {env('ALBA_MISSING_VAR_XYZ')}\" }\n\
+         beam all { needs [good, broken] run \"echo all\" }\n",
+    );
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "all", "--keep-going", "--log-format", "json"])
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    let last: serde_json::Value = serde_json::from_str(
+        stdout
+            .lines()
+            .next_back()
+            .unwrap_or_else(|| panic!("stdout is empty: {stdout:?}")),
+    )
+    .unwrap();
+    assert_eq!(last["event"], "run_finished");
+    assert_eq!(last["failed"], serde_json::json!(["broken"]));
+    assert_eq!(last["succeeded"], serde_json::json!(["good"]));
+
+    let kinds: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value["beam"] == "broken")
+        .filter_map(|value| value["event"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        kinds,
+        ["beam_started", "beam_output", "beam_finished"],
+        "the beam that failed must report itself like any other"
+    );
+}
+
 /// A beam's declared parameter is bound from the run's positional
 /// arguments and interpolated into its `run` template.
 ///

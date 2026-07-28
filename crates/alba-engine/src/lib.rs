@@ -29,10 +29,11 @@ use alba_core::{BeamId, CoreError};
 /// exit code 2.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    /// The project could not answer a question the engine asked of it: an
-    /// unknown target beam, or a `run`/`env` template that failed to
-    /// render at schedule time. Carries the span and source file the CLI
-    /// needs to point at the offending Beamfile.
+    /// The project could not answer a question the engine asked of it:
+    /// today, only an unknown target beam. Carries the span and source
+    /// file the CLI needs to point at the offending Beamfile. A `run`/`env`
+    /// template that fails to render at schedule time is deliberately not
+    /// one of these — it is the failure of the beam that declared it.
     #[error(transparent)]
     Core(#[from] CoreError),
     /// The run cannot be scheduled as requested: a beam using an executor

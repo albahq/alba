@@ -3,12 +3,20 @@
 //!
 //! ## Shape
 //!
-//! [`run`] extracts the target's execution subgraph, rejects anything that
-//! makes the run unschedulable *before* starting any work, then spawns one
-//! tokio task per beam. Each task waits for its dependencies, takes a
-//! permit from a semaphore sized by [`RunOptions::jobs`], renders its
-//! `run`/`env` templates with the target's parameters in scope, and runs
-//! its commands sequentially, stopping at the first one that fails.
+//! [`run`] extracts the target's execution subgraph, rejects the two
+//! things that make a run unschedulable as a whole (an executor Alba does
+//! not implement, and parameters that do not match what the target
+//! declares) *before* starting any work, then spawns one tokio task per
+//! beam. Each task waits for its dependencies, takes a permit from a
+//! semaphore sized by [`RunOptions::jobs`], renders its `run`/`env`
+//! templates with the target's parameters in scope, and runs its commands
+//! sequentially, stopping at the first one that fails.
+//!
+//! Anything that goes wrong from the moment a beam starts — a command that
+//! exits non-zero, one that cannot be spawned, a template that will not
+//! render — is that beam's own failure, reported through its normal event
+//! stream and its status, never an abandoned run. That is what lets
+//! `keep_going`, `allow_failure`, and dependency propagation govern it.
 //!
 //! ## Completion signalling
 //!
@@ -63,12 +71,12 @@ pub struct RunOptions {
 /// Runs `target` and everything it needs, and reports what happened.
 ///
 /// Returns `Err` only for something Alba itself cannot do — an unknown
-/// target, a docker beam, wrong parameters, a template that fails to
-/// render, an executor that could not run a command at all. A beam whose
-/// command merely exits non-zero is not an error: it lands in
-/// [`RunSummary::failed`], and [`RunSummary::exit_code`] turns that into
-/// the process exit code. `RunFinished` is emitted last, and only on the
-/// `Ok` path — an `Err` has no summary to report.
+/// target, a docker beam, wrong parameters — or for a beam's task
+/// panicking, which is a bug rather than an outcome. A beam that merely
+/// fails is not an error: it lands in [`RunSummary::failed`], and
+/// [`RunSummary::exit_code`] turns that into the process exit code.
+/// `RunFinished` is emitted last, and only on the `Ok` path — an `Err` has
+/// no summary to report.
 pub async fn run(
     project: &Project,
     target: &BeamId,
@@ -138,20 +146,14 @@ pub async fn run(
     // Awaited in declaration order, which is also the order the summary
     // reports: a run's buckets must not depend on which task happened to
     // finish first. Every task is awaited even once one of them has
-    // errored, so no task outlives this call.
+    // panicked, so no task outlives this call.
     let mut summary = RunSummary::default();
     let mut failure: Option<EngineError> = None;
     for (id, task) in tasks {
-        let error = match task.await {
-            Ok(Ok(status)) => {
-                summary.record(id, &status);
-                continue;
-            }
-            Ok(Err(error)) => error,
-            Err(_) => EngineError::Panicked { beam: id },
-        };
-        if failure.is_none() {
-            failure = Some(error);
+        match task.await {
+            Ok(status) => summary.record(id, &status),
+            Err(_) if failure.is_none() => failure = Some(EngineError::Panicked { beam: id }),
+            Err(_) => {}
         }
     }
     if let Some(error) = failure {
@@ -165,12 +167,14 @@ pub async fn run(
     Ok(summary)
 }
 
-/// The beams to run, in the project's declaration order, once everything
-/// that makes the run unschedulable has been ruled out.
+/// The beams to run, in the project's declaration order, once the two
+/// things that make a run unschedulable as a whole have been ruled out.
 ///
 /// Both checks happen here, before [`run`] spawns anything, so a docker
 /// beam or a bad parameter list fails the run without half of its subgraph
-/// having already executed.
+/// having already executed. They are the only such checks: everything else
+/// that can go wrong belongs to one beam and is reported as that beam's
+/// failure once the run is under way.
 fn plan<'a>(
     project: &'a Project,
     target: &BeamId,
@@ -263,40 +267,36 @@ struct BeamTask {
 
 /// One beam's whole life: wait, run (or not), report, release dependents.
 ///
+/// Every way a beam can go wrong ends in a [`BeamStatus`], never in an
+/// error that abandons the run: a command that exits non-zero, one that
+/// cannot be spawned, and a template that cannot be rendered are all
+/// per-beam outcomes, which is exactly what `keep_going` and
+/// `allow_failure` govern. The only thing that can still take a beam's
+/// task down is a panic, which [`run`] turns into an
+/// [`EngineError::Panicked`].
+///
 /// Publishing the status is deliberately the last thing that happens, and
 /// always happens: a dependent blocked on this beam is released only once
 /// its `BeamFinished` event is out and, on a failure, only once `stop` has
 /// been cancelled — so the dependent cannot observe a stale "nothing has
 /// failed yet" and start.
-async fn run_beam(mut task: BeamTask) -> Result<BeamStatus, EngineError> {
-    let outcome = if dependencies_satisfied(&mut task.dependencies).await {
+async fn run_beam(mut task: BeamTask) -> BeamStatus {
+    let (status, duration) = if dependencies_satisfied(&mut task.dependencies).await {
         execute(&task).await
     } else {
-        Ok((BeamStatus::Cancelled, Duration::ZERO))
+        (BeamStatus::Cancelled, Duration::ZERO)
     };
 
-    match outcome {
-        Ok((status, duration)) => {
-            if matches!(status, BeamStatus::Failed { .. }) && !task.keep_going {
-                task.stop.cancel();
-            }
-            let _ = task.events.send(RunEvent::BeamFinished {
-                id: task.beam.id.clone(),
-                status: status.clone(),
-                duration,
-            });
-            let _ = task.status.send(Some(status.clone()));
-            Ok(status)
-        }
-        Err(error) => {
-            // The run is being abandoned: stop everything that has not
-            // started, and release the dependents waiting on this beam so
-            // every task finishes and `run` can return the error.
-            task.stop.cancel();
-            let _ = task.status.send(Some(BeamStatus::Cancelled));
-            Err(error)
-        }
+    if matches!(status, BeamStatus::Failed { .. }) && !task.keep_going {
+        task.stop.cancel();
     }
+    let _ = task.events.send(RunEvent::BeamFinished {
+        id: task.beam.id.clone(),
+        status: status.clone(),
+        duration,
+    });
+    let _ = task.status.send(Some(status.clone()));
+    status
 }
 
 /// Whether every dependency ended in a state that lets this beam run.
@@ -335,14 +335,14 @@ async fn wait_for_status(dependency: &mut watch::Receiver<Option<BeamStatus>>) -
 /// Takes a slot and runs the beam's commands, returning how it ended and
 /// how long it took. Returns `Cancelled` with a zero duration for a beam
 /// that never got to start.
-async fn execute(task: &BeamTask) -> Result<(BeamStatus, Duration), EngineError> {
+async fn execute(task: &BeamTask) -> (BeamStatus, Duration) {
     let cancelled = (BeamStatus::Cancelled, Duration::ZERO);
 
     // `biased` so a run that is already stopping does not start one more
     // beam just because a permit happened to be free at the same instant.
     let permit = tokio::select! {
         biased;
-        () = task.stop.cancelled() => return Ok(cancelled),
+        () = task.stop.cancelled() => return cancelled,
         permit = task.slots.acquire() => permit,
     };
     // Bound (rather than dropped as `_`) so the slot stays held until this
@@ -350,15 +350,13 @@ async fn execute(task: &BeamTask) -> Result<(BeamStatus, Duration), EngineError>
     // been awaited, so it is never closed; treating a closed one as a
     // cancellation keeps this total without a panic.
     let Ok(_permit) = permit else {
-        return Ok(cancelled);
+        return cancelled;
     };
     // Waiting for the permit may have taken a while, during which the run
     // may have been stopped: this beam has still not started.
     if task.stop.is_cancelled() {
-        return Ok(cancelled);
+        return cancelled;
     }
-
-    let plan = render(&task.beam, &task.args)?;
 
     let started_at = Instant::now();
     let _ = task.events.send(RunEvent::BeamStarted {
@@ -378,11 +376,41 @@ async fn execute(task: &BeamTask) -> Result<(BeamStatus, Duration), EngineError>
         task.events.clone(),
     ));
 
-    let status = run_commands(task, &plan, &lines).await;
+    // A template that will not render is this beam's failure, not the
+    // run's — the same rule a command that cannot be spawned follows, and
+    // for the same reason: `env(NAME)` with no default is deliberately
+    // deferred to this moment, so an unset variable is an ordinary per-beam
+    // outcome that `keep_going` and `allow_failure` are meant to govern.
+    // Abandoning the whole run instead discarded the summary, dropped the
+    // final event, and left this beam with no events at all.
+    let status = match render(&task.beam, &task.args) {
+        Ok(plan) => run_commands(task, &plan, &lines).await,
+        Err(error) => {
+            let _ = lines.send(OutputLine {
+                stream: Stream::Stderr,
+                text: error.to_string(),
+            });
+            failure_status(task)
+        }
+    };
     drop(lines);
     let _ = forwarder.await;
 
-    Ok((status, started_at.elapsed()))
+    (status, started_at.elapsed())
+}
+
+/// How a beam that failed before running a single command is recorded:
+/// `NO_EXIT_CODE`, through its own `allow_failure` flag.
+fn failure_status(task: &BeamTask) -> BeamStatus {
+    if task.beam.allow_failure {
+        BeamStatus::FailedAllowed {
+            exit_code: NO_EXIT_CODE,
+        }
+    } else {
+        BeamStatus::Failed {
+            exit_code: NO_EXIT_CODE,
+        }
+    }
 }
 
 /// A beam's commands and the environment they run in, all rendered.

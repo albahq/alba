@@ -350,10 +350,107 @@ beam lint { allow_failure true run ["fail first", "never second"] }
     assert_eq!(ids(&outcome.summary().failed_allowed), ["lint"]);
 }
 
+/// A `run` template that cannot be rendered at schedule time — here an
+/// environment variable that is deliberately deferred to that moment and
+/// turns out to be unset — is that beam's failure, not the run's. It gets
+/// the same treatment as a command that cannot be spawned: a started
+/// event, the message as stderr output, a failed status, and a run that
+/// keeps going for everything that does not depend on it.
+#[tokio::test]
+async fn a_template_that_cannot_render_fails_only_its_own_beam() {
+    const SOURCE: &str = r#"
+beam broken { run "echo {env('ALBA_MISSING_VAR_XYZ')}" }
+beam other { run "step other" }
+beam all { needs [broken, other] run "step all" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "all", options(2, true), executor.clone()).await;
+
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed), ["broken"]);
+    assert_eq!(
+        ids(&summary.succeeded),
+        ["other"],
+        "a beam whose template fails must not stop the rest of the run"
+    );
+    assert_eq!(ids(&summary.cancelled), ["all"]);
+    assert_eq!(summary.exit_code(), 1);
+
+    let events = &outcome.events;
+    let started = only(
+        positions(
+            events,
+            |event| matches!(event, RunEvent::BeamStarted { id } if id.0 == "broken"),
+        ),
+        "`broken` started event",
+    );
+    let reported = only(
+        positions(events, |event| {
+            matches!(event, RunEvent::BeamOutput { id, line }
+                if id.0 == "broken"
+                    && line.stream == Stream::Stderr
+                    && line.text.contains("ALBA_MISSING_VAR_XYZ"))
+        }),
+        "render failure reported as stderr output",
+    );
+    let finished = only(
+        positions(
+            events,
+            |event| matches!(event, RunEvent::BeamFinished { id, .. } if id.0 == "broken"),
+        ),
+        "`broken` finished event",
+    );
+    assert!(started < reported && reported < finished);
+
+    let last = events.last().expect("the run must emit events");
+    assert!(
+        matches!(last, RunEvent::RunFinished { .. }),
+        "the run must still end with its summary, got {last:?}"
+    );
+}
+
+/// The forgiving half of the same rule: a beam that declares
+/// `allow_failure` and whose template cannot render lands in
+/// `failed_allowed`, so its dependents still run.
+#[tokio::test]
+async fn a_template_that_cannot_render_honours_allow_failure() {
+    const SOURCE: &str = r#"
+beam lint { allow_failure true run "echo {env('ALBA_MISSING_VAR_XYZ')}" }
+beam build { needs [lint] run "step build" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed_allowed), ["lint"]);
+    assert_eq!(ids(&summary.succeeded), ["build"]);
+    assert_eq!(summary.exit_code(), 0);
+}
+
+/// Without `--keep-going`, a template failure stops the beams that have
+/// not started, exactly like any other failure — rather than abandoning
+/// the run and discarding what already succeeded.
+#[tokio::test]
+async fn a_template_that_cannot_render_triggers_fail_fast() {
+    const SOURCE: &str = r#"
+beam broken { run "echo {env('ALBA_MISSING_VAR_XYZ')}" }
+beam after { needs [broken] run "step after" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "after", options(1, false), executor.clone()).await;
+
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed), ["broken"]);
+    assert_eq!(ids(&summary.cancelled), ["after"]);
+    assert!(commands(&executor).is_empty());
+}
+
 /// An `Executor` that cannot spawn a command at all — a missing shell, a
 /// `cwd` that does not exist. Scriptable behaviour `FakeExecutor` does not
-/// offer today (see the task report), so this test drives the case
-/// directly through the trait.
+/// offer today, so this test drives the case directly through the trait.
 struct SpawnFailureExecutor;
 
 #[async_trait::async_trait]
