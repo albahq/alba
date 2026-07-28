@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 ///
 /// `.gitignore` files are honored even outside a git repository
 /// (`require_git(false)`), so behaviour does not silently change when a
-/// project is unpacked from a tarball. Hidden files are included —
+/// project is unpacked from a tarball; only the project's own ignore files
+/// apply, not the machine's global excludes, so inputs remain reproducible
+/// regardless of whose machine resolves them. Hidden files are included —
 /// `inputs [".env"]` must work — but `.git/` and `.alba/` are never
 /// walked: the first is noise, and hashing the cache's own directory
 /// would invalidate every beam on every run.
@@ -36,6 +38,7 @@ pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> 
     let walker = ignore::WalkBuilder::new(base)
         .hidden(false)
         .require_git(false)
+        .git_global(false)
         .filter_entry(|entry| {
             entry.file_name() != OsStr::new(".git") && entry.file_name() != OsStr::new(".alba")
         })
