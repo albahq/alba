@@ -10,6 +10,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use alba_core::BeamId;
 use alba_executors::{OutputLine, Stream};
@@ -119,15 +120,31 @@ impl CacheStore {
 }
 
 /// Writes via a sibling temporary file and a rename, so a reader never
-/// observes a half-written entry. The temporary name appends to the full
-/// file name (rather than replacing the extension) so the `.json` and
-/// `.log` of one beam cannot collide on the same temporary path.
+/// observes a half-written entry.
+///
+/// The temporary name appends to the full file name (rather than replacing
+/// the extension) so the `.json` and `.log` of one beam cannot collide on
+/// the same temporary path, and carries the process id and a counter so
+/// two concurrent `alba run` invocations writing the same beam cannot
+/// either — without which they would share one temporary file and each
+/// rename whatever the other had written into it half-way.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
+    let tmp = temporary_path(path);
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// A temporary sibling of `path`, never the same one twice.
+fn temporary_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    PathBuf::from(tmp)
 }
 
 #[cfg(test)]
@@ -239,6 +256,21 @@ mod tests {
         store.store(&id, &manifest("fp1"), &logs);
 
         assert_eq!(store.load_logs(&id), logs);
+    }
+
+    /// Two writers of the same entry must not share a temporary file:
+    /// they would each rename whatever the other had written half-way
+    /// into it, which is precisely the torn entry the rename is there to
+    /// prevent. Concurrent `alba run` invocations in one project are
+    /// tolerated, so this is a real pair of writers, not a hypothetical.
+    #[test]
+    fn two_writes_of_the_same_entry_use_different_temporary_files() {
+        let path = Path::new("/cache/abc.json");
+
+        let (first, second) = (temporary_path(path), temporary_path(path));
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(Path::new("/cache")));
     }
 
     #[test]
