@@ -689,4 +689,9 @@ mod tests {
     fn rejects_unclosed_command_substitution() {
         insta::assert_snapshot!(err("echo $(true").render("echo $(true"));
     }
+
+    #[test]
+    fn rejects_a_trailing_backslash() {
+        insta::assert_snapshot!(err("echo a\\").render("echo a\\"));
+    }
 }

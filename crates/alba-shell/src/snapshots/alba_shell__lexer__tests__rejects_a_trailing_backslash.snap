@@ -1,0 +1,7 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "err(\"echo a\\\\\").render(\"echo a\\\\\")"
+---
+error: incomplete escape at end of command
+  │ echo a\
+  │       ^
