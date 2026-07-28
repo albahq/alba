@@ -22,16 +22,23 @@
 //! of the same facts for a consumer that by construction is parsing the
 //! first one.
 
+use std::io;
+
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::Stream;
 use serde::Serialize;
 
-#[derive(Default)]
-pub struct JsonRenderer;
+use super::LineSink;
+
+pub struct JsonRenderer {
+    out: LineSink<io::Stdout>,
+}
 
 impl JsonRenderer {
     pub fn new() -> Self {
-        Self
+        Self {
+            out: LineSink::stdout(),
+        }
     }
 }
 
@@ -43,7 +50,7 @@ impl super::Renderer for JsonRenderer {
         // rather than unwrapped, since a panic mid-run would be a far
         // worse outcome than a dropped line.
         if let Ok(line) = serde_json::to_string(&wire) {
-            println!("{line}");
+            self.out.line(&line);
         }
     }
 }
@@ -75,7 +82,10 @@ enum WireEvent<'a> {
         failed_allowed: Vec<&'a str>,
         cancelled: Vec<&'a str>,
         duration_ms: u64,
-        /// The code the `alba` process is about to exit with.
+        /// What the run's beams earned, straight from
+        /// `RunSummary::exit_code()`: `0` or `1`. Not always the code the
+        /// process ends up returning — a run the user interrupted exits
+        /// `130` regardless of how far its beams got.
         exit_code: i32,
     },
 }
