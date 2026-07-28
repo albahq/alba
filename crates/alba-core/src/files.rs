@@ -35,18 +35,22 @@ use std::path::{Path, PathBuf};
 /// from a [`crate::Project`] assembled some other way; it is skipped on
 /// its own, leaving its siblings' matches intact.
 pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> {
-    let set = build_globset(patterns);
-    if set.is_empty() {
+    let matcher = Matcher::compile(patterns);
+    if matcher.is_empty() {
         return Vec::new();
     }
 
+    // Owned copies: the walker's filter must outlive this call's borrows.
+    let (root, roots) = (base.to_path_buf(), matcher.roots.clone());
     let walker = ignore::WalkBuilder::new(base)
         .hidden(false)
         .require_git(false)
         .git_global(false)
         .follow_links(true)
-        .filter_entry(|entry| {
-            entry.file_name() != OsStr::new(".git") && entry.file_name() != OsStr::new(".alba")
+        .filter_entry(move |entry| {
+            entry.file_name() != OsStr::new(".git")
+                && entry.file_name() != OsStr::new(".alba")
+                && worth_visiting(&root, entry.path(), &roots)
         })
         .build();
 
@@ -59,7 +63,7 @@ pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> 
             continue;
         };
         let unified = relative.to_string_lossy().replace('\\', "/");
-        if set.is_match(&unified) {
+        if matcher.set.is_match(&unified) {
             files.push((unified, entry.into_path()));
         }
     }
@@ -82,20 +86,130 @@ pub fn outputs_satisfied(base: &Path, patterns: &[String]) -> bool {
     })
 }
 
-/// Compiles `patterns` one at a time, keeping the ones that compile. A
-/// single bad pattern used to abandon the whole set, turning every
-/// declared input into "nothing matched" — which the cache reads as a beam
-/// whose inputs never change, and therefore never reruns.
-fn build_globset(patterns: &[String]) -> globset::GlobSet {
-    let mut builder = globset::GlobSetBuilder::new();
-    for pattern in patterns {
-        if let Ok(glob) = globset::Glob::new(pattern) {
-            builder.add(glob);
+/// A beam's patterns, compiled: what a path is matched against, and which
+/// directories can possibly hold a match.
+struct Matcher {
+    set: globset::GlobSet,
+    /// Per pattern, its leading run of literal path components — `crates`
+    /// for `crates/**/*.rs`, empty for `**/*.rs`. Nothing outside one of
+    /// these can match, so nothing outside one of them is walked.
+    roots: Vec<Vec<String>>,
+}
+
+impl Matcher {
+    /// Compiles `patterns` one at a time, keeping the ones that compile.
+    /// A single bad pattern used to abandon the whole set, turning every
+    /// declared input into "nothing matched" — which the cache reads as a
+    /// beam whose inputs never change, and therefore never reruns.
+    fn compile(patterns: &[String]) -> Self {
+        let mut builder = globset::GlobSetBuilder::new();
+        let mut roots = Vec::new();
+        for pattern in patterns {
+            if let Ok(glob) = globset::Glob::new(pattern) {
+                builder.add(glob);
+                roots.push(literal_prefix(pattern));
+            }
+        }
+        Self {
+            // `build` only fails on a glob that already compiled, but the
+            // cache degrades rather than panics on anything unexpected.
+            set: builder
+                .build()
+                .unwrap_or_else(|_| globset::GlobSet::empty()),
+            roots,
         }
     }
-    // `build` only fails on a glob that already compiled, but the cache
-    // degrades rather than panics on anything unexpected.
-    builder
-        .build()
-        .unwrap_or_else(|_| globset::GlobSet::empty())
+
+    fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+}
+
+/// Whether `path` is, or could contain, a match — the walk's pruning rule.
+///
+/// The `GlobSet` alone only filters entries the walk has already produced,
+/// so `crates/**/*.rs` visited the whole project, `target/` included, once
+/// per beam declaring it. A path matching no pattern's literal prefix can
+/// hold no match, so descent stops there. Deliberately conservative: a
+/// pattern with no literal prefix (`**/*.rs`) still walks everything, and
+/// which files end up matched is unchanged.
+fn worth_visiting(base: &Path, path: &Path, roots: &[Vec<String>]) -> bool {
+    let Ok(relative) = path.strip_prefix(base) else {
+        return true;
+    };
+    let components: Vec<String> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    // `zip` stops at the shorter side, so this holds when either is a
+    // prefix of the other: a directory on the way down to a root, and
+    // anything underneath one.
+    roots.iter().any(|root| {
+        root.iter()
+            .zip(&components)
+            .all(|(expected, actual)| expected == actual)
+    })
+}
+
+/// The leading path components of `pattern` that are plain text, stopping
+/// at the first one holding a glob metacharacter.
+fn literal_prefix(pattern: &str) -> Vec<String> {
+    const META: [char; 7] = ['*', '?', '[', ']', '{', '}', '\\'];
+    pattern
+        .split('/')
+        .take_while(|component| !component.is_empty() && !component.contains(META))
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_literal_prefix_stops_at_the_first_metacharacter() {
+        assert_eq!(literal_prefix("crates/**/*.rs"), vec!["crates"]);
+        assert_eq!(
+            literal_prefix("crates/alba-core/src/*.rs"),
+            vec!["crates", "alba-core", "src"]
+        );
+        assert_eq!(literal_prefix("Cargo.toml"), vec!["Cargo.toml"]);
+        assert!(literal_prefix("**/*.rs").is_empty());
+        assert!(literal_prefix("/absolute/x.rs").is_empty());
+    }
+
+    /// A pattern with no literal prefix must not prune anything: the
+    /// pruning rule may only remove paths that cannot match.
+    #[test]
+    fn a_pattern_without_a_literal_prefix_visits_everything() {
+        let base = Path::new("/project");
+        let roots = vec![Vec::new()];
+        assert!(worth_visiting(base, Path::new("/project/target"), &roots));
+    }
+
+    #[test]
+    fn only_the_way_down_to_a_root_and_its_contents_are_visited() {
+        let base = Path::new("/project");
+        let roots = vec![vec!["crates".to_string(), "alba-core".to_string()]];
+
+        assert!(worth_visiting(base, Path::new("/project/crates"), &roots));
+        assert!(worth_visiting(
+            base,
+            Path::new("/project/crates/alba-core/src/files.rs"),
+            &roots
+        ));
+        assert!(!worth_visiting(base, Path::new("/project/target"), &roots));
+        assert!(!worth_visiting(
+            base,
+            Path::new("/project/crates/alba-cli"),
+            &roots
+        ));
+        // A sibling whose name merely starts with a root's name is not
+        // under it: components are compared whole, never as substrings.
+        assert!(!worth_visiting(
+            base,
+            Path::new("/project/crates-extra"),
+            &roots
+        ));
+    }
 }
