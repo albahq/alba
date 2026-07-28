@@ -21,8 +21,8 @@
 //! measures exactly the work the criterion names and nothing else.
 //!
 //! The fixture is not just 100 beams with empty `needs` lists. An earlier
-//! version of this test was exactly that, and a review caught that it
-//! exercised only the parsing/import half of `load_project`:
+//! version of this test was exactly that, and it exercised only the
+//! parsing/import half of `load_project`:
 //! `validate_graph`'s `by_id` lookup (see `graph.rs`) never iterates a
 //! `needs` entry when there are none, so an O(1)-to-O(n) regression there
 //! was completely invisible to it — confirmed by deliberately breaking

@@ -174,10 +174,9 @@ mod tests {
     use super::*;
     use crate::parse;
 
-    /// The interfaces note for this task flags `Eof`'s zero-width span as
-    /// a case `render_diagnostic` must handle without panicking or
-    /// rendering nothing. Exercise it through the real parser (a beam block
-    /// left open, so parsing runs off the end of input) rather than
+    /// `Eof`'s zero-width span must render without panicking and without
+    /// producing nothing at all. Exercised through the real parser (a beam
+    /// block left open, so parsing runs off the end of input) rather than
     /// building a synthetic zero-width `Diagnostic` by hand.
     #[test]
     fn renders_zero_width_eof_span_without_panicking() {

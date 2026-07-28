@@ -4,8 +4,8 @@
 //! Scope boundary: a [`Beam`]'s `needs` list is converted straight from
 //! the AST's `BeamRef`s (namespaced by [`crate::loader::load_project`]
 //! when it came from an `import`) without validating that the referenced
-//! beam actually exists — graph validation and subgraph extraction are
-//! Task 8's job, not this crate's model.
+//! beam actually exists — that is [`crate::validate_graph`]'s job, not
+//! this module's.
 
 use std::path::PathBuf;
 
@@ -31,10 +31,10 @@ pub struct BeamId(pub String);
 /// How a beam's commands run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutorKind {
-    /// The default: the embedded shell (or, later, a configured system
-    /// shell). Selecting a real shell implementation is Task 10's concern.
+    /// The default: the system shell. Which shell implementation
+    /// actually runs a beam is the engine's concern, not this model's.
     Shell,
-    /// `executor docker { image "..." }`. Task 10 rejects this at run
+    /// `executor docker { image "..." }`. The engine rejects this at run
     /// time until the docker executor exists; this crate only carries the
     /// image name through the model.
     Docker { image: String },

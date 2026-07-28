@@ -450,7 +450,7 @@ beam after { needs [broken] run "step after" }
 
 /// An `Executor` that cannot spawn a command at all — a missing shell, a
 /// `cwd` that does not exist. Scriptable behaviour `FakeExecutor` does not
-/// offer today, so this test drives the case directly through the trait.
+/// offer, so this test drives the case directly through the trait.
 struct SpawnFailureExecutor;
 
 #[async_trait::async_trait]

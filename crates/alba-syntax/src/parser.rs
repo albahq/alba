@@ -3,7 +3,7 @@
 //! Grammar notes not obvious from the AST shapes alone:
 //!
 //! - The Beamfile DSL is brace/bracket/paren-delimited with no significant
-//!   whitespace (see the design spec). `Newline` tokens from the lexer are
+//!   whitespace. `Newline` tokens from the lexer are
 //!   therefore dropped up front, before the parser ever sees them: they
 //!   carry no grammatical meaning here, so a `needs` list (or any other
 //!   list) may freely span multiple lines, and beam fields are separated
@@ -17,9 +17,7 @@
 //! - `needs [...]`/`inputs [...]`/`outputs [...]`/list-form `run [...]`
 //!   accept an optional trailing comma before `]`.
 //! - `env { NAME = value }` values and `executor <name> { option value }`
-//!   option values are not shown as syntax by the brief's struct
-//!   definitions; modeled on the design spec's example. `executor` options
-//!   follow the same "keyword-ish identifier followed by its value" shape
+//!   option values follow the same "keyword-ish identifier followed by its value" shape
 //!   as beam fields (`image "deployer:latest"`, no `=`), and their value is
 //!   always a string literal, parsed as a `StringTemplate`. `env` values
 //!   may be a string literal (also a `StringTemplate`) or a bare identifier

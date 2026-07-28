@@ -7,11 +7,9 @@ license.workspace = true
 [dependencies]
 # `fancy-no-backtrace` is the minimal miette feature set that exposes
 # `GraphicalReportHandler`/`GraphicalTheme` (gated behind `fancy-base`, see
-# miette's Cargo.toml). The brief suggested a plain runtime dependency with
-# `fancy` only as a dev-dependency, but `render_diagnostic` is a library
-# function called from production code (the CLI, in a later task), so the
-# feature enabling `GraphicalReportHandler` must be a normal dependency
-# feature, not dev-only. We pick `fancy-no-backtrace` over the full `fancy`
+# miette's Cargo.toml). It has to be a normal dependency feature rather
+# than a dev-only one, because `render_diagnostic` is a library function
+# the CLI calls in production. We pick `fancy-no-backtrace` over the full `fancy`
 # to skip the `backtrace`/`backtrace-ext` dependencies, which only serve
 # `fancy`'s panic-hook integration; we render diagnostics directly and never
 # install that hook.

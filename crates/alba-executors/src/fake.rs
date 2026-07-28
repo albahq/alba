@@ -1,5 +1,5 @@
 //! [`FakeExecutor`]: a scriptable, in-memory [`Executor`] used to test the
-//! scheduler (Task 10's `alba-engine`) without spawning real processes.
+//! scheduler without spawning real processes.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
-    /// The scenario the brief calls out by name: two beams that overlap
+    /// The scenario the counter exists for: two beams that overlap
     /// under `--jobs 2` must show `running_peak() == 2`, not 1. Uses a
     /// real multi-threaded runtime so this exercises actual cross-thread
     /// atomic accounting, not just single-threaded cooperative

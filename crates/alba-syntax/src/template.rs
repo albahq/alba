@@ -8,7 +8,7 @@
 //! escapes are resolved, the content's byte offsets no longer line up
 //! one-to-one with the original source (each decoded `\n` is 1 byte where
 //! the source had 2), and every span this module produces must point into
-//! the *original* source so Task 5 can put a caret under it.
+//! the *original* source so a diagnostic can put a caret under it.
 //!
 //! Instead, [`parse_template_at`] re-scans `full_source[span]` directly
 //! (the literal text as written, quotes included) and decodes escapes

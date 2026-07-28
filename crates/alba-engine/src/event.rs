@@ -1,9 +1,9 @@
 //! What a run tells the outside world: the [`RunEvent`] stream a run emits
 //! while it happens, and the [`RunSummary`] it ends with.
 //!
-//! This is the only contract between execution and display (see the design
-//! spec's dependency rules): the headless CLI renderer today, and the TUI
-//! later, are two consumers of the same stream. Nothing here knows how a
+//! This is the only contract between execution and display: the headless
+//! CLI renderer today, and a TUI later, are two consumers of the same
+//! stream. Nothing here knows how a
 //! beam runs — [`crate::scheduler`] produces these values, and the channel
 //! they travel on is unbounded, so a slow consumer never stalls the run.
 

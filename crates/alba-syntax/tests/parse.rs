@@ -1,4 +1,5 @@
-//! Snapshot test parsing the design spec's exhaustive example Beamfile.
+//! Snapshot test parsing an example Beamfile that exercises every piece
+//! of the DSL's grammar at once.
 
 use alba_syntax::parse;
 
@@ -39,6 +40,6 @@ beam deploy(target) {
 "#;
 
 #[test]
-fn parses_full_spec_example() {
+fn parses_an_example_using_every_construct() {
     insta::assert_debug_snapshot!(parse(EXAMPLE).unwrap());
 }

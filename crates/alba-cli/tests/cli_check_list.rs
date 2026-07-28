@@ -1,6 +1,6 @@
-//! End-to-end tests for the `alba` binary surface this task adds: `alba
-//! check`, bare `alba` beam listing (with and without a `default`), and the
-//! `--file`/missing-Beamfile handling every later task's tests build on.
+//! End-to-end tests for the `alba` binary's non-running surface: `alba
+//! check`, bare `alba` beam listing (with and without a `default`), and
+//! `--file`/missing-Beamfile handling.
 
 use predicates::prelude::PredicateBooleanExt;
 

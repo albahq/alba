@@ -264,10 +264,10 @@ mod tests {
     use crate::loader::load_project;
     use crate::model::SourceId;
 
-    /// Sorts a closure's ids into plain, comparable `String`s — the brief
-    /// is explicit that `execution_subgraph`'s result is unordered
-    /// (scheduling order is the engine's job), so every test compares a
-    /// sorted view rather than depending on traversal order.
+    /// Sorts a closure's ids into plain, comparable `String`s.
+    /// `execution_subgraph`'s result is unordered by contract (scheduling
+    /// order is the engine's job), so every test compares a sorted view
+    /// rather than depending on traversal order.
     fn sorted(ids: Vec<BeamId>) -> Vec<String> {
         let mut v: Vec<String> = ids.into_iter().map(|id| id.0).collect();
         v.sort();
@@ -564,8 +564,7 @@ beam e { needs [d] run \"x\" }
         assert!(!err.message.contains("b0 "));
     }
 
-    /// Highest-risk item from the review: a cycle entirely among
-    /// *imported*, namespaced beams. `detect_cycle` compares `BeamId.0` as
+    /// A cycle entirely among *imported*, namespaced beams. `detect_cycle` compares `BeamId.0` as
     /// a plain string, so a `:`-namespaced id is no different from an
     /// unnamespaced one by inspection — this pins that down with a real
     /// multi-file fixture instead of leaving it unverified. `api/Beamfile`

@@ -24,9 +24,8 @@
 //!   never propagated.
 //! - `version` is parsed (by `alba_syntax`) but not semantically used
 //!   anywhere in this crate, in the root file or an imported one — this
-//!   matches single-file loading's pre-existing behavior (Task 6 never
-//!   validated it either), so imported files are treated no differently
-//!   from the root on this point.
+//!   matches single-file loading's behavior, so imported files are
+//!   treated no differently from the root on this point.
 //! - An import alias can never contain `:`: it's parsed as a single
 //!   identifier token (`alba_syntax`'s `eat_ident`, the same rule beam and
 //!   parameter names follow), so `import "x" as a:b` is already a syntax

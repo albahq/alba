@@ -121,7 +121,7 @@ impl Scope {
     /// the shorter of the two, so a missing argument leaves its parameter
     /// name unbound (rendering later fails with a plain "unknown
     /// variable" error, not an arity message) and an extra argument is
-    /// silently ignored. Task 10 is expected to check `args.len() ==
+    /// silently ignored. The engine checks `args.len() ==
     /// beam.params.len()` itself before calling this, so a real
     /// argument-count mismatch gets a clear diagnostic instead of
     /// surfacing here as a confusing unknown-variable one.
@@ -922,8 +922,7 @@ fn build_executor(
 
     // Render every option at load time, even ones a given executor kind
     // doesn't end up using, so a malformed interpolation anywhere in the
-    // block is still caught (matches "executor options" being a load-time
-    // field per the brief).
+    // block is still caught: executor options are a load-time field.
     let mut options = HashMap::new();
     for (key, value) in &decl.options {
         options.insert(
@@ -1111,7 +1110,7 @@ beam deploy(target) { run "{target + '!'}" }
         assert_eq!(project.beams[0].params, vec!["target".to_string()]);
     }
 
-    /// Review finding #1: the branch a statically-known `if` condition
+    /// The branch a statically-known `if` condition
     /// does *not* take must still be name-validated at load time — a
     /// typo hiding there must not depend on which machine (or which
     /// environment variable) the file happens to be loaded on.
@@ -1128,7 +1127,7 @@ beam b { run "{if flag then bogus else 'ok'}" }
         assert!(err.message.contains("bogus"));
     }
 
-    /// Review finding #2: a beam parameter is forbidden in load-time
+    /// A beam parameter is forbidden in load-time
     /// fields (`cwd` here) even when a same-named file-level `let`
     /// exists — the `let` must not silently stand in for it.
     #[test]
@@ -1144,7 +1143,7 @@ beam deploy(target) { cwd "{target}" run "echo {target}" }
         assert!(err.message.contains("cwd"));
     }
 
-    /// Review finding #3: `env()` inside a deferred (`run`) template must
+    /// `env()` inside a deferred (`run`) template must
     /// not actually be executed at load time — only its name/arity are
     /// checked. A project with a beam referencing an unset environment
     /// variable in `run` must still load successfully; the "not set"
@@ -1339,7 +1338,7 @@ beam b { run "{relase}" }
         assert_eq!(err.help.as_deref(), Some("did you mean `release`?"));
     }
 
-    /// Review minor #5: `suggest`'s candidates commonly come from
+    /// `suggest`'s candidates commonly come from
     /// `HashMap` iteration (`Scope::names`), whose order is randomized
     /// per process — without an explicit tie-break, two equally-close
     /// candidates could yield a different suggestion from run to run.
@@ -1350,7 +1349,7 @@ beam b { run "{relase}" }
         assert_eq!(suggest("hat", ["bat", "cat"].into_iter()), Some("bat"));
     }
 
-    /// Review finding: `load_str` used to silently drop `import`
+    /// `load_str` used to silently drop `import`
     /// declarations (it has no filesystem to resolve them against), which
     /// would let a source string containing one "succeed" with beams
     /// quietly missing. It must fail loudly instead.
