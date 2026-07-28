@@ -19,6 +19,7 @@ use clap::Parser;
 
 use args::{Cli, Command, RunFlags};
 use exit::EXIT_ALBA_ERROR;
+use render::LineSink;
 
 fn main() {
     let cli = Cli::parse();
@@ -29,7 +30,7 @@ fn run(cli: Cli) -> i32 {
     let beamfile = match resolve_beamfile(cli.file.as_deref()) {
         Ok(path) => path,
         Err(message) => {
-            eprintln!("{message}");
+            LineSink::stderr().line(&message);
             return EXIT_ALBA_ERROR;
         }
     };
@@ -40,7 +41,7 @@ fn run(cli: Cli) -> i32 {
     let (project, sources) = match alba_core::load_project(&beamfile) {
         Ok(loaded) => loaded,
         Err(err) => {
-            eprint!("{}", render_load_error(err));
+            LineSink::stderr().line(render_load_error(err).trim_end());
             return EXIT_ALBA_ERROR;
         }
     };

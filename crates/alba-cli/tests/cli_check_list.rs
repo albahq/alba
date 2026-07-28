@@ -121,3 +121,50 @@ fn file_flag_missing_target_is_exit_2() {
         .code(2)
         .stderr(predicates::str::contains("no Beamfile found"));
 }
+
+/// Regression test: bare `alba`'s beam listing used to print through
+/// `println!`, which panics as soon as its reader closes the pipe — the
+/// exact thing `alba | head -1` does after `head` has its one line. Enough
+/// beams are declared here that the listing's total output is well past
+/// any realistic OS pipe buffer, so the child is still blocked writing
+/// when this test drops its read end below, forcing at least one write to
+/// actually fail rather than merely hoping a race lines up.
+#[test]
+fn bare_alba_survives_its_reader_closing_the_pipe_early() {
+    let dir = tempfile::tempdir().unwrap();
+    let beamfile: String = (0..20_000)
+        .map(|i| {
+            format!(
+                "beam b{i} {{ description \"a fairly long description, number {i}, so the total listing is large\" run \"echo ok\" }}\n"
+            )
+        })
+        .collect();
+    std::fs::write(dir.path().join("Beamfile"), beamfile).unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_alba"))
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Read a little, exactly like `head` would, then drop the pipe out
+    // from under the still-writing child.
+    let mut stdout = child.stdout.take().unwrap();
+    let mut buf = [0u8; 16];
+    std::io::Read::read_exact(&mut stdout, &mut buf).unwrap();
+    drop(stdout);
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("panicked"),
+        "listing must not panic when its reader closes the pipe early; stderr: {stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "listing must still finish and exit 0 even though its reader went away; status: {:?}",
+        output.status
+    );
+}
