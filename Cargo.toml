@@ -11,8 +11,11 @@ repository = "https://github.com/jdevelop-io/alba"
 [workspace.dependencies]
 assert_cmd = "2"
 async-trait = "0.1"
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
+globset = "0.4"
+ignore = "0.4"
 miette = "7"
 nix = "0.29"
 owo-colors = "4"
