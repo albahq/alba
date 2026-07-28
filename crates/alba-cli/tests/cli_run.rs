@@ -124,13 +124,21 @@ fn json_log_format_emits_one_json_object_per_line() {
 
 /// A beam's declared parameter is bound from the run's positional
 /// arguments and interpolated into its `run` template.
+///
+/// The interpolated value is quoted (`'{name}'`) so it reaches the shell
+/// as a single token, per this file's `echo <word>` invariant (see the
+/// module doc comment): an unquoted multi-word `echo hello {name}` would
+/// still print "hello world" under POSIX `sh`, but under `powershell`,
+/// `echo` (an alias for `Write-Output`) treats each bare word as a
+/// separate pipeline object and prints one per line instead of joining
+/// them with spaces.
 #[test]
 fn beam_params_are_interpolated() {
-    let dir = project("beam greet(name) { run \"echo hello {name}\" }\n");
+    let dir = project("beam greet(name) { run \"echo '{name}'\" }\n");
 
     alba()
         .current_dir(&dir)
-        .args(["run", "greet", "world"])
+        .args(["run", "greet", "hello world"])
         .assert()
         .success()
         .stdout(predicates::str::contains("hello world"));
