@@ -34,7 +34,17 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// Creates a diagnostic from a message, a byte-offset span into the
     /// source, and optional help text.
-    fn new(message: impl Into<String>, span: Span, help: Option<String>) -> Self {
+    ///
+    /// This is the constructor other crates use to lift their own spanned
+    /// errors into something [`render_diagnostic`] can render, without this
+    /// crate exposing `Diagnostic`'s fields (deliberately private — see the
+    /// struct's doc comment). `alba-core`'s `CoreError::into_diagnostic` is
+    /// the first such caller: `CoreError` already carries a message, a
+    /// [`Span`], and optional help in the same shape a [`ParseError`] does,
+    /// so it goes through this constructor rather than duplicating
+    /// `Diagnostic`'s internals or `alba-syntax` growing a dependency on
+    /// `alba-core`'s error type.
+    pub fn new(message: impl Into<String>, span: Span, help: Option<String>) -> Self {
         Self {
             message: message.into(),
             span: to_source_span(span),

@@ -121,4 +121,36 @@ impl CoreError {
         self.source_id = source_id;
         self
     }
+
+    /// Converts this error into a renderable [`alba_syntax::Diagnostic`],
+    /// mirroring [`alba_syntax::ParseError::into_diagnostic`]. `source_id`
+    /// is dropped here — a caller (the CLI) resolves it against a
+    /// [`crate::loader::SourceMap`] to find the path and source text
+    /// `alba_syntax::render_diagnostic` needs, which this crate has no
+    /// access to (a `CoreError` alone, without the `SourceMap` it was
+    /// produced alongside, is not enough to render anything).
+    pub fn into_diagnostic(self) -> alba_syntax::Diagnostic {
+        alba_syntax::Diagnostic::new(self.message, self.span, self.help)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alba_syntax::render_diagnostic;
+
+    /// Round-trips a `CoreError` through `into_diagnostic` and
+    /// `render_diagnostic`, the same way `ParseError::into_diagnostic` is
+    /// exercised in `alba-syntax`. `Diagnostic`'s fields are private, so
+    /// rendering is the only way to observe that the message, span, and
+    /// help text actually made it across.
+    #[test]
+    fn into_diagnostic_preserves_message_span_and_help() {
+        let err = CoreError::new("boom", Span::new(2, 6)).with_help("try this");
+
+        let rendered = render_diagnostic("xx boom xx", "Beamfile", &err.into_diagnostic());
+
+        assert!(rendered.contains("boom"));
+        assert!(rendered.contains("try this"));
+    }
 }
