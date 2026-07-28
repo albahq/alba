@@ -8,22 +8,25 @@ beam check {
 
 beam fmt {
   description "Check formatting"
+  inputs ["crates/**/*.rs"]
   run "cargo fmt --check"
 }
 
 beam lint {
   description "Clippy with warnings denied"
+  inputs ["crates/**/*.rs", "Cargo.toml", "Cargo.lock"]
   run "cargo clippy --all-targets -- -D warnings"
 }
 
 beam test {
   description "Run the test suite"
+  inputs ["crates/**/*.rs", "Cargo.toml", "Cargo.lock"]
   run "cargo test --workspace"
 }
 
 beam build {
   description "Release build"
-  inputs ["crates/**/*.rs", "Cargo.toml"]
+  inputs ["crates/**/*.rs", "Cargo.toml", "Cargo.lock"]
   outputs ["target/release/alba"]
   run "cargo build --release"
 }

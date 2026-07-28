@@ -142,3 +142,31 @@ A beam runs its command in a shell by default. `executor docker { image
 "..." }` also parses, but running it currently fails at run time with
 `docker executor is not yet supported` — the docker executor is not
 implemented yet.
+
+## Caching
+
+A beam that declares `inputs` is cached. Before running it, Alba checks
+whether the files matched by `inputs`, the rendered command, the beam's
+`cwd`, its `env`, its arguments, and every dependency's own fingerprint are
+all unchanged since the last successful run. If so, the beam is skipped:
+it is reported as `cached` in the output, its stored logs are replayed in
+its place, and the run's summary counts it under `cached` rather than
+`succeeded`. Change any of those inputs, even a single character in one
+matched file, and the beam runs again.
+
+A beam without declared `inputs` is never cacheable and always runs. This
+is deliberate for beams whose own work is cheaper than hashing their
+inputs would be, such as an umbrella beam that only reports on the beams
+it needs. If a beam declares `outputs` and one of them is missing from
+disk, the beam also reruns even if its inputs are otherwise unchanged: a
+cache entry only stands in for work whose result is actually still there.
+
+`alba run <beam> --force` ignores the cache on the way in: the beam runs
+regardless of what changed, and its result is written back to the cache
+for the next invocation to read. Use it to force a rebuild without
+clearing history for every other beam.
+
+The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
+`alba cache clean` removes it entirely; the next run of any beam starts
+from scratch and repopulates it. Alba never edits your `.gitignore`, so
+add `.alba/` to it yourself in any project that turns caching on.

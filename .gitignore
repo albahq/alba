@@ -6,3 +6,6 @@
 
 # JetBrains IDEs
 .idea/
+
+# Alba's own cache
+.alba/
