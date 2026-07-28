@@ -27,7 +27,8 @@ pub use fake::{FakeBehavior, FakeExecutor};
 ///
 /// Implementations are used behind `Arc<dyn Executor>` and must be
 /// `Send + Sync`; `execute` takes `&self` so a single executor instance can
-/// run many commands concurrently.
+/// run many commands concurrently. See [`ExecContext::cancel`] for the
+/// cancellation contract, including its per-platform limits.
 #[async_trait::async_trait]
 pub trait Executor: Send + Sync {
     async fn execute(&self, cmd: CommandSpec, ctx: ExecContext) -> Result<ExecResult, ExecError>;
@@ -51,6 +52,16 @@ pub struct CommandSpec {
 /// the running command to stop.
 pub struct ExecContext {
     pub output: tokio::sync::mpsc::UnboundedSender<OutputLine>,
+    /// Cancelling this token asks the running command to stop: on unix,
+    /// [`SystemShellExecutor`] sends `SIGTERM` to the whole process group
+    /// the command runs in (so a compound or backgrounding command dies
+    /// together, not just its immediate shell process), waits a grace
+    /// period, then escalates to a group-wide `SIGKILL`. On windows there
+    /// is no process-group equivalent wired up (that needs a Job object,
+    /// which this crate does not create), so cancellation there is an
+    /// immediate, unconditional kill of the immediate child process only —
+    /// a windows beam command that backgrounds a descendant can outlive
+    /// cancellation.
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -77,6 +88,13 @@ pub enum Stream {
 /// The outcome of a command that ran to completion (including a command
 /// that was cancelled and terminated — its exit code is still reported
 /// here, not as an [`ExecError`]).
+///
+/// `exit_code` is `-1` when the underlying platform reports no discrete
+/// exit code at all (for example a process killed by a signal on unix).
+/// This is a fallback value, not a reserved sentinel: `-1` is also a
+/// legitimate exit code a process can return on its own on windows, so
+/// callers cannot use `exit_code == -1` alone to distinguish "the process
+/// was killed" from "the process chose to exit with -1".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecResult {
     pub exit_code: i32,
