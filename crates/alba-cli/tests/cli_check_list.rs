@@ -89,25 +89,10 @@ fn bare_alba_shows_placeholder_for_missing_description() {
         .stdout(predicates::str::contains("\u{1b}[").not());
 }
 
-/// A `default` beam is declared: a bare `alba` must not fall back to
-/// listing beams. Until Task 12 wires a real `run`, the placeholder output
-/// only needs to name the target — this asserts exactly that and nothing
-/// about the placeholder's exact wording, so Task 12 can replace it freely.
-#[test]
-fn bare_alba_with_default_names_the_target_instead_of_listing() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("Beamfile"),
-        "default build\nbeam build { description \"Compile\" run \"echo ok\" }\n",
-    )
-    .unwrap();
-
-    alba()
-        .current_dir(&dir)
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("build"));
-}
+// A bare `alba` in a project that *does* declare a `default` belongs to
+// `run` now that the placeholder it used to print is gone: see
+// `cli_run.rs`'s `bare_alba_runs_the_default_beam`, which asserts the
+// declared beam's command actually ran rather than that its name appeared.
 
 #[test]
 fn file_flag_points_at_a_beamfile_elsewhere() {
