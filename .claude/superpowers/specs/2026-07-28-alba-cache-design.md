@@ -22,8 +22,11 @@ are never archived or restored; that stays out of scope.
   exist on disk.
 - Replay the logs of the last successful run on a cache hit, so a
   cached run stays readable and debuggable, in CI included.
-- Expand `inputs` and `outputs` globs while ignoring what git ignores,
-  using the `ignore` crate.
+- Expand `inputs` globs while ignoring what git ignores, using the
+  `ignore` crate. The `outputs` existence check deliberately queries the
+  disk raw: outputs typically live in git-ignored directories
+  (`target/`, `dist/`), so filtering them through `.gitignore` would
+  make their patterns never match.
 - Give the cache a CLI surface: `--force` on `alba run` and
   `alba cache clean`.
 - Keep the cache invisible when it cannot help: a beam without declared
