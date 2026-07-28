@@ -428,7 +428,7 @@ mod interrupts {
     use std::io::{BufRead, BufReader};
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::project;
 
@@ -509,12 +509,20 @@ mod interrupts {
         );
     }
 
+    /// How long the whole two-signal sequence may take before the abort
+    /// stops being an abort. The beam ignores `SIGTERM`, so the orderly
+    /// path would wait out the executor's 5 s grace period and only then
+    /// escalate — exiting within this bound is what proves the second
+    /// signal short-circuited it, since exit code 130 alone is also what
+    /// the orderly path eventually produces.
+    const ABORT_DEADLINE: Duration = Duration::from_secs(3);
+
     /// The second signal aborts immediately, without waiting for the
     /// executor's grace period. The beam installs its `SIGTERM`-ignoring
     /// trap *before* reporting ready and then loops for a bounded time, so
-    /// the run is provably still cancelling (inside the executor's 5 s
-    /// grace) when the second signal lands, and the shell cannot outlive
-    /// the test even though the abort leaves it running.
+    /// the run is provably still cancelling (inside that 5 s grace) when
+    /// the second signal lands, and the shell cannot outlive the test even
+    /// though the abort leaves it running.
     #[test]
     fn second_interrupt_aborts_the_process() {
         let dir = project(
@@ -524,14 +532,24 @@ mod interrupts {
 
         interrupt(&child);
         std::thread::sleep(Duration::from_millis(500));
+        let started_at = Instant::now();
         interrupt(&child);
         let output = child.wait_with_output().unwrap();
+        let elapsed = started_at.elapsed();
 
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("aborting"),
+            "the second signal must say it gave up on the orderly path, got:\n{stderr}"
+        );
+        assert!(
+            elapsed < ABORT_DEADLINE,
+            "the second signal must not wait out the executor's grace period, took {elapsed:?}"
+        );
         assert_eq!(
             output.status.code(),
             Some(130),
-            "the second signal must abort with the conventional SIGINT code, stderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            "the second signal must abort with the conventional SIGINT code, stderr:\n{stderr}"
         );
     }
 }

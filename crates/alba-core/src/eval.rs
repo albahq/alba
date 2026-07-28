@@ -955,45 +955,84 @@ fn build_executor(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
 
-    /// Ensures `ALBA_TEST_PROFILE` is absent for the duration of a test,
+    /// Serializes every test in this crate that touches the process
+    /// environment. `libtest` runs test functions on several threads by
+    /// default, and `setenv`/`unsetenv` reallocate the whole `environ`
+    /// block, so two tests mutating *different* names still race each
+    /// other. Held for a guard's entire lifetime, so a test's read of the
+    /// variable it just set cannot be interleaved with another test's
+    /// write.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Forces a variable to a known state for the duration of a test,
     /// regardless of what the ambient environment happens to hold, and
     /// restores whatever was there afterward — even if the test panics.
-    /// `evaluates_let_chain_and_interpolation` reads this variable through
-    /// the real `env()` built-in and asserts the *absent* branch; without
-    /// this guard the test's outcome would depend on whatever shell
-    /// happens to run it (the exact trap the task brief calls out).
+    /// Tests that read a variable through the real `env()` built-in would
+    /// otherwise depend on whatever shell happens to run them.
     struct EnvVarGuard {
         name: &'static str,
         previous: Option<String>,
+        /// Dropped last (after the restore in `Drop`, which runs before
+        /// the struct's fields are dropped), so no other guard can take
+        /// the lock until this one has put the variable back.
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvVarGuard {
+        /// Ensures `name` is unset for this guard's lifetime.
         fn absent(name: &'static str) -> Self {
+            Self::hold(name, None)
+        }
+
+        /// Ensures `name` holds `value` for this guard's lifetime.
+        fn set(name: &'static str, value: &str) -> Self {
+            Self::hold(name, Some(value))
+        }
+
+        fn hold(name: &'static str, value: Option<&str>) -> Self {
+            // A poisoned lock means some earlier test panicked while
+            // holding it; its own `Drop` still restored the variable, so
+            // the environment is in a usable state and there is nothing to
+            // recover. Taking the guard anyway keeps one failing test from
+            // cascading into every other environment test.
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let previous = std::env::var(name).ok();
-            // SAFETY: `set_var`/`remove_var` are `unsafe` because
-            // concurrently mutating and reading the process environment
-            // from different threads is unsound, and this test suite does
-            // not fully rule that out — `cargo test` runs test functions
-            // on multiple threads by default, and both the standard
-            // library and other crates can read the environment at any
-            // time (e.g. `RUST_BACKTRACE` on a panic). What *is* true,
-            // and is the actual basis for accepting this: no other test
-            // in this crate calls `set_var`/`remove_var`, so nothing here
-            // races another *write*, and `ALBA_TEST_PROFILE` is a name no
-            // other code in this process has any reason to read. This is
-            // the same trade-off most Rust test suites that need to touch
-            // environment variables accept, rather than eliminate.
-            unsafe { std::env::remove_var(name) };
-            Self { name, previous }
+            // SAFETY: `set_var`/`remove_var` are `unsafe` because mutating
+            // the process environment while another thread reads or writes
+            // it is unsound. `ENV_LOCK` rules out the writer half
+            // completely: it is the only path in this crate that mutates
+            // the environment, and it is held here. The reader half is not
+            // fully ruled out and cannot be from inside this crate —
+            // `std` and other crates read the environment at moments we do
+            // not control (`RUST_BACKTRACE` on a panic, `TMPDIR` from
+            // `tempfile::tempdir()` in this crate's own graph tests), and
+            // no lock we hold makes them wait. That residual risk is why
+            // these calls remain `unsafe` rather than being wrapped away,
+            // and it is the trade-off a test suite that must exercise
+            // `env()` against the real environment accepts.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            Self {
+                name,
+                previous,
+                _lock: lock,
+            }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.previous {
-                // SAFETY: see `EnvVarGuard::absent`.
+                // SAFETY: see `EnvVarGuard::hold`. Still under `ENV_LOCK`,
+                // which this guard releases only once it has been dropped.
                 Some(v) => unsafe { std::env::set_var(self.name, v) },
                 None => unsafe { std::env::remove_var(self.name) },
             }
@@ -1012,6 +1051,23 @@ beam build { run "cargo build {if release then '--release' else ''}" }
         let beam = &project.beams[0];
         let cmd = render_template(&beam.run[0], &beam.scope).unwrap();
         assert_eq!(cmd, "cargo build ");
+    }
+
+    /// The other half of `env()`'s load-time behaviour: when the variable
+    /// *is* set, its value wins over the default.
+    #[test]
+    fn env_reads_a_variable_that_is_set() {
+        let _guard = EnvVarGuard::set("ALBA_TEST_PROFILE", "release");
+        let src = r#"
+let profile = env("ALBA_TEST_PROFILE", "debug")
+beam build { run "cargo build --{profile}" }
+"#;
+        let project = load_str(src).unwrap();
+        let beam = &project.beams[0];
+
+        let cmd = render_template(&beam.run[0], &beam.scope).unwrap();
+
+        assert_eq!(cmd, "cargo build --release");
     }
 
     #[test]
