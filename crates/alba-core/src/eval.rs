@@ -841,9 +841,10 @@ pub(crate) fn build_project(file: &File, dir: &Path) -> Result<Project, CoreErro
 }
 
 fn beam_ref_to_id(r: &BeamRef) -> BeamId {
-    match &r.namespace {
-        Some(ns) => BeamId(format!("{ns}:{}", r.name)),
-        None => BeamId(r.name.clone()),
+    if r.namespace.is_empty() {
+        BeamId(r.name.clone())
+    } else {
+        BeamId(format!("{}:{}", r.namespace.join(":"), r.name))
     }
 }
 

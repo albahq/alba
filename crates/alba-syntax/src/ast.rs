@@ -53,10 +53,16 @@ pub struct LetBinding {
 }
 
 /// A reference to a beam in a `needs [...]` list, optionally namespaced by
-/// an import alias (`api:build` vs. plain `codegen`).
+/// the import aliases it is reached through (`api:build`, `api:db:migrate`,
+/// or plain `codegen`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeamRef {
-    pub namespace: Option<String>,
+    /// The alias segments preceding the name, outermost first: empty for a
+    /// local beam, `["api"]` for `api:build`, `["api", "db"]` for a beam
+    /// reached through two levels of importing. A chain of aliases is what
+    /// produces a multi-segment beam id, so `needs` has to be able to
+    /// spell one.
+    pub namespace: Vec<String>,
     pub name: String,
 }
 

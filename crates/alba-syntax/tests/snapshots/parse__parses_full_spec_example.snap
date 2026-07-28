@@ -147,9 +147,9 @@ File {
             needs: [
                 Spanned {
                     value: BeamRef {
-                        namespace: Some(
+                        namespace: [
                             "api",
-                        ),
+                        ],
                         name: "build",
                     },
                     span: Span {
@@ -159,7 +159,7 @@ File {
                 },
                 Spanned {
                     value: BeamRef {
-                        namespace: None,
+                        namespace: [],
                         name: "codegen",
                     },
                     span: Span {
@@ -293,7 +293,7 @@ File {
             needs: [
                 Spanned {
                     value: BeamRef {
-                        namespace: None,
+                        namespace: [],
                         name: "build",
                     },
                     span: Span {
@@ -394,7 +394,7 @@ File {
             needs: [
                 Spanned {
                     value: BeamRef {
-                        namespace: None,
+                        namespace: [],
                         name: "test",
                     },
                     span: Span {

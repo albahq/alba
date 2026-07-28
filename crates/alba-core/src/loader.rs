@@ -15,10 +15,10 @@
 //!   local to the imported file stays file-local — it's namespaced to
 //!   `alias:build` by the same prefixing, exactly like the beam it refers
 //!   to. `needs [other_alias:build]`, referring to one of *that file's
-//!   own* imports, is namespaced the same way (matching
-//!   `alba_syntax::BeamRef`'s one-level `namespace` field). Nested imports
-//!   compose: a beam reached through two levels of aliasing ends up with a
-//!   two-segment id (`api:db:migrate`).
+//!   own* imports, is namespaced the same way. Nested imports compose: a
+//!   beam reached through two levels of aliasing ends up with a
+//!   two-segment id (`api:db:migrate`), and `needs` can spell as many
+//!   segments as a reference needs.
 //! - `default` is read only from the root file; an imported file's
 //!   `default` is parsed (so it's still a valid Beamfile on its own) but
 //!   never propagated.

@@ -236,29 +236,28 @@ impl<'a> Parser<'a> {
         self.parse_bracketed_list(Self::eat_template)
     }
 
+    /// `codegen`, `api:build`, or `api:db:migrate`: as many `alias:`
+    /// segments as the reference spells, since a beam reached through a
+    /// chain of imports has one id segment per alias in that chain.
     fn parse_beam_ref(&mut self) -> Result<Spanned<BeamRef>, ParseError> {
-        let first = self.eat_ident()?;
-        if self.check(&TokenKind::Colon) {
+        let mut segments = vec![self.eat_ident()?];
+        while self.check(&TokenKind::Colon) {
             self.advance();
-            let name = self.eat_ident()?;
-            let span = Span::new(first.span.start, name.span.end);
-            Ok(Spanned::new(
-                BeamRef {
-                    namespace: Some(first.value),
-                    name: name.value,
-                },
-                span,
-            ))
-        } else {
-            let span = first.span;
-            Ok(Spanned::new(
-                BeamRef {
-                    namespace: None,
-                    name: first.value,
-                },
-                span,
-            ))
+            segments.push(self.eat_ident()?);
         }
+
+        let span = Span::new(
+            segments[0].span.start,
+            segments[segments.len() - 1].span.end,
+        );
+        let name = segments.pop().expect("at least one segment was parsed");
+        Ok(Spanned::new(
+            BeamRef {
+                namespace: segments.into_iter().map(|s| s.value).collect(),
+                name: name.value,
+            },
+            span,
+        ))
     }
 
     fn parse_needs_list(&mut self) -> Result<Vec<Spanned<BeamRef>>, ParseError> {
@@ -593,7 +592,7 @@ beam deploy(target) {
         assert_eq!(file.beams.len(), 2);
         assert_eq!(file.default.as_ref().unwrap().value, "build");
         let build = &file.beams[0];
-        assert_eq!(build.needs[0].value.namespace.as_deref(), Some("api"));
+        assert_eq!(build.needs[0].value.namespace, ["api"]);
         let deploy = &file.beams[1];
         assert_eq!(deploy.params[0].value, "target");
         assert!(deploy.allow_failure);
@@ -626,6 +625,23 @@ beam deploy(target) {
         assert_eq!(needs.len(), 2);
         assert_eq!(needs[0].value.name, "a");
         assert_eq!(needs[1].value.name, "b");
+    }
+
+    /// A beam reached through a chain of import aliases has a
+    /// multi-segment id (`api:db:migrate`), and `needs` must be able to
+    /// spell it — otherwise an id Alba creates, lists, and accepts as a
+    /// run target cannot be depended on.
+    #[test]
+    fn needs_accepts_a_multi_segment_namespace() {
+        let file = parse("beam x { needs [api:db:migrate] }").unwrap();
+
+        let entry = &file.beams[0].needs[0];
+        assert_eq!(entry.value.namespace, ["api", "db"]);
+        assert_eq!(entry.value.name, "migrate");
+        assert_eq!(
+            &"beam x { needs [api:db:migrate] }"[entry.span.start..entry.span.end],
+            "api:db:migrate"
+        );
     }
 
     #[test]

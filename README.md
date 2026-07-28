@@ -53,6 +53,14 @@ A beam's `run` command is a string template: `{profile}` interpolates the
 fail (`lint` here) without failing the beams that depend on it. `default`
 names the beam a bare `alba` runs when no subcommand is given.
 
+### Interpolation
+
+Anything between `{` and `}` in a string is an expression. Inside those
+braces, write string literals with **single** quotes: the body is read
+straight from the source, so `"{env(\"VAR\")}"` is a syntax error while
+`"{env('VAR')}"` is what you want. Escapes work normally everywhere else in
+the string, and `{{` / `}}` produce literal braces.
+
 ### Reading the environment
 
 `env("NAME", "fallback")` reads an environment variable, using the fallback

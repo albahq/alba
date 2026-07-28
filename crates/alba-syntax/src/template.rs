@@ -216,10 +216,11 @@ fn scan_interpolation(
             // propagate it, shifted onto `full_source`, instead of
             // discarding it and falling through to that generic message.
             Some(Err(e)) => {
+                let span = shift_span(e.span, body_start);
                 return Err(ParseError {
                     message: e.message,
-                    span: shift_span(e.span, body_start),
-                    help: None,
+                    help: escaped_quote_help(full_source, span),
+                    span,
                 });
             }
             // The lexer only ever yields `None` after it has already
@@ -264,6 +265,20 @@ fn scan_interpolation(
         return Err(parser.unexpected("`}`"));
     }
     Ok((expr, close_end))
+}
+
+/// Help text for the one lex failure inside an interpolation body that a
+/// reader is likely to hit by writing perfectly reasonable-looking code:
+/// escaping a quote, as in `run "echo {env(\"VAR\")}"`. Escapes are
+/// decoded in a string's literal parts, but an interpolation body is
+/// re-lexed straight from the source, so the backslash reaches the lexer
+/// as itself and is rejected as a stray character. Single quotes need no
+/// escaping and work, which is what this points at.
+fn escaped_quote_help(full_source: &str, span: Span) -> Option<String> {
+    full_source
+        .get(span.start..span.end)?
+        .starts_with('\\')
+        .then(|| "use single quotes inside an interpolation, e.g. `{env('VAR')}`".to_string())
 }
 
 /// Rewrites an error's "found end of input" phrasing to name the
@@ -351,6 +366,22 @@ mod tests {
         assert_eq!(err.span, Span::new(6, 7));
         assert!(err.message.contains('}'));
         assert!(!err.message.contains("end of input"));
+    }
+
+    /// An interpolation body is re-lexed from the raw source, so a `\"`
+    /// escape that works perfectly well in the literal parts of a string
+    /// is a stray backslash inside `{...}`. The message says so, and the
+    /// help names the form that does work.
+    #[test]
+    fn an_escaped_quote_inside_an_interpolation_suggests_single_quotes() {
+        let err = parse_template(r#""echo {env(\"VAR\")}""#).unwrap_err();
+
+        assert_eq!(err.span, Span::new(11, 12));
+        assert!(err.message.contains('\\'));
+        assert_eq!(
+            err.help.as_deref(),
+            Some("use single quotes inside an interpolation, e.g. `{env('VAR')}`")
+        );
     }
 
     #[test]

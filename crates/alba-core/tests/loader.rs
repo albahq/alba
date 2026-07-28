@@ -99,16 +99,14 @@ fn root_default_is_kept() {
 
 #[test]
 fn nested_imports_join_namespaces_with_colon() {
-    // `needs [...]` syntax only ever spells one namespace level
-    // (`alba_syntax`'s `BeamRef` grammar), so the root can reference
-    // `api:build` but not a two-segment id like `api:db:migrate` directly.
-    // `api/Beamfile` referencing its own import's `db:migrate` (one level,
-    // relative to itself) is what produces that two-segment id once the
-    // root absorbs `api`'s beams under the `api:` prefix.
+    // A beam reached through two levels of aliasing gets a two-segment id
+    // once the root absorbs `api`'s beams under the `api:` prefix, and the
+    // root can name it in full.
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path().join("Beamfile"),
-        "import \"api/Beamfile\" as api\nbeam all { needs [api:build] run \"echo ok\" }",
+        "import \"api/Beamfile\" as api\n\
+         beam all { needs [api:build, api:db:migrate] run \"echo ok\" }",
     );
     write(
         dir.path().join("api/Beamfile"),
@@ -129,6 +127,12 @@ fn nested_imports_join_namespaces_with_colon() {
         .find(|b| b.id.0 == "api:build")
         .unwrap();
     assert_eq!(build.needs[0].value.0, "api:db:migrate");
+
+    // The root's own reference to that two-segment id resolves: graph
+    // validation would have rejected the load otherwise.
+    let all = project.beams.iter().find(|b| b.id.0 == "all").unwrap();
+    let needs: Vec<&str> = all.needs.iter().map(|n| n.value.0.as_str()).collect();
+    assert_eq!(needs, ["api:build", "api:db:migrate"]);
 }
 
 /// A file reached from two import sites is read, parsed, and evaluated
