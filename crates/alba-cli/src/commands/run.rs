@@ -14,14 +14,25 @@
 //! The consumer's channel closes on its own when the engine returns (the
 //! engine holds the last sender), so joining it afterwards cannot outlive
 //! the run.
+//!
+//! ## `--watch`
+//!
+//! [`watch_execute`] keeps that shape and swaps the middle piece: the
+//! engine's [`alba_engine::watch`] session loop replaces the single
+//! [`alba_engine::run`], so one renderer and one interrupt watcher span
+//! every run of the session rather than one run. The differences it does
+//! carry are the file watcher it must build up front, the errors the
+//! session hands back mid-flight for rendering, and its own exit codes.
 
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
-use alba_engine::{CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary};
+use alba_engine::{
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, SessionError, WatchExit,
+};
 use alba_executors::{EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -58,7 +69,13 @@ pub fn run(
         }
     };
 
-    runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+    if flags.watch {
+        runtime.block_on(watch_execute(
+            project, sources, beamfile, target, params, flags,
+        ))
+    } else {
+        runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+    }
 }
 
 async fn execute(
@@ -116,7 +133,7 @@ async fn execute(
     let code = match result {
         Ok(summary) => run_exit_code(&summary, &cancel),
         Err(error) => {
-            err.line(render_engine_error(error, sources).trim_end());
+            err.line(render_engine_error(&error, sources).trim_end());
             EXIT_ALBA_ERROR
         }
     };
@@ -125,6 +142,191 @@ async fn execute(
         EXIT_ALBA_ERROR
     } else {
         code
+    }
+}
+
+/// The `--watch` counterpart of [`execute`]: same renderer, same interrupt
+/// watcher, but the engine's session loop instead of a single run.
+///
+/// The exit codes differ from a single run's on purpose. Every run in the
+/// session already reported itself as it happened, so what a beam earned is
+/// old news by the time the user ends the session: an orderly Ctrl-C is
+/// `0`. [`EXIT_ALBA_ERROR`] is left for the failures that stop a session
+/// from being a session at all — one that cannot start, and a watcher that
+/// dies under it.
+async fn watch_execute(
+    project: &Project,
+    sources: &SourceMap,
+    beamfile: &Path,
+    target: &BeamId,
+    params: Vec<String>,
+    flags: &RunFlags,
+) -> i32 {
+    let mut err = LineSink::stderr();
+
+    match alba_core::execution_subgraph(project, target) {
+        Ok(subgraph) => {
+            if let Some(warning) = no_inputs_warning(project, target, &subgraph) {
+                err.line(&warning);
+            }
+        }
+        Err(error) => {
+            err.line(crate::render_core_error(&error, sources).trim_end());
+            return EXIT_ALBA_ERROR;
+        }
+    }
+
+    let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources)) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            err.line(&format!("cannot start the file watcher: {error}"));
+            return EXIT_ALBA_ERROR;
+        }
+    };
+
+    let options = RunOptions {
+        jobs: jobs(flags.jobs),
+        keep_going: flags.keep_going,
+        params,
+        cache: Some(CacheOptions {
+            dir: cache_dir(beamfile),
+            force: flags.force,
+        }),
+    };
+
+    let (events, incoming) = unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    tokio::spawn(watch_interrupts(cancel.clone()));
+    let consumer = tokio::spawn(consume(incoming, watch_renderer(flags), cancel.clone()));
+
+    let exit = alba_engine::watch(
+        beamfile,
+        project.clone(),
+        sources.clone(),
+        target.clone(),
+        options,
+        Executors {
+            embedded: Arc::new(EmbeddedShellExecutor),
+            system: Arc::new(SystemShellExecutor),
+        },
+        events,
+        cancel,
+        Box::new(watcher),
+        // Mid-session trouble is reported and survived, so this renders to
+        // stderr and returns; only the session's own end decides the exit
+        // code. A `Load` error carries its own sources — the ones it was
+        // produced alongside, which may name a file the session's original
+        // map never knew about.
+        &mut |error| {
+            let mut err = LineSink::stderr();
+            match error {
+                SessionError::Load(load) => err.line(crate::render_load_error(load).trim_end()),
+                SessionError::Run(run) => err.line(render_engine_error(run, sources).trim_end()),
+            }
+        },
+    )
+    .await;
+
+    // Same reasoning as [`execute`]: the engine dropped the last sender by
+    // returning, so this joins on a drained renderer, and a `JoinError`
+    // means it panicked and the session's report is incomplete.
+    if consumer.await.is_err() {
+        err.line("the output renderer panicked; this session's report is incomplete");
+        return EXIT_ALBA_ERROR;
+    }
+
+    match exit {
+        WatchExit::Interrupted => 0,
+        WatchExit::WatcherClosed => {
+            err.line("the file watcher stopped; ending the session");
+            EXIT_ALBA_ERROR
+        }
+    }
+}
+
+/// The warning a session that can only ever react to Beamfile edits earns,
+/// or `None` when some beam in `subgraph` declares `inputs`.
+///
+/// Such a session is legitimate — a Beamfile edit reloads the project, so
+/// adding the missing `inputs` repairs it in place — but a watch that
+/// ignores every source file is surprising enough to say out loud, once,
+/// before the session starts.
+fn no_inputs_warning(project: &Project, target: &BeamId, subgraph: &[BeamId]) -> Option<String> {
+    let declares_inputs = project
+        .beams
+        .iter()
+        .filter(|beam| subgraph.contains(&beam.id))
+        .any(|beam| !beam.inputs.is_empty());
+
+    (!declares_inputs).then(|| {
+        format!(
+            "warning: no beam in `{}`'s graph declares inputs; watching the Beamfile only",
+            target.0
+        )
+    })
+}
+
+/// The directories [`alba_engine::NotifyWatcher`] puts under recursive
+/// watch: the project root, plus the directory of any Beamfile loaded from
+/// outside it (an import in a sibling tree).
+///
+/// Roots are fixed for the session. An import *added mid-session* that
+/// lives outside these roots emits no events until the next
+/// `alba run --watch` — a known limitation, not an oversight: re-deriving
+/// the roots would mean tearing down and rebuilding the watcher on every
+/// Beamfile save.
+fn watch_roots(beamfile: &Path, sources: &SourceMap) -> Vec<PathBuf> {
+    roots_of(beamfile, sources.paths())
+}
+
+/// [`watch_roots`] over the loaded paths themselves, so the rules can be
+/// tested — a [`SourceMap`] can only be produced by loading a real project.
+fn roots_of<'a>(beamfile: &Path, loaded: impl Iterator<Item = &'a Path>) -> Vec<PathBuf> {
+    let root = containing_dir(beamfile);
+    let mut roots = vec![root.clone()];
+    for path in loaded {
+        let dir = containing_dir(path);
+        if !dir.starts_with(&root) && !roots.contains(&dir) {
+            roots.push(dir);
+        }
+    }
+    roots
+}
+
+/// The absolute directory holding `file`.
+///
+/// An empty parent means the current directory, and must be spelled that
+/// way rather than passed on: a bare `Beamfile` (what `alba run` resolves
+/// to without `--file`) has one, and the watcher rejects an empty path
+/// outright. Lexical like `main.rs`'s own path handling — `std::path::absolute`
+/// never requires the directory to exist.
+fn containing_dir(file: &Path) -> PathBuf {
+    let dir = file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// The watch session's renderer: the same selection [`renderer`] makes, but
+/// the text renderers clear the screen between runs — a clean page per run,
+/// the way a watch mode is expected to read.
+///
+/// Only when stdout is a terminal, and never for JSON: a machine parsing
+/// the stream has no screen to clear, and off a terminal the output is a
+/// log accumulating in a file, where erasing what came before destroys the
+/// record.
+fn watch_renderer(flags: &RunFlags) -> Box<dyn Renderer> {
+    let clear = std::io::stdout().is_terminal();
+    match flags.log_format {
+        LogFormat::Json => Box::new(JsonRenderer::new()),
+        LogFormat::Text => match flags.output.unwrap_or_else(default_output) {
+            OutputStyle::Interleaved => {
+                Box::new(InterleavedRenderer::new(crate::color_enabled(), clear))
+            }
+            OutputStyle::Grouped => Box::new(GroupedRenderer::new(clear)),
+        },
     }
 }
 
@@ -281,7 +483,11 @@ fn default_output() -> OutputStyle {
 /// A `Core` error carries a span and a source file, so it gets the same
 /// caret-and-help diagnostic a load failure does. The other variants are
 /// plain sentences with nowhere in particular to point.
-fn render_engine_error(error: EngineError, sources: &SourceMap) -> String {
+///
+/// By reference for the same reason [`crate::render_load_error`] is: a
+/// watch session survives the failures it reports, so it only ever lends
+/// them out for rendering.
+fn render_engine_error(error: &EngineError, sources: &SourceMap) -> String {
     match error {
         EngineError::Core(error) => crate::render_core_error(error, sources),
         other => other.to_string(),
@@ -295,6 +501,127 @@ mod tests {
 
     fn eight() -> Option<NonZeroUsize> {
         NonZeroUsize::new(8)
+    }
+
+    /// A beam declaring `inputs`, with everything else left inert — these
+    /// tests only ever ask which files a beam watches.
+    fn beam(id: &str, inputs: &[&str]) -> alba_core::Beam {
+        alba_core::Beam {
+            id: BeamId(id.to_string()),
+            description: None,
+            needs: Vec::new(),
+            params: Vec::new(),
+            inputs: inputs.iter().map(|input| (*input).to_string()).collect(),
+            outputs: Vec::new(),
+            run: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            executor: alba_core::ExecutorKind::Shell,
+            allow_failure: false,
+            dir: PathBuf::from("."),
+            span: alba_syntax::Span::new(0, 0),
+            source: alba_core::SourceId(0),
+            scope: alba_core::Scope::empty(),
+        }
+    }
+
+    fn project(beams: Vec<alba_core::Beam>) -> Project {
+        Project {
+            beams,
+            default: None,
+        }
+    }
+
+    fn ids(ids: &[&str]) -> Vec<BeamId> {
+        ids.iter().map(|id| BeamId((*id).to_string())).collect()
+    }
+
+    /// The warning's whole point: a subgraph with nothing to watch would
+    /// sit there reacting to Beamfile saves alone.
+    #[test]
+    fn a_subgraph_without_inputs_is_warned_about() {
+        let project = project(vec![beam("build", &[])]);
+
+        let warning = no_inputs_warning(&project, &BeamId("build".to_string()), &ids(&["build"]));
+
+        let warning = warning.expect("a graph with no inputs must be warned about");
+        assert!(warning.contains("build"), "got: {warning}");
+    }
+
+    /// One beam anywhere in the subgraph is enough: the target itself
+    /// declares nothing, but running it means running its dependency, and
+    /// that one's inputs will trigger the session.
+    #[test]
+    fn inputs_on_a_dependency_are_enough_to_stay_silent() {
+        let project = project(vec![beam("build", &[]), beam("compile", &["src/**"])]);
+
+        assert_eq!(
+            no_inputs_warning(
+                &project,
+                &BeamId("build".to_string()),
+                &ids(&["build", "compile"])
+            ),
+            None
+        );
+    }
+
+    /// Only the target's own subgraph counts. A beam this run will never
+    /// execute cannot trigger anything, so its inputs must not buy silence.
+    #[test]
+    fn inputs_outside_the_subgraph_do_not_count() {
+        let project = project(vec![beam("build", &[]), beam("docs", &["docs/**"])]);
+
+        assert!(
+            no_inputs_warning(&project, &BeamId("build".to_string()), &ids(&["build"])).is_some()
+        );
+    }
+
+    /// The regression that matters: `alba run --watch` without `--file`
+    /// resolves to a bare `Beamfile`, whose parent is the empty path — and
+    /// `notify` rejects an empty path outright, so a session that let one
+    /// through could not start at all.
+    #[test]
+    fn a_bare_beamfile_watches_the_current_directory() {
+        let bare = Path::new("Beamfile");
+
+        let roots = roots_of(bare, [bare].into_iter());
+
+        let here = std::path::absolute(".").unwrap();
+        assert_eq!(roots, vec![here]);
+    }
+
+    /// A Beamfile inside the project root — the root file itself, and any
+    /// import below it — is already covered by the root's recursive watch.
+    #[test]
+    fn beamfiles_under_the_root_add_no_roots() {
+        let root = std::path::absolute("project").unwrap();
+        let beamfile = root.join("Beamfile");
+        let nested = root.join("modules/api/Beamfile");
+
+        let roots = roots_of(
+            &beamfile,
+            [beamfile.as_path(), nested.as_path()].into_iter(),
+        );
+
+        assert_eq!(roots, vec![root]);
+    }
+
+    /// An import from a sibling tree is outside the root's recursive watch,
+    /// so its own directory joins the roots — once, however many of its
+    /// files were loaded.
+    #[test]
+    fn a_beamfile_outside_the_root_adds_its_directory_once() {
+        let root = std::path::absolute("project").unwrap();
+        let beamfile = root.join("Beamfile");
+        let sibling = std::path::absolute("shared").unwrap();
+        let (first, second) = (sibling.join("A.beam"), sibling.join("B.beam"));
+
+        let roots = roots_of(
+            &beamfile,
+            [beamfile.as_path(), first.as_path(), second.as_path()].into_iter(),
+        );
+
+        assert_eq!(roots, vec![root, sibling]);
     }
 
     #[test]

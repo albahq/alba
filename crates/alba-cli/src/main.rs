@@ -48,7 +48,7 @@ fn run(cli: Cli) -> i32 {
     let (project, sources) = match alba_core::load_project(&beamfile) {
         Ok(loaded) => loaded,
         Err(err) => {
-            LineSink::stderr().line(render_load_error(err).trim_end());
+            LineSink::stderr().line(render_load_error(&err).trim_end());
             return EXIT_ALBA_ERROR;
         }
     };
@@ -149,9 +149,12 @@ fn resolve_beamfile(file: Option<&Path>) -> Result<PathBuf, String> {
 
 /// Renders a [`alba_core::LoadError`] by unpacking it into the error and
 /// the sources it was produced alongside.
-fn render_load_error(err: alba_core::LoadError) -> String {
-    let alba_core::LoadError { error, sources } = err;
-    render_core_error(error, &sources)
+///
+/// Takes the error by reference because a watch session's error callback
+/// only ever borrows the failure it reports — the session keeps running
+/// after it, so it cannot hand ownership away.
+pub(crate) fn render_load_error(err: &alba_core::LoadError) -> String {
+    render_core_error(&err.error, &err.sources)
 }
 
 /// Renders a [`CoreError`] the same way the design intends every spanned
@@ -162,11 +165,13 @@ fn render_load_error(err: alba_core::LoadError) -> String {
 ///
 /// Shared with `commands::run`, which renders the same kind of error when
 /// it comes back from the engine at schedule time rather than from loading.
-pub(crate) fn render_core_error(error: CoreError, sources: &SourceMap) -> String {
-    let source_id = error.source_id;
-    let diagnostic = error.into_diagnostic();
+pub(crate) fn render_core_error(error: &CoreError, sources: &SourceMap) -> String {
+    // `into_diagnostic` consumes the error, and callers on the watch path
+    // only hold a borrow of one they must leave intact; a clone on the
+    // error path costs nothing anybody will ever notice.
+    let diagnostic = error.clone().into_diagnostic();
 
-    match sources.get(source_id) {
+    match sources.get(error.source_id) {
         Some((path, source)) => {
             alba_syntax::render_diagnostic(source, &path.display().to_string(), &diagnostic)
         }

@@ -96,6 +96,11 @@ pub struct RunFlags {
     /// object per event and per line.
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
+
+    /// Keep running: re-run the beam whenever the files its subgraph
+    /// declares as `inputs` change. Ctrl-C ends the session.
+    #[arg(long)]
+    pub watch: bool,
 }
 
 /// How the text renderers lay a run out.
