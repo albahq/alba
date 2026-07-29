@@ -230,13 +230,11 @@ fn merge(pending: &mut Option<Vec<PathBuf>>, fresh: Vec<PathBuf>) {
 /// sorted for stable output. A path outside the root (an import's input
 /// in a sibling directory) displays as-is.
 fn display_paths(root: &Path, paths: &[PathBuf]) -> Vec<String> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_root = root.canonicalize();
     let mut display: Vec<String> = paths
         .iter()
         .map(|path| {
-            let path = path.canonicalize().unwrap_or_else(|_| path.clone());
-            path.strip_prefix(&root)
-                .unwrap_or(&path)
+            relative_to(root, canonical_root.as_deref().ok(), path)
                 .to_string_lossy()
                 .replace('\\', "/")
         })
@@ -244,6 +242,35 @@ fn display_paths(root: &Path, paths: &[PathBuf]) -> Vec<String> {
     display.sort();
     display.dedup();
     display
+}
+
+/// `path` seen from the project root, or `path` itself when it lies
+/// outside it.
+///
+/// The paths are compared as they came before anything is resolved,
+/// because `canonicalize` is `realpath(3)` and fails outright on a file
+/// that no longer exists — and a deletion (an `rm`, a `git checkout`, the
+/// first half of a rename) is an ordinary watch event, whose path
+/// `WatchSet` still classifies as an input from its snapshot. Resolving
+/// only settles a disagreement about symlinks between what the watcher
+/// reports and how the root was spelled: the root's canonical form works
+/// on a deleted file too, its own does not and is the last attempt.
+fn relative_to(root: &Path, canonical_root: Option<&Path>, path: &Path) -> PathBuf {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return relative.to_path_buf();
+    }
+    if let Some(base) = canonical_root
+        && let Ok(relative) = path.strip_prefix(base)
+    {
+        return relative.to_path_buf();
+    }
+    if let Some(base) = canonical_root
+        && let Ok(canonical) = path.canonicalize()
+        && let Ok(relative) = canonical.strip_prefix(base)
+    {
+        return relative.to_path_buf();
+    }
+    path.to_path_buf()
 }
 
 /// Sees the session out once its watched set could not be built. The

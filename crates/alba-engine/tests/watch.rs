@@ -212,6 +212,26 @@ async fn a_relevant_change_reruns_only_the_affected_beams() {
     session.finish().await;
 }
 
+/// Deleting a watched input triggers a run and still names the file
+/// relative to the project root — a deleted path cannot be resolved on
+/// disk, so the display must not depend on resolving it.
+#[tokio::test]
+async fn a_deleted_input_is_still_named_relative_to_the_root() {
+    let mut session = start(TWO_BEAMS, "docs", FakeExecutor::new(), false);
+    session.event_matching(is_waiting).await;
+
+    let deleted = session.dir.path().join("src/main.rs");
+    std::fs::remove_file(&deleted).unwrap();
+    session.send(vec![deleted]);
+
+    let RunEvent::WatchTriggered { paths } = session.event_matching(is_triggered).await else {
+        unreachable!()
+    };
+    assert_eq!(paths, vec!["src/main.rs".to_string()]);
+
+    session.finish().await;
+}
+
 /// Irrelevant paths do not wake the session: after an ignored batch, the
 /// next relevant one is still the *first* trigger.
 #[tokio::test]
