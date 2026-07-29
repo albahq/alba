@@ -28,6 +28,7 @@
 //! that exist to be pretty-printed once; a callback keeps the event
 //! channel's contract clean and the session alive after reporting.
 
+mod notify;
 mod set;
 
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::EngineError;
 use crate::event::RunEvent;
 use crate::scheduler::{Executors, RunOptions, run};
+pub use notify::NotifyWatcher;
 use set::{Relevance, WatchSet};
 
 /// One delivery from a file watcher.

@@ -531,3 +531,32 @@ async fn a_renamed_target_reports_and_recovers_on_the_next_edit() {
 
     session.finish().await;
 }
+
+/// The one test that exercises the real file watcher: a write on disk
+/// must come through as a batch naming the file. Everything else in this
+/// suite scripts batches; this proves the scripting matches reality on
+/// each platform.
+#[tokio::test]
+async fn notify_watcher_reports_a_real_write() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("watched.txt"), "before").unwrap();
+
+    let mut watcher =
+        alba_engine::NotifyWatcher::new(&[dir.path().to_path_buf()]).expect("watcher must start");
+
+    // Give the OS watcher a moment to arm before the write, then write.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    std::fs::write(dir.path().join("watched.txt"), "after").unwrap();
+
+    let batch = tokio::time::timeout(Duration::from_secs(10), watcher.next_batch())
+        .await
+        .expect("a batch must arrive within 10s")
+        .expect("the watcher must not close");
+    match batch {
+        WatchBatch::Paths(paths) => assert!(
+            paths.iter().any(|p| p.ends_with("watched.txt")),
+            "batch must name the written file, got {paths:?}"
+        ),
+        WatchBatch::Rescan => {} // an overflow still reports a change; acceptable
+    }
+}
