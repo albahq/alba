@@ -123,6 +123,13 @@ impl SourceMap {
             .get(id.0)
             .map(|(path, source)| (path.as_path(), source.as_str()))
     }
+
+    /// The path of every file this map registered, in [`SourceId`] order:
+    /// the root Beamfile first, then each import in load order. This is the
+    /// watch loop's source of truth for which Beamfiles to put under watch.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.entries.iter().map(|(path, _)| path.as_path())
+    }
 }
 
 /// A [`load_project`] failure, paired with every source file successfully
@@ -472,5 +479,30 @@ mod tests {
         assert!(dir.is_absolute());
         assert!(!dir.as_os_str().is_empty());
         assert!(!dir.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    /// The watch loop needs every loaded Beamfile path — root and imports —
+    /// to put them under watch; `paths()` yields them in load order.
+    #[test]
+    fn source_map_lists_every_loaded_file_in_load_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("api")).unwrap();
+        std::fs::write(
+            dir.path().join("Beamfile"),
+            "import \"api/Beamfile\" as api\nbeam build { run \"echo root\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("api").join("Beamfile"),
+            "beam build { run \"echo api\" }\n",
+        )
+        .unwrap();
+
+        let (_, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+        let paths: Vec<_> = sources.paths().collect();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].ends_with("Beamfile"));
+        assert!(paths[1].ends_with(std::path::Path::new("api").join("Beamfile")));
     }
 }
