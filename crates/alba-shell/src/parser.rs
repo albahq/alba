@@ -414,6 +414,7 @@ fn convert_parts(parts: Vec<token::WordPart>) -> Result<Vec<ast::WordPart>, Shel
 fn convert_part(part: token::WordPart) -> Result<ast::WordPart, ShellParseError> {
     Ok(match part {
         token::WordPart::Text(t) => ast::WordPart::Text(t),
+        token::WordPart::Escaped(c) => ast::WordPart::Escaped(c),
         token::WordPart::SingleQuoted(t) => ast::WordPart::SingleQuoted(t),
         token::WordPart::DoubleQuoted(inner) => ast::WordPart::DoubleQuoted(convert_parts(inner)?),
         token::WordPart::Var(name) => ast::WordPart::Var(name),

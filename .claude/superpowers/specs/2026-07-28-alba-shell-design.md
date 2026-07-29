@@ -58,6 +58,12 @@ channel, the cache, and the renderers do not change.
 - Variables: shell assignment `FOO=bar` (scoped to the current `run` line), environment prefix `FOO=bar cmd`, and
   the `export` / `unset` builtins. Each entry of a `run [...]` list is an independent shell invocation: variables
   do not persist across entries. A beam's durable environment is the DSL `env` field.
+- Command substitution `$(...)` shares the shell's state instead of running in a subshell, a deliberate
+  simplification that follows from `(...)` subshells being out of subset entirely: there is no isolation
+  machinery to reuse. Its stdout is captured, its stderr flows to the real output, and its exit code is
+  discarded, but any state it changes persists in the surrounding shell. `$(cd sub)` leaves the shell in `sub`,
+  and `$(FOO=bar)` leaves `FOO` set afterwards. POSIX isolates both. Beam authors who need a directory change to
+  be temporary should not reach for `$(cd ...)`.
 
 DSL interpolation (`{expr}`) remains a textual substitution performed upstream by the engine, before the shell
 ever sees the command, exactly as today.

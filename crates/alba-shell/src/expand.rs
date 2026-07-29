@@ -8,6 +8,8 @@
 //! just concatenates every segment's text, which is what an assignment
 //! value or a redirect target needs.
 
+use std::path::{Path, PathBuf};
+
 use glob::{MatchOptions, Pattern};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -23,14 +25,19 @@ pub(crate) struct ExpandCtx<'a> {
     pub cancel: &'a CancellationToken,
 }
 
-/// One piece of a word's expansion: `Text` is always unquoted;
-/// `SingleQuoted` and a whole `DoubleQuoted` part are always quoted;
-/// `Var`/`CmdSubst` are quoted only when they appear inside a
-/// `DoubleQuoted` part (in which case they are folded into that part's
-/// single merged segment, never surfaced on their own).
+/// One piece of a word's expansion.
+///
+/// `literal` marks text the shell must take exactly as written: it is
+/// exempt from field splitting *and* from acting as glob syntax. Two
+/// different sources set it, and they are equivalent for both purposes:
+/// quoting (`SingleQuoted`, a whole `DoubleQuoted` part) and a backslash
+/// escape (`Escaped`, one character). `Text` is never literal — glob
+/// characters and split characters in it are live. `Var`/`CmdSubst` are
+/// literal only inside a `DoubleQuoted` part, where they are folded into
+/// that part's single merged segment rather than surfaced on their own.
 struct Segment {
     text: String,
-    quoted: bool,
+    literal: bool,
 }
 
 /// Expands `word` with no splitting and no globbing: every segment's
@@ -88,18 +95,25 @@ async fn build_segments(
                 };
                 segments.push(Segment {
                     text,
-                    quoted: false,
+                    literal: false,
                 });
             }
+            // A backslash-escaped character: one literal character, never
+            // split on and never glob syntax.
+            WordPart::Escaped(c) => segments.push(Segment {
+                text: c.to_string(),
+                literal: true,
+            }),
             WordPart::SingleQuoted(text) => segments.push(Segment {
                 text: text.clone(),
-                quoted: true,
+                literal: true,
             }),
             WordPart::DoubleQuoted(inner) => {
                 let mut text = String::new();
                 for inner_part in inner {
                     match inner_part {
                         WordPart::Text(t) | WordPart::SingleQuoted(t) => text.push_str(t),
+                        WordPart::Escaped(c) => text.push(*c),
                         WordPart::Var(name) => text.push_str(&expand_var(name, state)),
                         WordPart::CmdSubst(program) => {
                             text.push_str(&run_cmd_subst(program, state, ctx).await?);
@@ -111,15 +125,18 @@ async fn build_segments(
                         WordPart::DoubleQuoted(_) => {}
                     }
                 }
-                segments.push(Segment { text, quoted: true });
+                segments.push(Segment {
+                    text,
+                    literal: true,
+                });
             }
             WordPart::Var(name) => segments.push(Segment {
                 text: expand_var(name, state),
-                quoted: false,
+                literal: false,
             }),
             WordPart::CmdSubst(program) => segments.push(Segment {
                 text: run_cmd_subst(program, state, ctx).await?,
-                quoted: false,
+                literal: false,
             }),
         }
     }
@@ -173,23 +190,26 @@ fn tilde_expand(
     Some(format!("{home}{rest}"))
 }
 
-/// Splits one word's segments into fields: an unquoted segment's text
-/// is split on runs of ASCII space/tab/newline (a no-op for literal
-/// `Text` segments, which never contain one — the lexer already split
-/// on whitespace at the word boundary); a quoted segment is never split
-/// and always keeps the field it's in "real", even when empty (`''` is
-/// one empty field). A word that expands to nothing produces zero
-/// fields.
+/// Splits one word's segments into fields: a non-literal segment's text
+/// is split on runs of ASCII space/tab/newline; a literal segment (from
+/// quoting or a backslash escape) is never split and always keeps the
+/// field it's in "real", even when empty (`''` is one empty field). A
+/// word that expands to nothing produces zero fields.
+///
+/// Note that a `Text` segment cannot itself contain a split character:
+/// the lexer already ended the word at unquoted whitespace, and an
+/// escaped space arrives as a separate literal segment. Splitting is
+/// therefore only ever observable on `Var`/`CmdSubst` results.
 fn split_into_fields(segments: Vec<Segment>) -> Vec<Vec<Segment>> {
     let mut fields = Vec::new();
     let mut current = Vec::new();
     let mut current_started = false;
 
     for segment in segments {
-        if segment.quoted {
+        if segment.literal {
             current.push(Segment {
                 text: segment.text,
-                quoted: true,
+                literal: true,
             });
             current_started = true;
             continue;
@@ -203,7 +223,7 @@ fn split_into_fields(segments: Vec<Segment>) -> Vec<Vec<Segment>> {
                 if i > piece_start {
                     current.push(Segment {
                         text: segment.text[piece_start..i].to_string(),
-                        quoted: false,
+                        literal: false,
                     });
                     current_started = true;
                 }
@@ -222,7 +242,7 @@ fn split_into_fields(segments: Vec<Segment>) -> Vec<Vec<Segment>> {
         if piece_start < bytes.len() {
             current.push(Segment {
                 text: segment.text[piece_start..].to_string(),
-                quoted: false,
+                literal: false,
             });
             current_started = true;
         }
@@ -240,10 +260,10 @@ fn is_ascii_split_whitespace(byte: u8) -> bool {
 
 /// What one field resolves to before globbing: its literal text (used
 /// verbatim when it is not a glob, or as the fallback when a glob
-/// matches nothing) and, when any unquoted piece contains a glob
-/// metacharacter, the pattern to match (quoted pieces escaped with
-/// `glob::Pattern::escape` so they can never themselves act as glob
-/// syntax).
+/// matches nothing) and, when any non-literal piece contains a glob
+/// metacharacter, the pattern to match (literal pieces — quoted or
+/// backslash-escaped — escaped with `glob::Pattern::escape` so they can
+/// never themselves act as glob syntax).
 struct FieldPlan {
     literal: String,
     pattern: Option<String>,
@@ -256,7 +276,7 @@ fn plan_field(pieces: &[Segment]) -> FieldPlan {
 
     for piece in pieces {
         literal.push_str(&piece.text);
-        if piece.quoted {
+        if piece.literal {
             pattern.push_str(&Pattern::escape(&piece.text));
         } else {
             if piece.text.contains(['*', '?', '[']) {
@@ -272,12 +292,24 @@ fn plan_field(pieces: &[Segment]) -> FieldPlan {
     }
 }
 
-/// Resolves `pattern` against `state.cwd`: `None` means no match (the
-/// field stays literal); `Some` carries every match, relative to `cwd`,
-/// forward-slashed on every platform, sorted lexicographically.
-/// Directories match like files (no trailing-slash special case).
+/// Resolves `pattern`: `None` means no match, and the caller keeps the
+/// field exactly as written. `Some` carries every match, forward-slashed
+/// on every platform and sorted lexicographically. Directories match
+/// like files (no trailing-slash special case).
+///
+/// A relative pattern resolves against `state.cwd` and yields results
+/// relative to it. An absolute pattern (`/var/log/*.log`) is matched
+/// as-is and yields absolute results: joining it onto `cwd` would be a
+/// no-op that `Path::join` resolves to the pattern itself, after which
+/// stripping the `cwd` prefix could never succeed and every absolute
+/// glob would silently collapse to its literal text.
 fn resolve_glob(pattern: &str, state: &ShellState) -> Option<Vec<String>> {
-    let full_pattern = state.cwd.join(pattern);
+    let absolute = Path::new(pattern).is_absolute();
+    let full_pattern = if absolute {
+        PathBuf::from(pattern)
+    } else {
+        state.cwd.join(pattern)
+    };
     let options = MatchOptions {
         require_literal_separator: true,
         ..Default::default()
@@ -286,8 +318,12 @@ fn resolve_glob(pattern: &str, state: &ShellState) -> Option<Vec<String>> {
         .ok()?
         .filter_map(Result::ok)
         .filter_map(|path| {
-            let relative = path.strip_prefix(&state.cwd).ok()?;
-            Some(relative.to_string_lossy().replace('\\', "/"))
+            let shown = if absolute {
+                path.as_path()
+            } else {
+                path.strip_prefix(&state.cwd).ok()?
+            };
+            Some(shown.to_string_lossy().replace('\\', "/"))
         })
         .collect();
     if matches.is_empty() {

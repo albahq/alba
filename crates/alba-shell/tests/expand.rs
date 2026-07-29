@@ -117,6 +117,79 @@ async fn an_unmatched_glob_stays_literal() {
 }
 
 #[tokio::test]
+async fn an_absolute_glob_pattern_matches_and_yields_absolute_results() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("only_dir_here")).unwrap();
+    // The cwd must not be an ancestor of the pattern, or a match stripped
+    // of the cwd prefix would still resolve and the test would pass for
+    // the wrong reason. A sibling tempdir guarantees no prefix relation.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let src = format!("cd {}/only_*", dir.path().display());
+    let (code, lines) = run_in(&src, elsewhere.path().to_path_buf()).await;
+    assert_eq!(code, 0, "lines: {lines:?}");
+}
+
+#[tokio::test]
+async fn an_unmatched_absolute_glob_stays_literal() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let pattern = format!("{}/no_such_*", dir.path().display());
+    let (code, lines) = run_in(&format!("cd {pattern}"), elsewhere.path().to_path_buf()).await;
+    assert_eq!(code, 1);
+    assert!(
+        lines.iter().any(|(_, t)| t.contains(&pattern)),
+        "the unmatched absolute pattern must survive verbatim, lines: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escaped_space_does_not_split_a_field() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("a b")).unwrap();
+    let (code, lines) = run_in(r"cd a\ b", dir.path().to_path_buf()).await;
+    assert_eq!(code, 0, "lines: {lines:?}");
+}
+
+#[tokio::test]
+async fn an_escaped_star_does_not_glob() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("foobar")).unwrap();
+    let (code, lines) = run_in(r"cd foo\*", dir.path().to_path_buf()).await;
+    assert_eq!(code, 1, "an escaped `*` must not match `foobar`");
+    assert!(lines.iter().any(|(_, t)| t.contains("foo*")));
+}
+
+#[tokio::test]
+async fn an_escaped_question_mark_does_not_glob() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("fooX")).unwrap();
+    let (code, lines) = run_in(r"cd foo\?", dir.path().to_path_buf()).await;
+    assert_eq!(code, 1, "an escaped `?` must not match `fooX`");
+    assert!(lines.iter().any(|(_, t)| t.contains("foo?")));
+}
+
+// A tab and a backslash are both legal in a unix filename; on windows a
+// backslash is a path separator and a tab is not portably creatable, so
+// these two pin the escaping contract on unix only.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_escaped_tab_does_not_split_a_field() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("a\tb")).unwrap();
+    let (code, lines) = run_in("cd a\\\tb", dir.path().to_path_buf()).await;
+    assert_eq!(code, 0, "lines: {lines:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_escaped_backslash_is_one_literal_backslash() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("a\\b")).unwrap();
+    let (code, lines) = run_in(r"cd a\\b", dir.path().to_path_buf()).await;
+    assert_eq!(code, 0, "lines: {lines:?}");
+}
+
+#[tokio::test]
 #[ignore = "echo lands in task 6"]
 async fn quoted_glob_characters_do_not_glob() {
     let (_, lines) = run(r#"echo "*""#).await;

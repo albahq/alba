@@ -64,6 +64,10 @@ pub struct Word {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WordPart {
     Text(String),
+    /// One backslash-escaped character, kept distinct from `Text` so
+    /// expansion knows not to split or glob on it. See
+    /// `token::WordPart::Escaped`.
+    Escaped(char),
     SingleQuoted(String),
     DoubleQuoted(Vec<WordPart>),
     Var(String),

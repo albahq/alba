@@ -250,7 +250,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
             match ch {
-                '\\' => self.escape(&mut text)?,
+                '\\' => self.escape(&mut text, &mut parts)?,
                 '\'' => self.single_quoted(&mut parts, &mut text)?,
                 '"' => {
                     self.flush_text(&mut text, &mut parts);
@@ -289,13 +289,20 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Unquoted `\x`: `x` joins the current text literally. A trailing
-    /// backslash at end of input is an error.
-    fn escape(&mut self, text: &mut String) -> Result<(), ShellParseError> {
+    /// Unquoted `\x`: `x` becomes its own [`WordPart::Escaped`] part
+    /// rather than joining the current text, so expansion can still see
+    /// that it was escaped and keep it out of field splitting and
+    /// globbing. A trailing backslash at end of input is an error.
+    fn escape(
+        &mut self,
+        text: &mut String,
+        parts: &mut Vec<WordPart>,
+    ) -> Result<(), ShellParseError> {
         let (bs_pos, _) = self.chars.next().expect("caller peeked '\\'");
         match self.chars.next() {
             Some((_, ch)) => {
-                text.push(ch);
+                self.flush_text(text, parts);
+                parts.push(WordPart::Escaped(ch));
                 Ok(())
             }
             None => Err(self.error(
@@ -594,7 +601,43 @@ mod tests {
     fn backslash_escapes_the_next_character_unquoted() {
         let kinds = kinds(r"echo a\ b");
         assert_eq!(kinds.len(), 2);
-        assert_eq!(word_parts(&kinds[1]), &[WordPart::Text("a b".into())]);
+        // The escaped space is its own part, not folded into the
+        // surrounding text: expansion must be able to tell it from a
+        // space that was typed directly, which would field-split.
+        assert_eq!(
+            word_parts(&kinds[1]),
+            &[
+                WordPart::Text("a".into()),
+                WordPart::Escaped(' '),
+                WordPart::Text("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_escaped_glob_character_stays_a_distinct_part() {
+        let kinds = kinds(r"echo foo\*bar");
+        assert_eq!(
+            word_parts(&kinds[1]),
+            &[
+                WordPart::Text("foo".into()),
+                WordPart::Escaped('*'),
+                WordPart::Text("bar".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_escaped_backslash_is_one_escaped_part() {
+        let kinds = kinds(r"echo a\\b");
+        assert_eq!(
+            word_parts(&kinds[1]),
+            &[
+                WordPart::Text("a".into()),
+                WordPart::Escaped('\\'),
+                WordPart::Text("b".into()),
+            ]
+        );
     }
 
     #[test]

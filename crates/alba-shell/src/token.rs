@@ -44,6 +44,12 @@ pub enum WordPart {
     /// Unquoted text. Glob characters and `~` live here; expansion
     /// decides what they mean.
     Text(String),
+    /// One character that a backslash escaped outside of quotes (`\ `,
+    /// `\*`, `\\`). It is a separate part rather than folded into `Text`
+    /// precisely so expansion can still tell it apart: an escaped
+    /// character is literal, so it must neither field-split nor act as
+    /// glob syntax, exactly like a quoted one.
+    Escaped(char),
     SingleQuoted(String),
     /// `"..."`: only `Text`, `Var`, and `CmdSubst` appear inside.
     DoubleQuoted(Vec<WordPart>),
