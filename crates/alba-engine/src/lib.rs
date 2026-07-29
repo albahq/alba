@@ -11,20 +11,19 @@
 //! Everything a caller needs is [`run`]: give it a project, a target,
 //! [`RunOptions`], the [`Executors`] to dispatch each beam's declared kind
 //! to, a channel to receive [`RunEvent`]s on, and a cancellation token, and
-//! it reports back a [`RunSummary`].
+//! it reports back a [`RunSummary`]. [`watch`] wraps that same call in a
+//! session that re-runs the target whenever the files its `inputs` declare
+//! change; see the `watch` module for the loop's shape.
 
 mod cache;
 mod event;
 mod scheduler;
-// The watch session loop that will call into this module arrives
-// separately; until then it (and its crate-private re-exports) is
-// exercised only by its own tests.
-#[allow(dead_code, unused_imports)]
 mod watch;
 
 pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
 pub use scheduler::{Executors, RunOptions, run};
+pub use watch::{SessionError, WatchBatch, WatchExit, Watcher, watch};
 
 use alba_core::{BeamId, CoreError};
 
