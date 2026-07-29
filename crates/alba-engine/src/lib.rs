@@ -16,6 +16,11 @@
 mod cache;
 mod event;
 mod scheduler;
+// The watch session loop that will call into this module arrives
+// separately; until then it (and its crate-private re-exports) is
+// exercised only by its own tests.
+#[allow(dead_code, unused_imports)]
+mod watch;
 
 pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
