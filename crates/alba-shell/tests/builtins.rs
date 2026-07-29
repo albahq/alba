@@ -296,9 +296,9 @@ async fn test_covers_files_strings_and_numbers() {
 
 #[tokio::test]
 async fn test_covers_the_remaining_numeric_operators() {
-    // The brief's own `test_covers_files_strings_and_numbers` only
-    // exercises `-gt`, `-le`, and `-lt`; this closes the other half of
-    // `binary`'s match (`-eq`, `-ne`, `-ge`).
+    // `test_covers_files_strings_and_numbers` above only exercises
+    // `-gt`, `-le`, and `-lt`; this closes the other half of `binary`'s
+    // match (`-eq`, `-ne`, `-ge`).
     assert_eq!(
         run("test 1 -eq 1 && test 1 -ne 2 && test 2 -ge 2").await.0,
         0

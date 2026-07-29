@@ -111,7 +111,7 @@ impl ShellState {
     }
 
     /// `$HOME`, falling back to `$USERPROFILE` (windows), for `cd` with
-    /// no argument and (in Task 4) tilde expansion.
+    /// no argument and for tilde expansion.
     pub fn home(&self) -> Option<&str> {
         self.get("HOME").or_else(|| self.get("USERPROFILE"))
     }

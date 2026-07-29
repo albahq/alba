@@ -99,7 +99,7 @@ async fn tilde_expands_to_home_at_word_start() {
 
 #[tokio::test]
 async fn a_single_match_glob_resolves_to_a_directory_cd_can_use() {
-    // Not the sorting/forward-slash contract (see the `#[ignore]`d
+    // Not the sorting/forward-slash contract (see
     // `globs_sort_and_use_forward_slashes` below for that): this only
     // confirms a glob that matches exactly one entry expands to
     // something `cd` accepts when that entry is a directory.

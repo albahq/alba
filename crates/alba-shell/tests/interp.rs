@@ -174,8 +174,7 @@ async fn an_unknown_command_reports_127_with_a_message() {
 
 #[tokio::test]
 async fn a_near_miss_of_a_builtin_gets_a_suggestion() {
-    // `pdw` is distance 2 from `pwd`, which exists from this task on
-    // (`echo` only lands in Task 6, so it cannot anchor this test yet).
+    // `pdw` is one transposition away from the `pwd` builtin.
     let (_, lines) = run("pdw").await;
     assert!(lines.iter().any(|(_, t)| t.contains("did you mean `pwd`?")));
 }

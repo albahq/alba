@@ -1,0 +1,7 @@
+---
+source: crates/alba-shell/src/error.rs
+expression: error.render(source)
+---
+error: background jobs (`&`) are not supported
+  │ echo café &
+  │           ^

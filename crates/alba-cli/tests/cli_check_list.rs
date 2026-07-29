@@ -74,7 +74,7 @@ fn check_rejects_invalid_embedded_shell_syntax() {
 ///   implementation that skipped parameterized beams only because their
 ///   template failed to render (rather than checking `params.is_empty()`
 ///   directly) would validate this one anyway and reject its unclosed
-///   quote, which the spec says must not happen.
+///   quote, which must not happen.
 /// - `ship` is the same argument applied to the docker executor: no
 ///   parameters, no reference to anything unrendered, so its template
 ///   renders cleanly too. Only the executor check keeps its unclosed

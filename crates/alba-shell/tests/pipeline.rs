@@ -36,8 +36,9 @@ fn stdout(lines: &[(ShellStream, String)]) -> Vec<&str> {
 
 #[tokio::test]
 async fn a_pipeline_connects_stdout_to_stdin() {
-    // cat (task 6) is not here yet, so pipe external into external is the
-    // only option; keep it minimal: exit code of the last stage wins.
+    // Two externals rather than the builtins the rest of this file uses:
+    // the exit code of the last stage must win whatever a stage happens
+    // to be.
     let (code, _) = run("cargo --version | cargo definitely-not-a-subcommand").await;
     assert_ne!(code, 0, "last stage decides");
     let (code, _) = run("cargo definitely-not-a-subcommand | cargo --version").await;
@@ -177,8 +178,9 @@ async fn exit_inside_a_pipeline_does_not_stop_the_program() {
 
 #[tokio::test]
 async fn input_redirect_feeds_an_external() {
-    // Full stdin coverage arrives with `cat` in Task 6; here only assert
-    // that `< file` on a missing file fails cleanly.
+    // Reading a redirected stdin is covered through `cat` elsewhere in
+    // this file; here only assert that `< file` on a missing file fails
+    // cleanly.
     let dir = tempfile::tempdir().unwrap();
     let (code, lines) = run_in("true < missing.txt", dir.path().to_path_buf()).await;
     assert_eq!(code, 1);

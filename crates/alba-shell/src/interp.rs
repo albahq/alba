@@ -1,7 +1,7 @@
 //! The interpreter: walks a parsed `Program` and produces a `ShellResult`.
 //! Defines the crate's public runtime API (`ShellEnv`, `ShellOutputLine`,
 //! `ShellStream`, `ShellResult`, `execute`), consumed directly by
-//! `alba-executors` from Task 10 onward.
+//! `alba-executors`.
 
 use std::future::Future;
 use std::io::Write;

@@ -528,10 +528,10 @@ mod tests {
         insta::assert_snapshot!(err("greet() { echo hi; }"));
     }
 
-    // Not in the brief: `greet() { ... }` above never reaches the
-    // parser's `function` reserved-word arm (the lexer's `(` error
-    // fires first), so this closes the coverage gap for the `function`
-    // keyword itself, written without parens.
+    // `greet() { ... }` above never reaches the parser's `function`
+    // reserved-word arm (the lexer's `(` error fires first), so this
+    // closes the coverage gap for the `function` keyword itself, written
+    // without parens.
     #[test]
     fn rejects_the_function_keyword() {
         insta::assert_snapshot!(err("function greet { echo hi; }"));
