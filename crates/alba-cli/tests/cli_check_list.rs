@@ -58,7 +58,7 @@ fn check_rejects_invalid_embedded_shell_syntax() {
         .stderr(predicates::str::contains("unclosed single quote"));
 }
 
-/// Three beams whose `run` command must never be validated statically,
+/// Four beams whose `run` command must never be validated statically,
 /// each for a different reason:
 ///
 /// - `deploy`'s template is unknowable until its argument arrives (its
@@ -75,9 +75,17 @@ fn check_rejects_invalid_embedded_shell_syntax() {
 ///   template failed to render (rather than checking `params.is_empty()`
 ///   directly) would validate this one anyway and reject its unclosed
 ///   quote, which the spec says must not happen.
+/// - `ship` is the same argument applied to the docker executor: no
+///   parameters, no reference to anything unrendered, so its template
+///   renders cleanly too. Only the executor check keeps its unclosed
+///   quote from ever reaching `alba_shell::parse` — a refactor that
+///   rewrote the guard as a `match` naming `Shell` and `SystemShell` and
+///   forgot `Docker` would start validating this beam against the
+///   embedded shell's grammar, and this is the only thing in the suite
+///   that would notice.
 ///
-/// All three must be skipped, so `check` still exits 0 and still prints
-/// its usual success line for all three beams.
+/// All four must be skipped, so `check` still exits 0 and still prints
+/// its usual success line for all four beams.
 #[test]
 fn check_skips_parameterized_and_system_shell_beams() {
     let dir = tempfile::tempdir().unwrap();
@@ -85,7 +93,8 @@ fn check_skips_parameterized_and_system_shell_beams() {
         dir.path().join("Beamfile"),
         "beam deploy(target) { run \"echo {target} 'x\" }\n\
          beam legacy { executor system_shell run \"if [ 1 ]; then echo y; fi\" }\n\
-         beam untouched(unused) { run \"echo 'unclosed\" }\n",
+         beam untouched(unused) { run \"echo 'unclosed\" }\n\
+         beam ship { executor docker { image \"x\" } run \"echo 'unclosed\" }\n",
     )
     .unwrap();
     alba()
@@ -93,7 +102,7 @@ fn check_skips_parameterized_and_system_shell_beams() {
         .arg("check")
         .assert()
         .success()
-        .stdout(predicates::str::contains("3 beams"));
+        .stdout(predicates::str::contains("4 beams"));
 }
 
 /// A beam with no parameters and multiple valid embedded-shell commands
