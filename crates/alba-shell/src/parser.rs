@@ -418,6 +418,7 @@ fn convert_part(part: token::WordPart) -> Result<ast::WordPart, ShellParseError>
         token::WordPart::SingleQuoted(t) => ast::WordPart::SingleQuoted(t),
         token::WordPart::DoubleQuoted(inner) => ast::WordPart::DoubleQuoted(convert_parts(inner)?),
         token::WordPart::Var(name) => ast::WordPart::Var(name),
+        token::WordPart::LastExit => ast::WordPart::LastExit,
         token::WordPart::CmdSubst { source, span } => {
             let program = parse_at(&source, span.start)?;
             ast::WordPart::CmdSubst(Box::new(program))

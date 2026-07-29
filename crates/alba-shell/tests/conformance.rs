@@ -65,6 +65,12 @@ const CASES: &[Case] = &[
         want_stdout: &["startend"],
     },
     Case {
+        name: "last_exit_status",
+        script: "false; echo $?; true; echo $?",
+        want_exit: 0,
+        want_stdout: &["1", "0"],
+    },
+    Case {
         name: "subst",
         script: "echo $(echo inner)",
         want_exit: 0,

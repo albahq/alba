@@ -239,3 +239,21 @@ async fn a_star_never_matches_a_hidden_entry_inside_a_directory() {
     let (_, lines) = run_in("echo d/*", dir.path().to_path_buf()).await;
     assert_eq!(stdout(&lines), vec!["d/visible.txt"]);
 }
+
+#[tokio::test]
+async fn last_exit_status_expands_across_a_sequence() {
+    let (_, lines) = run("false; echo $?; true; echo $?").await;
+    assert_eq!(stdout(&lines), vec!["1", "0"]);
+}
+
+#[tokio::test]
+async fn last_exit_status_expands_across_and_or_operators() {
+    let (_, lines) = run("false || echo code=$?; true && echo code=$?").await;
+    assert_eq!(stdout(&lines), vec!["code=1", "code=0"]);
+}
+
+#[tokio::test]
+async fn last_exit_status_expands_inside_double_quotes() {
+    let (_, lines) = run(r#"false; echo "status is $?""#).await;
+    assert_eq!(stdout(&lines), vec!["status is 1"]);
+}

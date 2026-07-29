@@ -71,6 +71,9 @@ pub enum WordPart {
     SingleQuoted(String),
     DoubleQuoted(Vec<WordPart>),
     Var(String),
+    /// `$?`: the exit code of the last completed command. See
+    /// `token::WordPart::LastExit`.
+    LastExit,
     CmdSubst(Box<Program>),
 }
 

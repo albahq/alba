@@ -190,8 +190,11 @@ sequencing (`cmd1 ; cmd2`, `cmd1 && cmd2`, `cmd1 || cmd2`, negation
 `! cmd`), pipelines (`cmd1 | cmd2`), redirections (`>`, `>>`, `<`, `2>`,
 `2>>`, `2>&1`), POSIX quoting (single quotes are literal, double quotes
 allow expansions, backslash escapes a single character), variables
-(`$VAR`, `${VAR}`, assignment with `FOO=bar`, an environment prefix like
-`FOO=bar cmd`, and the `export`/`unset` builtins), command substitution
+(`$VAR`, `${VAR}`, and `$?` for the exit code of the last completed
+command; assignment with `FOO=bar`, which persists for the rest of that
+`run` string, an environment prefix like `FOO=bar cmd`, which applies to
+that one command only, and the `export`/`unset` builtins), command
+substitution
 (`$(...)`, which shares the shell's state rather than running in an
 isolated subshell, so `$(cd sub)` really does leave the shell in `sub`),
 tilde expansion (`~` at the start of a word), and globbing (`*`, `?`,
@@ -216,9 +219,10 @@ only by writing its dot out (`.env`, `.h*`); `echo` recognizes only the
 inside a `run` string behaves exactly like `;`.
 
 Shell control flow (`if`, `for`, `while`, `case`), functions, heredocs,
-background jobs (`&`, `wait`), subshells (`(...)`), and advanced
-expansions such as `${VAR:-default}`, arithmetic `$((...))`, or brace
-expansion `{a,b}` are out of subset. None of them fail silently or fall
+background jobs (`&`, `wait`), subshells (`(...)`), advanced expansions
+such as `${VAR:-default}`, arithmetic `$((...))`, or brace expansion
+`{a,b}`, and every special parameter but `$?` (`$$`, `$!`, `$#`, `$*`,
+`$@`, `$1` to `$9`) are out of subset. None of them fail silently or fall
 back to a system shell: each is a parse error with a span pointing at the
 offending construct and a suggestion. For example:
 

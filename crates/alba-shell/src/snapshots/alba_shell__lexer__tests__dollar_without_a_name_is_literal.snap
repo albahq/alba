@@ -1,6 +1,6 @@
 ---
 source: crates/alba-shell/src/lexer.rs
-expression: kinds
+expression: "kinds(\"echo $ x$ $%\")"
 ---
 [
     Word(
@@ -33,12 +33,25 @@ expression: kinds
         Word {
             parts: [
                 Text(
-                    "$1x",
+                    "x$",
                 ),
             ],
             span: Span {
                 start: 7,
-                end: 10,
+                end: 9,
+            },
+        },
+    ),
+    Word(
+        Word {
+            parts: [
+                Text(
+                    "$%",
+                ),
+            ],
+            span: Span {
+                start: 10,
+                end: 12,
             },
         },
     ),

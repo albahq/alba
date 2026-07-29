@@ -1,0 +1,8 @@
+---
+source: crates/alba-shell/src/lexer.rs
+expression: "err(\"echo pid=$$\").render(\"echo pid=$$\")"
+---
+error: the special parameter `$$` is not supported
+  │ echo pid=$$
+  │          ^^
+  = help: move the logic into a script invoked by `run`, or declare `executor system_shell` on this beam

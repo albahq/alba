@@ -55,6 +55,10 @@ pub enum WordPart {
     DoubleQuoted(Vec<WordPart>),
     /// `$NAME` or `${NAME}`.
     Var(String),
+    /// `$?`: the exit code of the last completed command. The one special
+    /// parameter in the subset; the others (`$$`, `$!`, `$#`, `$*`, `$@`,
+    /// `$1`..`$9`) are rejected by the lexer.
+    LastExit,
     /// `$(...)`: the raw inner source, parsed recursively by the parser.
     /// The span covers the inner source in the outer string, so nested
     /// diagnostics point at the right place.

@@ -398,13 +398,41 @@ impl<'a> Lexer<'a> {
     }
 
     /// Called with the lexer positioned at `$`. Returns the expansion it
-    /// introduces, or `None` when the `$` is bare (no name, `{`, or `(`
-    /// follows) and therefore literal.
+    /// introduces, or `None` when the `$` is bare (no name, `?`, `{`, or
+    /// `(` follows) and therefore literal.
+    ///
+    /// `$?` is the one special parameter in the subset. Every other one
+    /// is a hard error rather than a literal `$` followed by its
+    /// character: a beam printing `pid=$$` verbatim, or comparing against
+    /// an unexpanded `$1`, is a silently wrong answer, and out-of-subset
+    /// syntax is always reported, never quietly reinterpreted.
     fn dollar(&mut self) -> Result<Option<WordPart>, ShellParseError> {
         let (dollar_pos, _) = self.chars.next().expect("caller peeked '$'");
         match self.chars.peek().copied() {
             Some((_, c)) if c.is_ascii_alphabetic() || c == '_' => {
                 Ok(Some(WordPart::Var(self.scan_ident())))
+            }
+            Some((_, '?')) => {
+                self.chars.next();
+                Ok(Some(WordPart::LastExit))
+            }
+            Some((_, c @ ('$' | '!' | '#' | '*' | '@'))) => {
+                self.chars.next();
+                Err(self.error(
+                    dollar_pos,
+                    dollar_pos + 2,
+                    format!("the special parameter `${c}` is not supported"),
+                    Some(OUT_OF_SUBSET_HELP),
+                ))
+            }
+            Some((_, c)) if c.is_ascii_digit() => {
+                self.chars.next();
+                Err(self.error(
+                    dollar_pos,
+                    dollar_pos + 2,
+                    format!("positional parameters like `${c}` are not supported"),
+                    Some(OUT_OF_SUBSET_HELP),
+                ))
             }
             Some((_, '{')) => {
                 self.chars.next();
@@ -642,9 +670,48 @@ mod tests {
 
     #[test]
     fn dollar_without_a_name_is_literal() {
-        let kinds = kinds("echo $ $1x");
-        // `$` alone and `$1` (digits are not variable names) stay literal.
-        insta::assert_debug_snapshot!(kinds);
+        // A `$` with nothing expandable after it stays literal, both at
+        // the end of a word and before a character no expansion starts
+        // with.
+        insta::assert_debug_snapshot!(kinds("echo $ x$ $%"));
+    }
+
+    #[test]
+    fn recognizes_the_last_exit_status_parameter() {
+        insta::assert_debug_snapshot!(kinds("echo $?"));
+    }
+
+    #[test]
+    fn rejects_the_process_id_parameter() {
+        insta::assert_snapshot!(err("echo pid=$$").render("echo pid=$$"));
+    }
+
+    #[test]
+    fn rejects_the_background_job_parameter() {
+        insta::assert_snapshot!(err("echo $!").render("echo $!"));
+    }
+
+    #[test]
+    fn rejects_the_argument_count_parameter() {
+        insta::assert_snapshot!(err("echo $#").render("echo $#"));
+    }
+
+    #[test]
+    fn rejects_the_positional_parameter_lists() {
+        insta::assert_snapshot!(err("echo $*").render("echo $*"));
+        insta::assert_snapshot!(err("echo $@").render("echo $@"));
+    }
+
+    #[test]
+    fn rejects_a_positional_parameter() {
+        insta::assert_snapshot!(err("echo $1x").render("echo $1x"));
+    }
+
+    #[test]
+    fn rejects_a_special_parameter_inside_double_quotes() {
+        // The double-quoted scanner shares `dollar`, so the rejection must
+        // reach there too rather than silently falling back to a literal.
+        insta::assert_snapshot!(err(r#"echo "pid $$""#).render(r#"echo "pid $$""#));
     }
 
     #[test]

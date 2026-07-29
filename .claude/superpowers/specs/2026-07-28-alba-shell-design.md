@@ -52,7 +52,8 @@ channel, the cache, and the renderers do not change.
 - Pipelines: `cmd1 | cmd2`. Exit code is the last command's (POSIX default; no `pipefail`).
 - Redirections: `>`, `>>`, `<`, `2>`, `2>>`, `2>&1`.
 - POSIX quoting: single quotes (literal), double quotes (expansions apply), backslash escapes.
-- Expansions: `$VAR`, `${VAR}`, command substitution `$(...)`, tilde `~` at the start of a word, globbing `*`,
+- Expansions: `$VAR`, `${VAR}`, `$?` (the exit code of the last completed command), command substitution
+  `$(...)`, tilde `~` at the start of a word, globbing `*`,
   `?`, `[...]` via `glob`. Globs resolve against the raw disk; no `.gitignore` filtering (this is a shell, not
   the cache). A wildcard never matches a leading dot: `*` skips hidden entries, and a hidden entry is reached
   only by writing its dot out (`.env`, `.h*`), exactly as POSIX specifies. Frozen, because the alternative makes
@@ -72,7 +73,8 @@ ever sees the command, exactly as today.
 
 Out of subset, rejected with a clear diagnostic: control flow, functions, heredocs, `&` and `wait`, subshells
 `(...)`, `set` and shell options, advanced expansions (`${VAR:-default}`, arithmetic `$((...))`, brace expansion
-`{a,b}`).
+`{a,b}`), and every special parameter but `$?` (`$$`, `$!`, `$#`, `$*`, `$@`, `$1`..`$9`). A `$` that starts no
+expansion at all stays literal, as in any POSIX shell.
 
 ## Architecture
 

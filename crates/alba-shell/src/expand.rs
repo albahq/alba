@@ -115,6 +115,7 @@ async fn build_segments(
                         WordPart::Text(t) | WordPart::SingleQuoted(t) => text.push_str(t),
                         WordPart::Escaped(c) => text.push(*c),
                         WordPart::Var(name) => text.push_str(&expand_var(name, state)),
+                        WordPart::LastExit => text.push_str(&state.last_exit.to_string()),
                         WordPart::CmdSubst(program) => {
                             text.push_str(&run_cmd_subst(program, state, ctx).await?);
                         }
@@ -132,6 +133,13 @@ async fn build_segments(
             }
             WordPart::Var(name) => segments.push(Segment {
                 text: expand_var(name, state),
+                literal: false,
+            }),
+            // `$?` is a decimal integer, so nothing in it can split or
+            // glob; it is still tagged non-literal so it behaves exactly
+            // like any other expansion rather than as a special case.
+            WordPart::LastExit => segments.push(Segment {
+                text: state.last_exit.to_string(),
                 literal: false,
             }),
             WordPart::CmdSubst(program) => segments.push(Segment {
