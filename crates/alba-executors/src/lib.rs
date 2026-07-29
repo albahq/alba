@@ -5,19 +5,24 @@
 //! carries an already-rendered command line — template rendering happens
 //! upstream, in the engine, before a command ever reaches an [`Executor`].
 //!
-//! [`SystemShellExecutor`] runs commands through the host shell
-//! (`sh -c` on unix, `powershell -NoProfile -Command` on windows).
-//! [`FakeExecutor`], behind the `test-util` feature, is a scriptable test
-//! double the scheduler's own tests drive to assert dependency order,
-//! parallelism, and cancellation without spawning real processes.
+//! [`EmbeddedShellExecutor`] runs commands through `alba-shell`, Alba's own
+//! POSIX-like interpreter, in-process — the default. [`SystemShellExecutor`]
+//! runs them through the host shell (`sh -c` on unix, `powershell
+//! -NoProfile -Command` on windows), the per-beam opt-out via `executor
+//! system_shell`. [`FakeExecutor`], behind the `test-util` feature, is a
+//! scriptable test double the scheduler's own tests drive to assert
+//! dependency order, parallelism, and cancellation without spawning real
+//! processes.
 
 use std::path::PathBuf;
 
+mod embedded;
 mod shell;
 
 #[cfg(feature = "test-util")]
 mod fake;
 
+pub use embedded::EmbeddedShellExecutor;
 pub use shell::SystemShellExecutor;
 
 #[cfg(feature = "test-util")]

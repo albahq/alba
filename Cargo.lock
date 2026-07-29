@@ -63,6 +63,7 @@ dependencies = [
 name = "alba-executors"
 version = "0.1.0"
 dependencies = [
+ "alba-shell",
  "async-trait",
  "nix",
  "tempfile",

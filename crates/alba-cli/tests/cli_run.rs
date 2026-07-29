@@ -339,6 +339,55 @@ fn bare_alba_runs_the_default_beam() {
         .stdout(predicates::str::contains("compiled"));
 }
 
+/// With no `executor` clause, a beam now runs on the embedded shell rather
+/// than the host shell — this is the default this task switches over.
+/// `echo` is a builtin the embedded shell implements directly, so this
+/// succeeds identically on every platform with no `sh`/`powershell`
+/// involved at all.
+#[test]
+fn a_beam_runs_on_the_embedded_shell_by_default() {
+    let dir = project("beam hello { run \"echo hello from alba\" }\n");
+
+    alba()
+        .current_dir(&dir)
+        .args(["run", "hello"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hello from alba"));
+}
+
+/// A `run` command outside the embedded shell's supported subset fails the
+/// beam rather than being silently accepted: the process exits 1, and the
+/// diagnostic (message plus the `executor system_shell` opt-out) reaches
+/// the user through the beam's own output.
+#[test]
+fn out_of_subset_syntax_fails_the_beam_with_the_diagnostic() {
+    let dir = project("beam bad { run \"for x in a; do echo $x; done\" }\n");
+
+    alba()
+        .current_dir(&dir)
+        .args(["run", "bad"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("not supported"))
+        .stdout(predicates::str::contains("executor system_shell"));
+}
+
+/// `executor system_shell` opts a beam back out to the host shell — the
+/// behaviour every beam had before this task. `echo` behaves identically
+/// under POSIX `sh` and `powershell`, so this succeeds on every platform.
+#[test]
+fn executor_system_shell_opts_a_beam_out() {
+    let dir = project("beam legacy { executor system_shell run \"echo sys\" }\n");
+
+    alba()
+        .current_dir(&dir)
+        .args(["run", "legacy"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("sys"));
+}
+
 /// `--jobs 0` is rejected by argument parsing rather than silently
 /// meaning something: a run with no slots is not a run. The message is
 /// asserted, not only the code, since exit 2 alone would also be produced
@@ -612,10 +661,17 @@ mod interrupts {
     /// the run is provably still cancelling (inside that 5 s grace) when
     /// the second signal lands, and the shell cannot outlive the test even
     /// though the abort leaves it running.
+    ///
+    /// `executor system_shell`: this beam pins `SystemShellExecutor`'s own
+    /// two-signal escalation against a real process that installs a
+    /// `SIGTERM` trap — `trap`, `while`, and arithmetic expansion are all
+    /// outside the embedded shell's supported subset (by design; it is not
+    /// a POSIX shell), so under the default executor this Beamfile would
+    /// fail to parse instead of exercising the behaviour under test.
     #[test]
     fn second_interrupt_aborts_the_process() {
         let dir = project(
-            "beam stubborn { run \"trap '' TERM; echo ready; i=0; while [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done\" }\n",
+            "beam stubborn { executor system_shell run \"trap '' TERM; echo ready; i=0; while [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done\" }\n",
         );
         let child = spawn_running(&dir, "stubborn");
 
