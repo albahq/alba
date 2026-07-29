@@ -138,10 +138,11 @@ Common to every subcommand:
 
 ### Executors
 
-A beam runs its command in a shell by default. `executor docker { image
-"..." }` also parses, but running it currently fails at run time with
-`docker executor is not yet supported` — the docker executor is not
-implemented yet.
+A beam runs its command on Alba's embedded shell by default (see
+[Embedded shell](#embedded-shell) below); `executor system_shell` opts out
+to the host shell instead. `executor docker { image "..." }` also parses,
+but running it currently fails at run time with `docker executor is not
+yet supported`, since the docker executor is not implemented yet.
 
 ## Caching
 
@@ -175,3 +176,67 @@ The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
 `alba cache clean` removes it entirely; the next run of any beam starts
 from scratch and repopulates it. Alba never edits your `.gitignore`, so
 add `.alba/` to it yourself in any project that turns caching on.
+
+## Embedded shell
+
+A beam's `run` command executes on Alba's own embedded shell by default: a
+home-grown, cross-platform, POSIX-like interpreter, not `sh` or
+PowerShell. The point is that a single Beamfile behaves identically on
+macOS, Linux, and Windows, instead of quietly depending on whichever shell
+happens to be installed on the machine that runs it.
+
+The supported syntax covers what most beam commands actually need:
+sequencing (`cmd1 ; cmd2`, `cmd1 && cmd2`, `cmd1 || cmd2`, negation
+`! cmd`), pipelines (`cmd1 | cmd2`), redirections (`>`, `>>`, `<`, `2>`,
+`2>>`, `2>&1`), POSIX quoting (single quotes are literal, double quotes
+allow expansions, backslash escapes a single character), variables
+(`$VAR`, `${VAR}`, assignment with `FOO=bar`, an environment prefix like
+`FOO=bar cmd`, and the `export`/`unset` builtins), command substitution
+(`$(...)`, which shares the shell's state rather than running in an
+isolated subshell, so `$(cd sub)` really does leave the shell in `sub`),
+tilde expansion (`~` at the start of a word), and globbing (`*`, `?`,
+`[...]`).
+
+Sixteen builtins ship with the shell: the pure shell builtins `cd`, `pwd`,
+`exit`, `true`, `false`, `export`, and `unset`; `echo`; the file builtins
+`cat`, `cp`, `mv`, `rm`, `mkdir`, and `touch`; and the utilities `sleep`
+and `test` (also spelled `[`). A builtin always wins over a PATH binary of
+the same name, so `rm -rf dist` behaves the same on every platform even
+where a system `rm` also exists; an explicit path such as `/bin/rm`
+bypasses the builtin and reaches the system binary directly.
+
+A few behaviors are deliberately frozen rather than left
+implementation-defined: an unset variable expands to the empty string
+(there is no `set -u`); a pipeline's exit code is always its last
+command's (there is no `pipefail`); a glob that matches nothing is left
+literal instead of disappearing or erroring; `echo` recognizes only the
+`-n` flag and never interprets backslash escape sequences; and a newline
+inside a `run` string behaves exactly like `;`.
+
+Shell control flow (`if`, `for`, `while`, `case`), functions, heredocs,
+background jobs (`&`, `wait`), subshells (`(...)`), and advanced
+expansions such as `${VAR:-default}`, arithmetic `$((...))`, or brace
+expansion `{a,b}` are out of subset. None of them fail silently or fall
+back to a system shell: each is a parse error with a span pointing at the
+offending construct and a suggestion. For example:
+
+```
+$ alba check
+beam `deploy`: invalid embedded shell command
+error: `for` loops are not supported by the embedded shell
+  │ for f in *.rs; do echo $f; done
+  │ ^^^
+  = help: move the logic into a script invoked by `run`, or declare `executor system_shell` on this beam
+```
+
+A beam whose command needs more than this subset can opt out with
+`executor system_shell`, which runs its command through the host shell
+(`sh` on Unix, PowerShell on Windows) instead, exactly as Alba did before
+the embedded shell existed.
+
+`alba check` parses the command of every beam that uses the embedded
+shell and takes no parameters, catching unsupported syntax before a beam
+ever runs rather than partway through a build. Parameterized beams (their
+`run` template cannot be rendered until their arguments arrive),
+`executor system_shell` beams, and `executor docker` beams are not
+statically checked this way.
