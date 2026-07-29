@@ -363,3 +363,48 @@ async fn a_stage_that_fails_before_running_still_closes_its_pipe() {
         "lines: {lines:?}"
     );
 }
+
+/// The pipeline's producer exits immediately but leaves a descendant
+/// holding the pipe's write end, so the `cat` stage stays parked in a
+/// read that will not return until that descendant is gone. `cat` is a
+/// builtin with blocking io, which means it runs on the blocking pool,
+/// where nothing can abort it: the only thing that can keep `execute`
+/// from waiting the descendant out is the join itself honouring the
+/// token.
+///
+/// Unix-only because there is no portable way to spawn a command that
+/// exits while a descendant of its own keeps an inherited handle open.
+/// The defect this guards is not unix-only — a builtin stage parked on
+/// any slow reader behaves the same way on every platform — but the
+/// reproduction is.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_returns_promptly_while_a_builtin_stage_is_blocked() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let program = parse("sh -c 'sleep 5 & echo hi' | cat").unwrap();
+    let cancel = CancellationToken::new();
+    let env = ShellEnv {
+        env: std::env::vars().collect(),
+        cwd: std::env::current_dir().unwrap(),
+        output: tx,
+        cancel: cancel.clone(),
+    };
+
+    let handle = tokio::spawn(async move { execute(&program, env).await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let cancelled_at = std::time::Instant::now();
+    cancel.cancel();
+
+    let result = without_deadlocking("cancelling a pipeline with a blocked builtin stage", handle)
+        .await
+        .expect("execute task panicked");
+    let elapsed = cancelled_at.elapsed();
+
+    assert_eq!(result.exit_code, 130);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "execute() took {elapsed:?} to return after cancellation; expected \
+         the stage join to honour the token rather than wait out the \
+         descendant still holding the pipe open"
+    );
+}

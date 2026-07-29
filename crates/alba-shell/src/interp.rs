@@ -210,6 +210,11 @@ async fn exec_pipeline(
 /// `export`, an `unset`, an assignment or an `exit` inside a stage
 /// changes only that stage's own world — the shell it came from is
 /// untouched, and an `exit` there merely becomes that stage's exit code.
+///
+/// Cancellation is the token, never the future: a cancelled run returns
+/// here without waiting for a stage that has not noticed yet, and
+/// dropping the `execute` future leaves every spawned stage running
+/// detached. Callers must cancel the token, not drop the future.
 async fn exec_stages(
     pipeline: &Pipeline,
     state: &ShellState,
@@ -238,7 +243,17 @@ async fn exec_stages(
 
     let mut code = 0;
     for stage in stages {
-        let flow = stage.await.expect("pipeline stage panicked");
+        // Bounded by the token, not just by the stage: a builtin stage
+        // runs on the blocking pool, which nothing can abort, so a `cat`
+        // parked on a pipe a stray descendant still holds open would
+        // otherwise keep this loop — and the whole run — waiting for as
+        // long as that descendant lived, deaf to a Ctrl-C throughout.
+        // The remaining stages are left detached, exactly as the external
+        // path already leaves an abandoned drain reader.
+        let flow = tokio::select! {
+            joined = stage => joined.expect("pipeline stage panicked"),
+            () = cancel.cancelled() => return Flow::Exit(130),
+        };
         // `Flow::Exit` collapses to a plain code: an `exit` inside a
         // stage stops that stage, never the program.
         code = match flow {
