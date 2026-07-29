@@ -440,7 +440,7 @@ async fn run_external_command(
 
     let Some(path) = resolved else {
         let mut stderr = io.stderr.writer();
-        let _ = writeln!(stderr, "{}", not_found_message(name));
+        let _ = writeln!(stderr, "{}", not_found_message(name, state.get("PATH")));
         return Flow::Next(127);
     };
 
@@ -557,8 +557,8 @@ fn cannot_open(target: &str, error: &std::io::Error) -> String {
     format!("alba-shell: cannot open {target}: {error}")
 }
 
-fn not_found_message(name: &str) -> String {
-    match did_you_mean(name) {
+fn not_found_message(name: &str, path: Option<&str>) -> String {
+    match did_you_mean(name, path) {
         Some(candidate) => {
             format!("alba-shell: command not found: {name} (did you mean `{candidate}`?)")
         }
@@ -566,24 +566,72 @@ fn not_found_message(name: &str) -> String {
     }
 }
 
-/// The closest builtin name within edit distance 2, if any.
-fn did_you_mean(name: &str) -> Option<&'static str> {
-    builtins::NAMES
-        .iter()
-        .copied()
-        .map(|candidate| (candidate, distance(name, candidate)))
-        .filter(|(_, distance)| *distance <= 2)
-        .min_by_key(|(_, distance)| *distance)
+/// The closest command name to `name`, searched across the builtins and
+/// every entry on `PATH` — a typo on an installed tool (`carg build`)
+/// being the far more common mistake than a typo on a builtin.
+///
+/// Ties break on the name rather than on iteration order, which no
+/// filesystem promises, so the same typo always draws the same
+/// suggestion.
+fn did_you_mean(name: &str, path: Option<&str>) -> Option<String> {
+    let builtins = builtins::NAMES.iter().map(|name| (*name).to_string());
+    builtins
+        .chain(path_command_names(path))
+        .map(|candidate| {
+            let distance = distance(name, &candidate);
+            (candidate, distance)
+        })
+        .filter(|(candidate, distance)| is_plausible_typo(name, candidate, *distance))
+        .min_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
         .map(|(candidate, _)| candidate)
 }
 
-/// Damerau-Levenshtein edit distance (insert, delete, substitute, and
-/// adjacent transposition all cost 1). Plain Levenshtein would leave a
-/// transposed typo like `pdw` for `pwd` tied at distance 2 with an
-/// unrelated word such as `cd`; counting the transposition as a single
-/// edit — the classic did-you-mean touch — breaks that tie in favour of
-/// the actual typo. No new dependency for a two-string comparison used
-/// only for this diagnostic.
+/// Whether `candidate` is close enough to `name` to be worth offering.
+/// One edit always is. Two edits only count when both names are at least
+/// six characters, long enough for two edits to still read as a typo
+/// rather than as a different word: at distance 2 alone, `nosuch` drew
+/// `touch` and, on windows, every ordinary unix command name drew some
+/// unrelated builtin. Distance 0 is not a typo at all — a `PATH` entry
+/// spelled exactly like the name that just failed to resolve is a file
+/// that is not executable, and suggesting it back would say nothing.
+fn is_plausible_typo(name: &str, candidate: &str, distance: usize) -> bool {
+    match distance {
+        1 => true,
+        2 => name.chars().count() >= 6 && candidate.chars().count() >= 6,
+        _ => false,
+    }
+}
+
+/// Every file name found on `PATH`. A spelling hint, not a resolution:
+/// `which` has already searched and failed, so an entry is offered
+/// without re-checking that it is really executable. On windows the
+/// executable extension is dropped, so a typo on `cargo` suggests
+/// `cargo` rather than `cargo.exe`.
+fn path_command_names(path: Option<&str>) -> impl Iterator<Item = String> {
+    let dirs: Vec<PathBuf> = path
+        .map(|path| std::env::split_paths(path).collect())
+        .unwrap_or_default();
+    dirs.into_iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(|entry| command_name(&entry.ok()?.file_name()))
+}
+
+fn command_name(file_name: &std::ffi::OsStr) -> Option<String> {
+    let name = file_name.to_str()?;
+    if cfg!(windows) {
+        return Some(Path::new(name).file_stem()?.to_string_lossy().into_owned());
+    }
+    Some(name.to_string())
+}
+
+/// Optimal string alignment distance (insert, delete, substitute, and
+/// adjacent transposition all cost 1, with no substring edited twice).
+/// Plain Levenshtein would leave a transposed typo like `pdw` for `pwd`
+/// tied at distance 2 with an unrelated word such as `cd`; counting the
+/// transposition as a single edit — the classic did-you-mean touch —
+/// breaks that tie in favour of the actual typo. No new dependency for a
+/// two-string comparison used only for this diagnostic.
 fn distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();

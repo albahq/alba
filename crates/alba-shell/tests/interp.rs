@@ -370,3 +370,58 @@ async fn exit_rejects_a_non_numeric_argument() {
 async fn exit_without_an_argument_still_uses_the_last_code() {
     assert_eq!(run("false; exit").await.0, 1);
 }
+
+#[tokio::test]
+async fn a_distant_name_gets_no_suggestion() {
+    // `nosuch` is two edits from the builtin `touch`, which is not a
+    // typo of it by any reading. Two edits only count as a typo when both
+    // names are long enough for it to mean something.
+    let (_, lines) = run("nosuch").await;
+    assert!(
+        !lines.iter().any(|(_, t)| t.contains("did you mean")),
+        "lines: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_near_miss_of_a_path_binary_gets_a_suggestion() {
+    // The suggestion searches PATH, not just the builtins: a typo on an
+    // installed tool is the far more common mistake.
+    let bin = tempfile::tempdir().unwrap();
+    std::fs::write(bin.path().join("albatross"), "").unwrap();
+    let (_, lines) = run_with_env(
+        "albatros",
+        vec![("PATH".to_string(), bin.path().display().to_string())],
+    )
+    .await;
+    assert!(
+        lines
+            .iter()
+            .any(|(_, t)| t.contains("did you mean `albatross`?")),
+        "lines: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_suggestion_is_stable_when_several_candidates_tie() {
+    // PATH entries arrive in directory order, which no filesystem
+    // promises: the tie has to break on the name so the same typo always
+    // draws the same suggestion.
+    let bin = tempfile::tempdir().unwrap();
+    for name in ["zebra-tool", "alpha-tool", "monad-tool"] {
+        std::fs::write(bin.path().join(name), "").unwrap();
+    }
+    for _ in 0..3 {
+        let (_, lines) = run_with_env(
+            "xlpha-tool",
+            vec![("PATH".to_string(), bin.path().display().to_string())],
+        )
+        .await;
+        assert!(
+            lines
+                .iter()
+                .any(|(_, t)| t.contains("did you mean `alpha-tool`?")),
+            "lines: {lines:?}"
+        );
+    }
+}

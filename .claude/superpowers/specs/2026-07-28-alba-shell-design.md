@@ -137,8 +137,9 @@ Same standard as the DSL, three families:
 - Syntax errors: for example an unclosed quote, with the span pointing at the opening quote.
 - Out-of-subset syntax: named construct, span, and the suggestion to move the logic into a script or declare
   `executor system_shell`.
-- Execution errors: command not found (with a did-you-mean against builtins and PATH when the edit distance is
-  close), unreadable redirection target, and similar.
+- Execution errors: command not found (with a did-you-mean against the builtins and every entry on PATH, offered
+  within one edit, or two when both names are at least six characters, so that two edits still read as a typo
+  rather than as a different word), unreadable redirection target, and similar.
 
 Through `alba check` these render in Alba's standard diagnostic output, tagged with the beam name.
 
