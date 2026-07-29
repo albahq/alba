@@ -77,6 +77,22 @@ const CASES: &[Case] = &[
         want_stdout: &["sub/c.txt a.txt b.txt"],
     },
     Case {
+        // A wildcard never reaches a hidden entry, so `rm -r -f *` in a
+        // cleanup beam cannot take `.git` with it.
+        name: "glob_skips_hidden_entries",
+        script: "echo *",
+        want_exit: 0,
+        want_stdout: &["a.txt b.txt sub"],
+    },
+    Case {
+        // The other half of the same rule: a dot written out still
+        // reaches what it names.
+        name: "glob_with_a_written_dot_matches_hidden",
+        script: "echo .h*",
+        want_exit: 0,
+        want_stdout: &[".hidden"],
+    },
+    Case {
         name: "unmatched_glob_literal",
         script: "echo *.zzz",
         want_exit: 0,
@@ -182,6 +198,7 @@ async fn conformance() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
+        std::fs::write(dir.path().join(".hidden"), "shh\n").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/c.txt"), "gamma\n").unwrap();
         let (code, lines) = run_in(case.script, dir.path().to_path_buf()).await;

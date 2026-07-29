@@ -206,3 +206,36 @@ async fn globs_sort_and_use_forward_slashes() {
     let (_, lines) = run_in("echo d/*.rs", dir.path().to_path_buf()).await;
     assert_eq!(stdout(&lines), vec!["d/a.rs d/b.rs"]);
 }
+
+#[tokio::test]
+async fn a_star_never_matches_a_hidden_entry() {
+    // The rule every POSIX shell freezes, and the one that keeps a
+    // cleanup beam's `rm -rf *` away from `.git` and a `cp * dist` away
+    // from `.env`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".hidden"), "").unwrap();
+    std::fs::write(dir.path().join("visible.txt"), "").unwrap();
+    let (_, lines) = run_in("echo *", dir.path().to_path_buf()).await;
+    assert_eq!(stdout(&lines), vec!["visible.txt"]);
+}
+
+#[tokio::test]
+async fn a_leading_dot_written_out_still_matches_a_hidden_entry() {
+    // Only an *implicit* leading dot is protected: `.*` asks for hidden
+    // entries by name and must still find them.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".hidden"), "").unwrap();
+    std::fs::write(dir.path().join("visible.txt"), "").unwrap();
+    let (_, lines) = run_in("echo .h*", dir.path().to_path_buf()).await;
+    assert_eq!(stdout(&lines), vec![".hidden"]);
+}
+
+#[tokio::test]
+async fn a_star_never_matches_a_hidden_entry_inside_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("d")).unwrap();
+    std::fs::write(dir.path().join("d/.hidden"), "").unwrap();
+    std::fs::write(dir.path().join("d/visible.txt"), "").unwrap();
+    let (_, lines) = run_in("echo d/*", dir.path().to_path_buf()).await;
+    assert_eq!(stdout(&lines), vec!["d/visible.txt"]);
+}

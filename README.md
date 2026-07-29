@@ -209,7 +209,9 @@ A few behaviors are deliberately frozen rather than left
 implementation-defined: an unset variable expands to the empty string
 (there is no `set -u`); a pipeline's exit code is always its last
 command's (there is no `pipefail`); a glob that matches nothing is left
-literal instead of disappearing or erroring; `echo` recognizes only the
+literal instead of disappearing or erroring; a wildcard never matches a
+leading dot, so `*` skips hidden entries and a hidden entry is reached
+only by writing its dot out (`.env`, `.h*`); `echo` recognizes only the
 `-n` flag and never interprets backslash escape sequences; and a newline
 inside a `run` string behaves exactly like `;`.
 

@@ -303,6 +303,12 @@ fn plan_field(pieces: &[Segment]) -> FieldPlan {
 /// no-op that `Path::join` resolves to the pattern itself, after which
 /// stripping the `cwd` prefix could never succeed and every absolute
 /// glob would silently collapse to its literal text.
+///
+/// A wildcard never matches a leading dot, exactly as every POSIX shell
+/// behaves: `*` skips hidden entries, and a hidden entry is reached only
+/// by writing its dot out (`.env`, `.h*`). Without that rule a cleanup
+/// beam running `rm -r -f *` would delete `.git`, and `cp * dist` would
+/// publish `.env`.
 fn resolve_glob(pattern: &str, state: &ShellState) -> Option<Vec<String>> {
     let absolute = Path::new(pattern).is_absolute();
     let full_pattern = if absolute {
@@ -310,13 +316,30 @@ fn resolve_glob(pattern: &str, state: &ShellState) -> Option<Vec<String>> {
     } else {
         state.cwd.join(pattern)
     };
-    let options = MatchOptions {
+    let full_pattern = full_pattern.to_string_lossy().to_string();
+
+    // The leading-dot rule is applied by re-testing each candidate rather
+    // than by handing `require_literal_leading_dot` to the directory
+    // walk. `glob`'s walker reads it as "never look at a dot entry at
+    // all", which also hides the ones an explicitly written dot asked
+    // for, so `.h*` would match nothing; `Pattern::matches_path_with`
+    // implements the real per-component rule (a wildcard may not consume
+    // a dot that follows a separator, a literal dot may), which is the
+    // one POSIX describes.
+    let walk = MatchOptions {
         require_literal_separator: true,
         ..Default::default()
     };
-    let mut matches: Vec<String> = glob::glob_with(&full_pattern.to_string_lossy(), options)
+    let leading_dot = MatchOptions {
+        require_literal_leading_dot: true,
+        ..walk
+    };
+    let compiled = Pattern::new(&full_pattern).ok()?;
+
+    let mut matches: Vec<String> = glob::glob_with(&full_pattern, walk)
         .ok()?
         .filter_map(Result::ok)
+        .filter(|path| compiled.matches_path_with(path, leading_dot))
         .filter_map(|path| {
             let shown = if absolute {
                 path.as_path()

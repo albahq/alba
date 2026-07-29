@@ -54,7 +54,9 @@ channel, the cache, and the renderers do not change.
 - POSIX quoting: single quotes (literal), double quotes (expansions apply), backslash escapes.
 - Expansions: `$VAR`, `${VAR}`, command substitution `$(...)`, tilde `~` at the start of a word, globbing `*`,
   `?`, `[...]` via `glob`. Globs resolve against the raw disk; no `.gitignore` filtering (this is a shell, not
-  the cache).
+  the cache). A wildcard never matches a leading dot: `*` skips hidden entries, and a hidden entry is reached
+  only by writing its dot out (`.env`, `.h*`), exactly as POSIX specifies. Frozen, because the alternative makes
+  `rm -r -f *` delete `.git` and `cp * dist` publish `.env`.
 - Variables: shell assignment `FOO=bar` (scoped to the current `run` line), environment prefix `FOO=bar cmd`, and
   the `export` / `unset` builtins. Each entry of a `run [...]` list is an independent shell invocation: variables
   do not persist across entries. A beam's durable environment is the DSL `env` field.
