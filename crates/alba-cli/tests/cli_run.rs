@@ -341,19 +341,36 @@ fn bare_alba_runs_the_default_beam() {
 
 /// With no `executor` clause, a beam now runs on the embedded shell rather
 /// than the host shell — this is the default this task switches over.
-/// `echo` is a builtin the embedded shell implements directly, so this
-/// succeeds identically on every platform with no `sh`/`powershell`
-/// involved at all.
+///
+/// Plain `echo` would not prove that: it prints byte-identically under
+/// `sh`, under `powershell`, and under the embedded shell, so a beam
+/// wired to either `Executors` slot would pass this test unchanged — it
+/// would only prove a beam runs, not which shell ran it. This command
+/// instead exploits a real, deliberate divergence: command substitution
+/// `$(...)` shares the embedded shell's state instead of running in an
+/// isolated subshell (there is no subshell isolation machinery to reuse,
+/// since `(...)` subshells are entirely out of its supported subset), so
+/// `$(FOO=leaked)` leaves `FOO` set in the command that follows it. A real
+/// POSIX `sh` (macOS and Linux) does the opposite: `$(...)` is a genuine
+/// subshell there, so the assignment is discarded the moment it exits —
+/// confirmed directly (`sh -c '$(FOO=leaked); echo FOO=$FOO'` prints
+/// `FOO=`, not `FOO=leaked`). `powershell -NoProfile -Command` (Windows)
+/// has no bare `NAME=value` assignment syntax at all, so `$FOO` there can
+/// never end up holding `leaked` either. Only the embedded shell can print
+/// `FOO=leaked`; both host shells print `FOO=`, whichever platform this
+/// runs on — so if the CLI wiring regressed to routing every beam to
+/// `SystemShellExecutor`, this assertion (not just the exit code) would
+/// catch it on every platform.
 #[test]
 fn a_beam_runs_on_the_embedded_shell_by_default() {
-    let dir = project("beam hello { run \"echo hello from alba\" }\n");
+    let dir = project("beam hello { run \"$(FOO=leaked); echo FOO=$FOO\" }\n");
 
     alba()
         .current_dir(&dir)
         .args(["run", "hello"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("hello from alba"));
+        .stdout(predicates::str::contains("FOO=leaked"));
 }
 
 /// A `run` command outside the embedded shell's supported subset fails the
