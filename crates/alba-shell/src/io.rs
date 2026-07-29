@@ -15,7 +15,7 @@
 //! is therefore move-only, and cloning is explicit ([`OutTarget::try_clone`],
 //! which `2>&1` and the per-command defaults both need).
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
@@ -198,6 +198,18 @@ impl InTarget {
 
     fn can_block(&self) -> bool {
         matches!(self, Self::File(_) | Self::Pipe(_))
+    }
+
+    /// A blocking reader onto this target, for a builtin that reads its
+    /// stdin (`cat`). `Null` yields immediate EOF; a file or a
+    /// pipeline neighbour's pipe reads exactly as any other [`Read`]
+    /// would.
+    pub(crate) fn reader(self) -> Box<dyn Read + Send> {
+        match self {
+            Self::Null => Box::new(std::io::empty()),
+            Self::File(file) => Box::new(file),
+            Self::Pipe(reader) => Box::new(reader),
+        }
     }
 }
 

@@ -185,24 +185,20 @@ async fn input_redirect_feeds_an_external() {
     assert!(lines.iter().any(|(_, t)| t.contains("cannot open")));
 }
 
-// The five tests below cover what the rest of this file cannot reach
+// The four tests below cover what the rest of this file cannot reach
 // with builtins alone: stages that genuinely run at the same time, and
 // pipe ends left open in this process — a fault that shows up not as a
-// wrong value but as a run that never returns. Each needs a real
-// producer, consumer or long-running process, which no builtin can
-// supply until `cat` and `sleep` arrive; `sh` is the only portable
-// stand-in, so they are unix-only, like the other `#[cfg(unix)]` tests
-// in this crate that need a real executable to exist.
+// wrong value but as a run that never returns. `cat`, `true`, and
+// `sleep` are now real builtins, so every one of them is portable: no
+// `sh` stand-in, no `#[cfg(unix)]`.
 
 /// How long to let a deadlock-prone case run before calling it hung.
 /// Generous next to the milliseconds these actually take: the point is
 /// only to turn a deadlock into a named failure instead of a test
 /// binary that sits there until the CI job is killed.
-#[cfg(unix)]
 const DEADLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Fails by name if `future` has not finished within [`DEADLOCK_TIMEOUT`].
-#[cfg(unix)]
 async fn without_deadlocking<T>(what: &str, future: impl Future<Output = T>) -> T {
     match tokio::time::timeout(DEADLOCK_TIMEOUT, future).await {
         Ok(value) => value,
@@ -210,20 +206,27 @@ async fn without_deadlocking<T>(what: &str, future: impl Future<Output = T>) -> 
     }
 }
 
-#[cfg(unix)]
+/// Writes a file with 200,000 numbered lines: an order of magnitude past
+/// any platform's pipe buffer, so a producer copying it through a pipe
+/// cannot finish until the consumer drains it.
+fn write_large_file(dir: &std::path::Path, name: &str) {
+    let content: String = (1..=200_000)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(dir.join(name), content).unwrap();
+}
+
 #[tokio::test]
 async fn cancellation_stops_every_stage_of_a_pipeline() {
-    let dir = tempfile::tempdir().unwrap();
-    // Each stage leaves a marker the instant it starts, then sleeps far
-    // longer than the test can tolerate. Both markers prove both stages
-    // really started; the prompt return proves both were terminated,
-    // since `execute` cannot return until every stage has been joined.
-    let source = format!(
-        "sh -c 'touch {0}/first; sleep 30' | sh -c 'touch {0}/second; sleep 30'",
-        dir.path().display()
-    );
+    // Both stages are our own `sleep` builtin, cancellable through the
+    // same token: the prompt return proves both really were cancelled,
+    // since `execute` cannot return until every stage has been joined,
+    // and neither stage would finish this quickly on its own (each asks
+    // for 30 seconds).
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let program = parse(&source).unwrap();
+    let program = parse("sleep 30 | sleep 30").unwrap();
     let cancel = CancellationToken::new();
     let env = ShellEnv {
         env: std::env::vars().collect(),
@@ -233,41 +236,43 @@ async fn cancellation_stops_every_stage_of_a_pipeline() {
     };
 
     let handle = tokio::spawn(async move { execute(&program, env).await });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let cancelled_at = std::time::Instant::now();
     cancel.cancel();
 
-    let result = handle.await.expect("execute task panicked");
+    let result = without_deadlocking("cancelling a two-stage pipeline", handle)
+        .await
+        .expect("execute task panicked");
     let elapsed = cancelled_at.elapsed();
 
-    assert!(dir.path().join("first").exists(), "the first stage ran");
-    assert!(dir.path().join("second").exists(), "the second stage ran");
     assert_eq!(result.exit_code, 130);
     assert!(
         elapsed < std::time::Duration::from_secs(3),
         "execute() took {elapsed:?} to return after cancellation; expected \
-         the graceful-stop signal to kill both sleeping stages almost \
-         immediately, not the 5s grace period or the full 30s sleep"
+         both sleeping stages to observe the cancellation almost \
+         immediately, not run out their full 30s duration"
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_producer_larger_than_the_pipe_buffer_is_neither_blocked_nor_truncated() {
-    // 200_000 lines is far past any platform's pipe buffer, so the first
-    // stage cannot finish until the second drains it: this only returns
-    // if both stages really are running at once, and only counts right
-    // if nothing was dropped between them.
+    let dir = tempfile::tempdir().unwrap();
+    write_large_file(dir.path(), "big.txt");
+    // The first stage cannot finish writing 200_000 lines through the
+    // pipe until the second stage drains it: this only returns if both
+    // stages really are running at once, and only counts right if
+    // nothing was dropped between them.
     let (code, lines) = without_deadlocking(
         "a producer larger than the pipe buffer",
-        run("sh -c 'seq 1 200000' | sh -c 'wc -l'"),
+        run_in("cat big.txt | cat", dir.path().to_path_buf()),
     )
     .await;
     assert_eq!(code, 0, "lines: {lines:?}");
-    assert_eq!(stdout(&lines).join("").trim(), "200000");
+    let received = stdout(&lines);
+    assert_eq!(received.len(), 200_000, "lines: {}", received.len());
+    assert_eq!(received.last(), Some(&"200000"));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_stage_that_never_reads_does_not_hang_its_producer() {
     // `true` ignores its input, so the read end of the pipe feeding it
@@ -275,14 +280,20 @@ async fn a_stage_that_never_reads_does_not_hang_its_producer() {
     // forever on a pipe nobody will ever drain. Not finishing *is* the
     // bug, so the timeout — not any assertion below it — is what this
     // test actually checks.
+    let dir = tempfile::tempdir().unwrap();
+    write_large_file(dir.path(), "big.txt");
     let (code, lines) = without_deadlocking(
         "a producer feeding a stage that never reads",
-        run("sh -c 'seq 1 200000' | true"),
+        run_in("cat big.txt | true", dir.path().to_path_buf()),
     )
     .await;
     assert_eq!(code, 0, "lines: {lines:?}");
 }
 
+/// The one case in this file that still needs a real `sh`: our own AST
+/// has no `&` background operator, so there is no builtin-only way to
+/// produce a descendant that outlives the command that started it.
+///
 /// A run that merely backgrounds a descendant (`sleep 6 &`) must not
 /// keep this process busy once it returns. The shell exits at once, but
 /// the backgrounded `sleep` inherits the child's stdout and holds that
@@ -334,7 +345,6 @@ fn a_backgrounded_descendant_does_not_outlive_the_run() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_stage_that_fails_before_running_still_closes_its_pipe() {
     // The first stage never runs (its redirect cannot be opened), which
@@ -342,7 +352,11 @@ async fn a_stage_that_fails_before_running_still_closes_its_pipe() {
     // write end it was handed and leave the next stage waiting on an
     // EOF that never comes.
     let dir = tempfile::tempdir().unwrap();
-    let (code, lines) = run_in("pwd > nope/out.txt | sh -c 'cat'", dir.path().to_path_buf()).await;
+    let (code, lines) = without_deadlocking(
+        "a stage whose redirect fails still closing its pipe",
+        run_in("pwd > nope/out.txt | cat", dir.path().to_path_buf()),
+    )
+    .await;
     assert_eq!(code, 0, "the last stage decides, lines: {lines:?}");
     assert!(
         lines.iter().any(|(_, t)| t.contains("cannot open")),

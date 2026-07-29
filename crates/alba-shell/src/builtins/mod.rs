@@ -1,10 +1,19 @@
-//! State-affecting builtins: `cd`, `pwd`, `exit`, `true`, `false`,
-//! `export`, `unset`. Builtins always win over PATH binaries of the
-//! same name — `interp::exec_command` looks them up before falling back
-//! to an external — and an explicit path (`/bin/echo`) bypasses them.
-//! Task 6 extends this with output-producing builtins (`echo`, …).
+//! Every shell builtin. State-affecting ones (`cd`, `pwd`, `exit`,
+//! `true`, `false`, `export`, `unset`) live directly in this module; the
+//! rest are split by responsibility into their own modules: [`text`]
+//! (`echo`, `cat`), [`fs`] (`cp`, `mv`, `rm`, `mkdir`, `touch`), and
+//! [`util`] (`sleep`, `test`/`[`). Builtins always win over PATH
+//! binaries of the same name — `interp::exec_command` looks them up
+//! before falling back to an external — and an explicit path
+//! (`/bin/echo`) bypasses them.
+
+mod fs;
+mod text;
+mod util;
 
 use std::io::Write;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::interp::Flow;
 use crate::io::{CommandIo, OutTarget};
@@ -19,11 +28,26 @@ pub(crate) enum Builtin {
     False,
     Export,
     Unset,
+    Echo,
+    Cat,
+    Cp,
+    Mv,
+    Rm,
+    Mkdir,
+    Touch,
+    Sleep,
+    Test,
+    Bracket,
 }
 
-/// Every builtin name, fed both by [`find`] and the did-you-mean
-/// suggestion in `interp.rs`'s command-not-found diagnostic.
-pub(crate) const NAMES: &[&str] = &["cd", "pwd", "exit", "true", "false", "export", "unset"];
+/// Every builtin name except `[` — an alternate spelling of `test`, not
+/// a name a did-you-mean typo should ever suggest — fed both by
+/// [`find`] and the did-you-mean suggestion in `interp.rs`'s
+/// command-not-found diagnostic.
+pub(crate) const NAMES: &[&str] = &[
+    "cd", "pwd", "exit", "true", "false", "export", "unset", "echo", "cat", "cp", "mv", "rm",
+    "mkdir", "touch", "sleep", "test",
+];
 
 pub(crate) fn find(name: &str) -> Option<Builtin> {
     match name {
@@ -34,6 +58,16 @@ pub(crate) fn find(name: &str) -> Option<Builtin> {
         "false" => Some(Builtin::False),
         "export" => Some(Builtin::Export),
         "unset" => Some(Builtin::Unset),
+        "echo" => Some(Builtin::Echo),
+        "cat" => Some(Builtin::Cat),
+        "cp" => Some(Builtin::Cp),
+        "mv" => Some(Builtin::Mv),
+        "rm" => Some(Builtin::Rm),
+        "mkdir" => Some(Builtin::Mkdir),
+        "touch" => Some(Builtin::Touch),
+        "sleep" => Some(Builtin::Sleep),
+        "test" => Some(Builtin::Test),
+        "[" => Some(Builtin::Bracket),
         _ => None,
     }
 }
@@ -41,16 +75,24 @@ pub(crate) fn find(name: &str) -> Option<Builtin> {
 /// Runs `builtin` on the streams `io` describes. Synchronous by design:
 /// a builtin's writes may land on a pipe or a file, which blocks, so
 /// `interp::run_builtin` decides whether to call this inline or on the
-/// blocking pool.
+/// blocking pool. `sleep` is the one exception — genuinely asynchronous
+/// and cancellable — and is never routed through here; see
+/// [`run_sleep`].
 pub(crate) fn run(
     builtin: Builtin,
     args: &[String],
     state: &mut ShellState,
     io: CommandIo,
 ) -> Flow {
-    // No builtin here reads its input. Letting `stdin` drop right away
-    // closes this end of an upstream pipe, so a producer in `cmd | pwd`
-    // is not left blocked writing into a pipe nobody will ever read.
+    // `cat` is the one builtin that reads its stdin, so it alone keeps
+    // the whole `io` rather than having it destructured away below.
+    if builtin == Builtin::Cat {
+        return text::cat(args, &state.cwd, io);
+    }
+
+    // No other builtin here reads its input. Letting `stdin` drop right
+    // away closes this end of an upstream pipe, so a producer in `cmd |
+    // pwd` is not left blocked writing into a pipe nobody will ever read.
     let CommandIo {
         stdin: _,
         stdout,
@@ -73,7 +115,31 @@ pub(crate) fn run(
             }
             Flow::Next(0)
         }
+        Builtin::Echo => text::echo(args, stdout),
+        Builtin::Cp => fs::cp(args, &state.cwd, stderr),
+        Builtin::Mv => fs::mv(args, &state.cwd, stderr),
+        Builtin::Rm => fs::rm(args, &state.cwd, stderr),
+        Builtin::Mkdir => fs::mkdir(args, &state.cwd, stderr),
+        Builtin::Touch => fs::touch(args, &state.cwd, stderr),
+        Builtin::Test => util::test(args, &state.cwd, stderr),
+        Builtin::Bracket => util::test_bracket(args, &state.cwd, stderr),
+        Builtin::Cat => unreachable!("handled above, before `io` was destructured"),
+        Builtin::Sleep => unreachable!("dispatched asynchronously; see `run_sleep`"),
     }
+}
+
+/// Runs the `sleep` builtin: genuinely asynchronous rather than
+/// blocking, so a cancellation lands the instant it fires instead of
+/// waiting for a blocking-pool thread to notice it. Kept out of [`run`]
+/// for exactly that reason — `interp::run_builtin` calls this directly,
+/// before it ever considers the blocking pool.
+pub(crate) async fn run_sleep(args: &[String], io: CommandIo, cancel: &CancellationToken) -> Flow {
+    let CommandIo {
+        stdin: _,
+        stdout: _,
+        stderr,
+    } = io;
+    util::sleep(args, stderr, cancel).await
 }
 
 /// Writes one newline-terminated line to `target` and closes it. A
@@ -81,9 +147,24 @@ pub(crate) fn run(
 /// nowhere (a closed channel, a pipe whose reader has gone) still
 /// succeeds, exactly as it does when the receiving end of the run's
 /// output channel has been dropped.
-fn write_line(target: OutTarget, text: impl std::fmt::Display) {
+pub(crate) fn write_line(target: OutTarget, text: impl std::fmt::Display) {
     let mut writer = target.writer();
     let _ = writeln!(writer, "{text}");
+}
+
+/// A builtin usage error: `NAME: <detail>` on stderr, exit 2 — the
+/// flag/argument surface each builtin freezes.
+pub(crate) fn usage_error(stderr: OutTarget, message: impl std::fmt::Display) -> Flow {
+    write_line(stderr, message);
+    Flow::Next(2)
+}
+
+/// A builtin runtime error: `NAME: <detail>` on stderr, exit 1 — a
+/// well-formed invocation that failed to do what it asked (a missing
+/// file, a directory in the way, an OS error).
+pub(crate) fn command_error(stderr: OutTarget, message: impl std::fmt::Display) -> Flow {
+    write_line(stderr, message);
+    Flow::Next(1)
 }
 
 /// `exit [n]`: an explicit `n` must parse as an integer; with no

@@ -44,20 +44,21 @@ async fn a_shell_variable_expands_in_a_later_command() {
 
 #[tokio::test]
 async fn an_unset_variable_expands_to_nothing() {
-    // `cd $NOPE` with NOPE unset is `cd` with no argument: goes to HOME.
-    // Instead observe field dropping: `true $NOPE` must not break.
-    assert_eq!(run("true $NOPE_UNSET_VAR").await.0, 0);
+    // An unset variable expands to nothing and, as its own word, drops
+    // out of the argument list entirely rather than becoming an empty
+    // argument: `echo` sees exactly `before` and `after`.
+    let (code, lines) = run("echo before $NOPE_UNSET_VAR after").await;
+    assert_eq!(code, 0);
+    assert_eq!(stdout(&lines), vec!["before after"]);
 }
 
 #[tokio::test]
-#[ignore = "echo lands in task 6"]
 async fn double_quotes_prevent_field_splitting() {
     let (_, lines) = run(r#"A='x  y'; echo "$A""#).await;
     assert_eq!(stdout(&lines), vec!["x  y"]);
 }
 
 #[tokio::test]
-#[ignore = "echo lands in task 6"]
 async fn unquoted_expansion_field_splits() {
     let (_, lines) = run("A='x  y'; echo $A").await;
     assert_eq!(stdout(&lines), vec!["x y"]);
@@ -190,14 +191,12 @@ async fn an_escaped_backslash_is_one_literal_backslash() {
 }
 
 #[tokio::test]
-#[ignore = "echo lands in task 6"]
 async fn quoted_glob_characters_do_not_glob() {
     let (_, lines) = run(r#"echo "*""#).await;
     assert_eq!(stdout(&lines), vec!["*"]);
 }
 
 #[tokio::test]
-#[ignore = "echo lands in task 6"]
 async fn globs_sort_and_use_forward_slashes() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("d")).unwrap();

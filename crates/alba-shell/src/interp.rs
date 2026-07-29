@@ -352,7 +352,7 @@ async fn exec_command(
     let flow = if !has_path_separator(name)
         && let Some(builtin) = builtins::find(name)
     {
-        run_builtin(builtin, args, state, io).await
+        run_builtin(builtin, args, state, io, cancel).await
     } else {
         run_external_command(name, args, state, io, cancel).await
     };
@@ -367,12 +367,22 @@ async fn exec_command(
 /// would stall every other task — including, for a pipeline, the very
 /// stage meant to drain that pipe. The state travels into the blocking
 /// pool and back so a redirected `cd` or `export` still takes effect.
+///
+/// `sleep` never goes through any of that: it is dispatched straight to
+/// [`builtins::run_sleep`], a genuinely asynchronous, cancellable wait,
+/// so a cancellation lands the instant it fires rather than once a
+/// blocking-pool thread happens to notice.
 async fn run_builtin(
     builtin: Builtin,
     args: &[String],
     state: &mut ShellState,
     io: CommandIo,
+    cancel: &CancellationToken,
 ) -> Flow {
+    if builtin == Builtin::Sleep {
+        return builtins::run_sleep(args, io, cancel).await;
+    }
+
     if !io.can_block() {
         return builtins::run(builtin, args, state, io);
     }
