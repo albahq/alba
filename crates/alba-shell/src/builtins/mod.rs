@@ -4,7 +4,10 @@
 //! to an external — and an explicit path (`/bin/echo`) bypasses them.
 //! Task 6 extends this with output-producing builtins (`echo`, …).
 
-use crate::interp::{Flow, Lines};
+use std::io::Write;
+
+use crate::interp::Flow;
+use crate::io::{CommandIo, OutTarget};
 use crate::state::ShellState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,17 +38,35 @@ pub(crate) fn find(name: &str) -> Option<Builtin> {
     }
 }
 
-pub(crate) fn run(builtin: Builtin, args: &[String], state: &mut ShellState, io: &Lines) -> Flow {
+/// Runs `builtin` on the streams `io` describes. Synchronous by design:
+/// a builtin's writes may land on a pipe or a file, which blocks, so
+/// `interp::run_builtin` decides whether to call this inline or on the
+/// blocking pool.
+pub(crate) fn run(
+    builtin: Builtin,
+    args: &[String],
+    state: &mut ShellState,
+    io: CommandIo,
+) -> Flow {
+    // No builtin here reads its input. Letting `stdin` drop right away
+    // closes this end of an upstream pipe, so a producer in `cmd | pwd`
+    // is not left blocked writing into a pipe nobody will ever read.
+    let CommandIo {
+        stdin: _,
+        stdout,
+        stderr,
+    } = io;
+
     match builtin {
         Builtin::True => Flow::Next(0),
         Builtin::False => Flow::Next(1),
         Builtin::Exit => Flow::Exit(exit_code(args, state)),
         Builtin::Pwd => {
-            io.stdout(state.cwd.display().to_string());
+            write_line(stdout, state.cwd.display());
             Flow::Next(0)
         }
-        Builtin::Cd => cd(args, state, io),
-        Builtin::Export => export(args, state, io),
+        Builtin::Cd => cd(args, state, stderr),
+        Builtin::Export => export(args, state, stderr),
         Builtin::Unset => {
             for name in args {
                 state.unset(name);
@@ -53,6 +74,16 @@ pub(crate) fn run(builtin: Builtin, args: &[String], state: &mut ShellState, io:
             Flow::Next(0)
         }
     }
+}
+
+/// Writes one newline-terminated line to `target` and closes it. A
+/// failed write is deliberately ignored: a builtin whose output goes
+/// nowhere (a closed channel, a pipe whose reader has gone) still
+/// succeeds, exactly as it does when the receiving end of the run's
+/// output channel has been dropped.
+fn write_line(target: OutTarget, text: impl std::fmt::Display) {
+    let mut writer = target.writer();
+    let _ = writeln!(writer, "{text}");
 }
 
 /// `exit [n]`: an explicit `n` must parse as an integer; with no
@@ -64,13 +95,13 @@ fn exit_code(args: &[String], state: &ShellState) -> i32 {
     }
 }
 
-fn cd(args: &[String], state: &mut ShellState, io: &Lines) -> Flow {
+fn cd(args: &[String], state: &mut ShellState, stderr: OutTarget) -> Flow {
     let target = match args.first() {
         Some(path) => path.clone(),
         None => match state.home() {
             Some(home) => home.to_string(),
             None => {
-                io.stderr("cd: HOME not set");
+                write_line(stderr, "cd: HOME not set");
                 return Flow::Next(1);
             }
         },
@@ -88,7 +119,7 @@ fn cd(args: &[String], state: &mut ShellState, io: &Lines) -> Flow {
             Flow::Next(0)
         }
         _ => {
-            io.stderr(format!("cd: no such directory: {target}"));
+            write_line(stderr, format_args!("cd: no such directory: {target}"));
             Flow::Next(1)
         }
     }
@@ -97,14 +128,17 @@ fn cd(args: &[String], state: &mut ShellState, io: &Lines) -> Flow {
 /// `export NAME[=VALUE]...`: marks each name exported, setting its
 /// value when `=VALUE` is given. An invalid identifier is a usage
 /// error: stderr and exit 2, without processing the remaining names.
-fn export(args: &[String], state: &mut ShellState, io: &Lines) -> Flow {
+fn export(args: &[String], state: &mut ShellState, stderr: OutTarget) -> Flow {
     for arg in args {
         let (name, value) = match arg.split_once('=') {
             Some((name, value)) => (name, Some(value.to_string())),
             None => (arg.as_str(), None),
         };
         if !is_valid_name(name) {
-            io.stderr(format!("export: not a valid identifier: {name}"));
+            write_line(
+                stderr,
+                format_args!("export: not a valid identifier: {name}"),
+            );
             return Flow::Next(2);
         }
         state.export(name, value);

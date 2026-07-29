@@ -1,6 +1,6 @@
-//! Spawns a resolved external binary, streaming its stdout/stderr
-//! line-by-line back through `ShellEnv.output` and honouring
-//! cancellation with a graceful-then-forceful termination.
+//! Spawns a resolved external binary on the streams a `CommandIo`
+//! describes, honouring cancellation with a graceful-then-forceful
+//! termination.
 //!
 //! Ported from `alba-executors::shell::SystemShellExecutor`: this crate
 //! cannot depend on `alba-executors` (it must stay standalone), but the
@@ -8,18 +8,16 @@
 //! behaviour is the same — just wired to a resolved external binary
 //! instead of `sh -c`/`powershell -Command`.
 
+use std::io::Write;
 use std::path::Path;
-use std::process::{ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::ExitStatus;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::interp::Out;
-use crate::{ShellOutputLine, ShellStream};
+use crate::io::{CommandIo, OutTarget};
 
 /// How long to wait, after sending the platform's "please stop" signal,
 /// before escalating to a forceful kill.
@@ -46,10 +44,10 @@ const GRACE_PERIOD: Duration = Duration::from_secs(5);
 const DRAIN_PERIOD: Duration = Duration::from_secs(2);
 
 /// Runs `path` with `args` and `env` as its complete environment, cwd
-/// `cwd`, streaming stderr line-by-line to `output` and stdout to `out`
-/// (the real channel, line-by-line, or an in-memory capture buffer for
-/// command substitution — see `interp::Out`), honouring `cancel` with a
-/// graceful-then-forceful termination.
+/// `cwd`, on the three streams `io` describes — the run's output channel
+/// line-by-line, a capture buffer, a redirected file, or a pipeline
+/// neighbour — honouring `cancel` with a graceful-then-forceful
+/// termination.
 ///
 /// Returns the child's exit code; a spawn failure (the resolved path
 /// exists but cannot be executed) reports a stderr line and returns
@@ -61,35 +59,50 @@ pub(crate) async fn run_external(
     args: &[String],
     env: &[(String, String)],
     cwd: &Path,
-    out: &Out,
-    output: &UnboundedSender<ShellOutputLine>,
+    io: CommandIo,
     cancel: &CancellationToken,
 ) -> i32 {
-    let mut child = match build_command(path, args, env, cwd).spawn() {
+    let CommandIo {
+        stdin,
+        stdout,
+        stderr,
+    } = io;
+
+    // A second handle on the command's stderr, kept only until the spawn
+    // has been attempted: once `stderr` itself has become a `Stdio`
+    // there is no writer left to report a spawn failure through. It is
+    // dropped the moment the spawn succeeds — a lingering duplicate of a
+    // pipe's write end would leave the next stage waiting for an EOF
+    // that could never arrive.
+    let error_sink = stderr.try_clone();
+
+    let (stdout_stdio, stdout_task) = match stdout.into_stdio() {
+        Ok(prepared) => prepared,
+        Err(error) => return report_spawn_failure(error_sink, path, &error),
+    };
+    let (stderr_stdio, stderr_task) = match stderr.into_stdio() {
+        Ok(prepared) => prepared,
+        Err(error) => return report_spawn_failure(error_sink, path, &error),
+    };
+
+    let mut command = build_command(path, args, env, cwd);
+    command
+        .stdin(stdin.into_stdio())
+        .stdout(stdout_stdio)
+        .stderr(stderr_stdio);
+    let spawned = command.spawn();
+    // The `Command` still owns this process's copy of every handle it
+    // was given, including the write end of any pipe a forwarding task
+    // is reading: dropping it here is what lets that reader ever reach
+    // EOF. Holding it until the end of the function would deadlock the
+    // drain below.
+    drop(command);
+
+    let mut child = match spawned {
         Ok(child) => child,
-        Err(error) => {
-            let _ = output.send(ShellOutputLine {
-                stream: ShellStream::Stderr,
-                text: format!("alba-shell: failed to spawn {}: {error}", path.display()),
-            });
-            return 126;
-        }
+        Err(error) => return report_spawn_failure(error_sink, path, &error),
     };
-
-    let stdout = child
-        .stdout
-        .take()
-        .expect("child spawned with piped stdout");
-    let stderr = child
-        .stderr
-        .take()
-        .expect("child spawned with piped stderr");
-
-    let mut stdout_task = match out.clone() {
-        Out::Lines(sender) => tokio::spawn(stream_lines(stdout, ShellStream::Stdout, sender)),
-        Out::Capture(buffer) => tokio::spawn(capture_bytes(stdout, buffer)),
-    };
-    let mut stderr_task = tokio::spawn(stream_lines(stderr, ShellStream::Stderr, output.clone()));
+    drop(error_sink);
 
     let status: Option<ExitStatus> = tokio::select! {
         result = child.wait() => result.ok(),
@@ -97,23 +110,50 @@ pub(crate) async fn run_external(
     };
 
     // The child has exited (or been reaped after termination), so its
-    // pipes are closing/closed; let the reader tasks drain whatever is
-    // left, but only for up to DRAIN_PERIOD total — see its doc comment
-    // for why this must be bounded rather than an unconditional await.
-    // Both tasks share a single DRAIN_PERIOD budget (joined concurrently,
-    // not one after another): awaiting them sequentially would double
-    // the worst-case wait to `2 * DRAIN_PERIOD` for no benefit, since
-    // both pipes can stall for the same reason (a surviving descendant)
-    // at the same time.
+    // pipes are closing/closed; let the forwarding tasks drain whatever
+    // is left, but only for up to DRAIN_PERIOD total — see its doc
+    // comment for why this must be bounded rather than an unconditional
+    // await. Both tasks share a single DRAIN_PERIOD budget (joined
+    // concurrently, not one after another): awaiting them sequentially
+    // would double the worst-case wait to `2 * DRAIN_PERIOD` for no
+    // benefit, since both pipes can stall for the same reason (a
+    // surviving descendant) at the same time.
+    //
+    // Giving up here only stops *waiting*: the forwarding tasks live on
+    // the blocking pool (see `OutTarget::into_stdio`), where a task that
+    // has already started cannot be cancelled. Each ends by itself as
+    // soon as the last write end of the pipe it reads is closed.
     let drain = async {
-        let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        tokio::join!(join(stdout_task), join(stderr_task));
     };
-    if tokio::time::timeout(DRAIN_PERIOD, drain).await.is_err() {
-        stdout_task.abort();
-        stderr_task.abort();
-    }
+    let _ = tokio::time::timeout(DRAIN_PERIOD, drain).await;
 
     status.and_then(|s| s.code()).unwrap_or(-1)
+}
+
+/// Waits for a forwarding task, if this target needed one at all (a file
+/// or a pipeline neighbour is handed straight to the child, with nothing
+/// in between to wait for).
+async fn join(task: Option<JoinHandle<()>>) {
+    if let Some(task) = task {
+        let _ = task.await;
+    }
+}
+
+fn report_spawn_failure(
+    sink: std::io::Result<OutTarget>,
+    path: &Path,
+    error: &std::io::Error,
+) -> i32 {
+    if let Ok(sink) = sink {
+        let mut writer = sink.writer();
+        let _ = writeln!(
+            writer,
+            "alba-shell: failed to spawn {}: {error}",
+            path.display()
+        );
+    }
+    126
 }
 
 fn build_command(path: &Path, args: &[String], env: &[(String, String)], cwd: &Path) -> Command {
@@ -129,66 +169,13 @@ fn build_command(path: &Path, args: &[String], env: &[(String, String)], cwd: &P
     #[cfg(unix)]
     command.process_group(0);
 
+    // Streams are left to the caller: `run_external` sets them from the
+    // `CommandIo` it was handed.
     command
         .current_dir(cwd)
         .env_clear()
-        .envs(env.iter().cloned())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .envs(env.iter().cloned());
     command
-}
-
-/// Reads `reader` to EOF, splitting on `\n` and stripping a `\r` that
-/// immediately precedes it (the CRLF line endings a windows child
-/// produces), sending one [`ShellOutputLine`] per line. A final line
-/// with no trailing newline is still emitted; lines of any length are
-/// supported since the buffer grows as needed rather than being capped.
-async fn stream_lines<R>(reader: R, stream: ShellStream, output: UnboundedSender<ShellOutputLine>)
-where
-    R: AsyncRead + Unpin,
-{
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        buf.clear();
-        let n = match reader.read_until(b'\n', &mut buf).await {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
-        if buf.last() == Some(&b'\n') {
-            buf.pop();
-            if buf.last() == Some(&b'\r') {
-                buf.pop();
-            }
-        }
-        let text = String::from_utf8_lossy(&buf).into_owned();
-        // If the receiver has been dropped, nobody is listening for
-        // output anymore; keep draining the pipe regardless so the
-        // child is never blocked writing into a full pipe while it
-        // still runs.
-        let _ = output.send(ShellOutputLine { stream, text });
-    }
-}
-
-/// Reads `reader` to EOF and appends every byte read to `buffer`, for
-/// command substitution: unlike [`stream_lines`], nothing is split into
-/// lines or sent anywhere — the raw bytes are what `expand.rs` needs to
-/// preserve interior newlines while it strips only the trailing ones.
-async fn capture_bytes<R>(mut reader: R, buffer: Arc<Mutex<Vec<u8>>>)
-where
-    R: AsyncRead + Unpin,
-{
-    let mut data = Vec::new();
-    if reader.read_to_end(&mut data).await.is_ok() {
-        buffer
-            .lock()
-            .expect("capture buffer poisoned")
-            .extend_from_slice(&data);
-    }
 }
 
 /// Terminates a still-running child after cancellation: send the
@@ -260,51 +247,4 @@ async fn force_kill(child: &Child) {
 #[cfg(windows)]
 async fn force_kill(child: &mut Child) {
     let _ = child.kill().await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    async fn collect(data: &[u8]) -> Vec<String> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        stream_lines(Cursor::new(data.to_vec()), ShellStream::Stdout, tx).await;
-        let mut lines = Vec::new();
-        while let Ok(line) = rx.try_recv() {
-            lines.push(line.text);
-        }
-        lines
-    }
-
-    #[tokio::test]
-    async fn strips_trailing_cr_from_crlf_line_endings() {
-        assert_eq!(collect(b"hello\r\nworld\r\n").await, vec!["hello", "world"]);
-    }
-
-    #[tokio::test]
-    async fn emits_a_final_line_with_no_trailing_newline() {
-        assert_eq!(collect(b"first\nsecond").await, vec!["first", "second"]);
-    }
-
-    #[tokio::test]
-    async fn empty_input_emits_no_lines() {
-        assert_eq!(collect(b"").await, Vec::<String>::new());
-    }
-
-    #[tokio::test]
-    async fn a_lone_cr_not_followed_by_newline_is_preserved() {
-        // Only a `\r` immediately preceding the `\n` we split on is a
-        // line terminator artifact; a `\r` elsewhere in the line is
-        // real content.
-        assert_eq!(collect(b"a\rb\n").await, vec!["a\rb"]);
-    }
-
-    #[tokio::test]
-    async fn handles_a_very_long_line() {
-        let long_line = "x".repeat(200_000);
-        let mut data = long_line.clone().into_bytes();
-        data.push(b'\n');
-        assert_eq!(collect(&data).await, vec![long_line]);
-    }
 }

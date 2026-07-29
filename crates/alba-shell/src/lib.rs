@@ -7,6 +7,7 @@ mod builtins;
 mod error;
 mod expand;
 mod interp;
+mod io;
 mod lexer;
 mod parser;
 mod spawn;
