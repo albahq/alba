@@ -61,6 +61,25 @@ impl WatchProcess {
             }
         }
     }
+
+    /// The exit status, or a panic after the same 60s with the same
+    /// context. Polled rather than blocked on: a session that stops
+    /// honouring Ctrl-C must fail this test with a diagnostic instead of
+    /// hanging the suite, and a bare `wait()` cannot be rescued by `Drop`
+    /// — that only kills the process once `wait()` has already returned.
+    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "the session never exited; output so far:\n{}",
+            self.seen.join("\n")
+        )
+    }
 }
 
 impl Drop for WatchProcess {
@@ -153,6 +172,6 @@ fn sigint_ends_the_session_with_code_0() {
     )
     .unwrap();
 
-    let status = alba.child.wait().unwrap();
+    let status = alba.wait_for_exit();
     assert_eq!(status.code(), Some(0));
 }
