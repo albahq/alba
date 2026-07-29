@@ -19,3 +19,11 @@ nix = { workspace = true, features = ["signal"] }
 [dev-dependencies]
 insta = { workspace = true }
 tempfile = { workspace = true }
+
+# No libtest harness: the conformance binary doubles as the external
+# command its spawning cases invoke, and libtest's own output around a
+# test would leave nothing a frozen stdout expectation could match. See
+# the module comment in `tests/conformance.rs`.
+[[test]]
+name = "conformance"
+harness = false

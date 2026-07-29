@@ -1,7 +1,37 @@
+//! The cross-platform conformance suite: every frozen semantic as a
+//! script, its exit code, and its stdout lines, with no `cfg` anywhere in
+//! the expectations.
+//!
+//! Built without the test harness (`harness = false` in `Cargo.toml`) so
+//! this same binary can double as the external command some cases spawn:
+//! invoked with [`HELPER_FLAG`] it prints its marker and exits, and a
+//! case reaches it by substituting [`HELPER_PLACEHOLDER`] for
+//! `current_exe()`. That is the only portable way to put a real process
+//! behind a conformance case — no platform ships a command all three have
+//! — and it is what keeps `spawn.rs`'s process-group handling, PATH-free
+//! explicit-path resolution, environment passing, and line streaming
+//! inside the suite that exists to prove they behave identically
+//! everywhere. Under the harness the helper's output would arrive buried
+//! in libtest's own, which no frozen expectation could match.
+
 use std::path::PathBuf;
 
 use alba_shell::{ShellEnv, ShellStream, execute, parse};
 use tokio_util::sync::CancellationToken;
+
+/// The argument that turns this binary into the external command a case
+/// spawns instead of the suite that spawns it.
+const HELPER_FLAG: &str = "--alba-shell-conformance-helper";
+
+/// What a case writes where the helper's path belongs. Substituted, and
+/// single-quoted in the script, so a path with a space or a windows
+/// backslash in it stays one literal word.
+const HELPER_PLACEHOLDER: &str = "{HELPER}";
+
+/// The environment variable the helper echoes back when it is set, so a
+/// case can prove the child really received the environment the shell
+/// composed for it.
+const HELPER_ECHO_VAR: &str = "ALBA_MARK";
 
 /// Runs `src` in `cwd` and returns (exit code, output lines).
 async fn run_in(src: &str, cwd: PathBuf) -> (i32, Vec<(ShellStream, String)>) {
@@ -32,6 +62,8 @@ fn stdout(lines: &[(ShellStream, String)]) -> Vec<&str> {
 /// One frozen semantic: a script, the exit code it must produce, and the
 /// stdout lines it must produce, exercised fresh in its own tempdir
 /// against the standard fixture tree so no case can see another's state.
+/// A script containing [`HELPER_PLACEHOLDER`] has it replaced with the
+/// path of this binary before it runs.
 struct Case {
     name: &'static str,
     script: &'static str,
@@ -202,10 +234,93 @@ const CASES: &[Case] = &[
         want_exit: 0,
         want_stdout: &["a", "b"],
     },
+    Case {
+        // A command substitution keeps its interior newlines and loses
+        // only the trailing ones: quoted, the captured two lines stay two
+        // lines, with no third empty one from a newline that survived.
+        name: "subst_keeps_interior_newlines",
+        script: "echo \"$(cat a.txt b.txt)\"",
+        want_exit: 0,
+        want_stdout: &["alpha", "beta"],
+    },
+    Case {
+        // Unquoted, those same interior newlines are field separators
+        // like any other whitespace, so the two lines become two
+        // arguments on one line.
+        name: "subst_interior_newlines_split_unquoted",
+        script: "echo $(cat a.txt b.txt)",
+        want_exit: 0,
+        want_stdout: &["alpha beta"],
+    },
+    Case {
+        // Tilde expansion: only at the start of a word, only before a `/`
+        // or the end of the word, and never for `~user`. `HOME` is set by
+        // the script itself so the expected value is the same everywhere.
+        name: "tilde_expansion",
+        script: "HOME=/alba/home; echo ~/x ~ ~foo",
+        want_exit: 0,
+        want_stdout: &["/alba/home/x /alba/home ~foo"],
+    },
+    Case {
+        // A real external process: spawned from an explicit path, given
+        // the environment the shell composed (assignment prefix
+        // included), and its output split into lines on the way back.
+        name: "external_command",
+        script: "ALBA_MARK=beacon '{HELPER}' --alba-shell-conformance-helper",
+        want_exit: 0,
+        want_stdout: &["external command ok", "beacon"],
+    },
+    Case {
+        // The same external feeding a builtin through a real pipe, and
+        // its exit code left to the pipeline's last stage.
+        name: "external_command_into_a_pipeline",
+        script: "'{HELPER}' --alba-shell-conformance-helper | cat",
+        want_exit: 0,
+        want_stdout: &["external command ok"],
+    },
+    Case {
+        // An external's own exit code reaches the shell unchanged, and
+        // drives `||` like any builtin's would.
+        name: "external_command_exit_code",
+        script: "'{HELPER}' --alba-shell-conformance-helper --fail || echo recovered",
+        want_exit: 0,
+        want_stdout: &["external command ok", "recovered"],
+    },
 ];
 
-#[tokio::test]
-async fn conformance() {
+/// The external command the spawning cases reach: one marker line, the
+/// value of [`HELPER_ECHO_VAR`] when the shell passed it through, and
+/// exit 3 on `--fail`. Deliberately free of any dependency on this
+/// crate, so what it proves is what a real external process does.
+fn run_as_helper() -> i32 {
+    println!("external command ok");
+    if let Ok(mark) = std::env::var(HELPER_ECHO_VAR) {
+        println!("{mark}");
+    }
+    if std::env::args().any(|arg| arg == "--fail") {
+        return 3;
+    }
+    0
+}
+
+fn main() {
+    if std::env::args().any(|arg| arg == HELPER_FLAG) {
+        std::process::exit(run_as_helper());
+    }
+
+    let helper = std::env::current_exe().expect("the running test binary has a path");
+    let helper = helper.display().to_string();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(conformance(&helper));
+
+    println!("conformance: {} cases passed", CASES.len());
+}
+
+async fn conformance(helper: &str) {
     for case in CASES {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
@@ -213,7 +328,8 @@ async fn conformance() {
         std::fs::write(dir.path().join(".hidden"), "shh\n").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/c.txt"), "gamma\n").unwrap();
-        let (code, lines) = run_in(case.script, dir.path().to_path_buf()).await;
+        let script = case.script.replace(HELPER_PLACEHOLDER, helper);
+        let (code, lines) = run_in(&script, dir.path().to_path_buf()).await;
         assert_eq!(
             code, case.want_exit,
             "{}: exit code (lines: {lines:?})",
