@@ -126,6 +126,7 @@ Common to every subcommand:
 | `--keep-going` | Keep going after a beam fails, instead of cancelling the beams that have not started. |
 | `--output <STYLE>` | How text output is laid out: `interleaved` (every line as it happens, prefixed with the beam it came from) or `grouped` (each beam's output held back and printed as one block when it ends). Defaults to `interleaved` on a terminal and `grouped` otherwise. Ignored with `--log-format json`. |
 | `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line). Defaults to `text`. |
+| `--watch` | Keep running: re-run the beam whenever the files its subgraph declares as `inputs` change, or a loaded Beamfile changes. Ctrl-C ends the session. See [Watch mode](#watch-mode). |
 
 ### Exit codes
 
@@ -135,6 +136,14 @@ Common to every subcommand:
 | `1` | A beam failed (and was not `allow_failure`). |
 | `2` | Alba itself failed: a missing Beamfile, a parse or validation error, a bad invocation, an unschedulable run. |
 | `130` | The user interrupted the run (Ctrl-C). |
+
+`alba run --watch` reports differently, because a session outlives any single
+run inside it: every run already reported its own outcome as it happened, so
+there is nothing left to score at the process level once the session ends.
+An orderly Ctrl-C ends the session with `0`. `2` covers whatever keeps the
+session from being a session at all: a Beamfile that fails to load at
+startup, a file watcher that cannot start, or one that dies partway through
+and leaves nothing left to watch.
 
 ### Executors
 
@@ -176,6 +185,73 @@ The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
 `alba cache clean` removes it entirely; the next run of any beam starts
 from scratch and repopulates it. Alba never edits your `.gitignore`, so
 add `.alba/` to it yourself in any project that turns caching on.
+
+## Watch mode
+
+`alba run --watch [beam]` runs the beam, then keeps the session open and
+re-runs it whenever a relevant file changes. Like a plain `alba run`, an
+omitted beam falls back to the declared `default`, so a bare
+`alba run --watch` works too.
+
+What counts as relevant is exactly what the cache already tracks: the
+files the target's subgraph declares as `inputs`, the same declarations
+the cache fingerprints, so watch mode and the cache can never disagree
+about what a change is. Every Beamfile the project loaded is
+watched as well, so editing the Beamfile itself also triggers a run. A file
+that `.gitignore` excludes never triggers one, for the same reason it never
+enters the cache's fingerprint, and `.alba/` and `.git/` are excluded
+outright: the cache writing its own state must never wake the session that
+owns it. If no beam in the target's subgraph declares any `inputs`, Alba
+prints a warning once at startup, since such a session can still only react
+to a Beamfile edit.
+
+A change that lands while a run is still in progress cancels that run and
+starts a new one right away rather than waiting for it to finish. The most
+recent change always wins.
+
+Editing a loaded Beamfile reloads the project before the next run, so the
+session always schedules the beams as they are currently written. If the
+edit leaves the Beamfile unparsable, Alba renders the same diagnostic
+`alba check` would report for it, runs nothing, and sits idle until a later
+save produces a Beamfile that parses again, at which point the session
+resumes on its own.
+
+`--force` only applies to the run the session starts with. Every run the
+watcher triggers afterward reads the cache normally; forcing those too
+would mean rerunning the whole subgraph on every keystroke, which defeats
+the point of having a cache at all.
+
+Changes are debounced for a built-in 200 ms before they trigger a run
+(not a flag), so a save that touches several files at once, or an editor
+that writes a file more than once, produces a single run rather than
+several.
+
+Ctrl-C ends the session in an orderly way: every run inside it already
+reported its own outcome, so the process exits `0` rather than the `130`
+a single interrupted `alba run` reports. See [Exit codes](#exit-codes).
+
+On a terminal, the text renderers clear the screen before printing a
+triggered run, so each run starts on a clean page. This never happens with
+`--log-format json`, and never happens when stdout is not a terminal (a log
+file, a pipe): there is no screen to clear for a reader parsing the stream,
+and off a terminal the output accumulates as a record that clearing would
+destroy.
+
+Piped through `--log-format json`, a session's stream carries two event
+kinds beyond an ordinary run's: `watch_waiting` (`files`, how many resolved
+input files the session is watching) while it sits idle between runs, and
+`watch_triggered` (`paths`, the changed paths that caused the next run) the
+moment one starts. `paths` is an empty array when the trigger cannot be
+pinned to specific files, such as a Beamfile that was broken and has just
+started parsing again.
+
+Two things are worth knowing before leaning on watch mode. A beam that
+writes to a git-tracked file matched by its own `inputs` triggers itself on
+every run and loops forever, so keep generated output git-ignored. And
+watch roots are computed once at startup, from the project root and the
+directory of any Beamfile loaded from outside it: an import added
+mid-session whose directory lies outside those roots is not watched until
+the session is restarted.
 
 ## Embedded shell
 
