@@ -131,6 +131,14 @@ const CASES: &[Case] = &[
         want_stdout: &[".hidden"],
     },
     Case {
+        // `*/` asks for directories only, and resolves to them without
+        // the trailing separator it was written with.
+        name: "glob_trailing_slash_matches_directories",
+        script: "echo */",
+        want_exit: 0,
+        want_stdout: &["sub"],
+    },
+    Case {
         name: "unmatched_glob_literal",
         script: "echo *.zzz",
         want_exit: 0,

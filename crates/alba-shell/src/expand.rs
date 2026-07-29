@@ -342,7 +342,14 @@ fn resolve_glob(pattern: &str, state: &ShellState) -> Option<Vec<String>> {
         require_literal_leading_dot: true,
         ..walk
     };
-    let compiled = Pattern::new(&full_pattern).ok()?;
+    // Compiled without the trailing separator that `*/` (or `build/*/`)
+    // ends on, while the walk keeps it: `glob_with` reads it as "match
+    // directories only" and hands the match back *without* it, so a
+    // pattern that still carried it could never match its own results.
+    // Every candidate would be filtered out, the field would fall back to
+    // its literal text, and `rm -r -f */` would quietly remove nothing at
+    // all while reporting success.
+    let compiled = Pattern::new(without_trailing_separators(&full_pattern)).ok()?;
 
     let mut matches: Vec<String> = glob::glob_with(&full_pattern, walk)
         .ok()?
@@ -362,4 +369,13 @@ fn resolve_glob(pattern: &str, state: &ShellState) -> Option<Vec<String>> {
     }
     matches.sort();
     Some(matches)
+}
+
+/// `pattern` without the separators it ends on, for the re-test that the
+/// leading-dot rule needs. A pattern made of nothing but separators (`/`)
+/// is returned untouched rather than emptied, since an empty pattern
+/// matches only an empty path.
+fn without_trailing_separators(pattern: &str) -> &str {
+    let trimmed = pattern.trim_end_matches(std::path::is_separator);
+    if trimmed.is_empty() { pattern } else { trimmed }
 }

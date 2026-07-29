@@ -257,3 +257,37 @@ async fn last_exit_status_expands_inside_double_quotes() {
     let (_, lines) = run(r#"false; echo "status is $?""#).await;
     assert_eq!(stdout(&lines), vec!["status is 1"]);
 }
+
+#[tokio::test]
+async fn a_trailing_slash_glob_matches_directories() {
+    // `*/` is the idiom for "every directory here". It must resolve, and
+    // it must leave files out.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("keep")).unwrap();
+    std::fs::create_dir(dir.path().join("drop")).unwrap();
+    std::fs::write(dir.path().join("file.txt"), "").unwrap();
+    let (_, lines) = run_in("echo */", dir.path().to_path_buf()).await;
+    assert_eq!(stdout(&lines), vec!["drop keep"]);
+}
+
+#[tokio::test]
+async fn a_trailing_slash_glob_really_removes_what_it_matched() {
+    // The symptom that matters: a glob left literal turns `rm` into a
+    // silent no-op that still reports success.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("keep")).unwrap();
+    std::fs::create_dir(dir.path().join("drop")).unwrap();
+    let (code, lines) = run_in("rm -rf */ && echo done", dir.path().to_path_buf()).await;
+    assert_eq!(code, 0, "lines: {lines:?}");
+    assert!(!dir.path().join("keep").exists(), "lines: {lines:?}");
+    assert!(!dir.path().join("drop").exists(), "lines: {lines:?}");
+}
+
+#[tokio::test]
+async fn a_trailing_slash_glob_still_skips_hidden_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".hidden")).unwrap();
+    std::fs::create_dir(dir.path().join("visible")).unwrap();
+    let (_, lines) = run_in("echo */", dir.path().to_path_buf()).await;
+    assert_eq!(stdout(&lines), vec!["visible"]);
+}
