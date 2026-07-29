@@ -404,3 +404,31 @@ async fn a_lone_dash_and_a_double_dash_stay_usage_errors() {
     assert_eq!(run_in("rm - a.txt", dir.path().to_path_buf()).await.0, 2);
     assert_eq!(run_in("rm -- a.txt", dir.path().to_path_buf()).await.0, 2);
 }
+
+#[tokio::test]
+async fn test_negates_a_leading_bang() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "").unwrap();
+    let cwd = dir.path().to_path_buf();
+    // True branch: the negated condition is false, so `test !` succeeds.
+    assert_eq!(run_in("test ! -f missing.txt", cwd.clone()).await.0, 0);
+    // False branch: the negated condition is true, so `test !` fails.
+    assert_eq!(run_in("test ! -f f.txt", cwd.clone()).await.0, 1);
+    assert_eq!(run("test ! a = b && test ! 1 -gt 2").await.0, 0);
+}
+
+#[tokio::test]
+async fn bracket_negates_a_leading_bang() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "").unwrap();
+    let cwd = dir.path().to_path_buf();
+    assert_eq!(run_in("[ ! -f missing.txt ]", cwd.clone()).await.0, 0);
+    assert_eq!(run_in("[ ! -f f.txt ]", cwd).await.0, 1);
+}
+
+#[tokio::test]
+async fn a_negated_test_still_reports_a_malformed_operator() {
+    // The `!` must not swallow the diagnostic for what follows it.
+    let (code, lines) = run("test ! x -zz 1").await;
+    assert_eq!(code, 2, "lines: {lines:?}");
+}

@@ -129,6 +129,12 @@ const CASES: &[Case] = &[
         want_stdout: &["yes"],
     },
     Case {
+        name: "test_bang",
+        script: "test ! -f missing.txt && [ ! -d missing ] && echo both",
+        want_exit: 0,
+        want_stdout: &["both"],
+    },
+    Case {
         name: "negation",
         script: "! test -f missing.txt",
         want_exit: 0,

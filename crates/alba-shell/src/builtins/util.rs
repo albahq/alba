@@ -52,9 +52,10 @@ pub(crate) async fn sleep(args: &[String], stderr: OutTarget, cancel: &Cancellat
 /// non-emptiness; two arguments are a unary operator (`-f -d -e -z -n`)
 /// applied to the operand that follows; three are a left operand, a
 /// binary operator (`= != -eq -ne -lt -le -gt -ge`), and a right
-/// operand. The result is exit 0 (true) or 1 (false); a malformed
-/// invocation — an unknown operator, a numeric operand that is not a
-/// valid `i64`, or any other argument count — is a usage error, exit 2.
+/// operand. A leading `!` negates whatever the rest evaluates to. The
+/// result is exit 0 (true) or 1 (false); a malformed invocation — an
+/// unknown operator, a numeric operand that is not a valid `i64`, or any
+/// other argument count — is a usage error, exit 2.
 pub(crate) fn test(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
     finish(evaluate(args, cwd), "test", stderr)
 }
@@ -83,7 +84,18 @@ fn finish(result: Result<bool, String>, name: &str, stderr: OutTarget) -> Flow {
     }
 }
 
+/// A leading `!` negates the rest, recursively, so `! -f x` reads as the
+/// negation of `-f x` rather than as a three-argument expression whose
+/// operator is `-f` — which is what it looked like before, blaming a
+/// token the author never meant as an operator. `test !` on its own is
+/// still true, exactly as in POSIX, where the lone `!` is just a
+/// non-empty string.
 fn evaluate(args: &[String], cwd: &Path) -> Result<bool, String> {
+    if let Some((first, rest)) = args.split_first()
+        && first == "!"
+    {
+        return evaluate(rest, cwd).map(|result| !result);
+    }
     match args {
         [] => Ok(false),
         [only] => Ok(!only.is_empty()),

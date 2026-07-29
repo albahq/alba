@@ -125,7 +125,7 @@ error, never a silently different behavior.
 - Output: `echo` (only flag: `-n`; no escape interpretation; the classic bash/sh divergence is frozen)
 - Files: `cat`, `cp` (`-r`), `mv`, `rm` (`-r`, `-f`), `mkdir` (`-p`), `touch`
 - Utilities: `sleep` (seconds, decimals accepted), `test` / `[` (`-f`, `-d`, `-e`, `-z`, `-n`, `=`, `!=`, `-eq`,
-  `-ne`, `-lt`, `-le`, `-gt`, `-ge`)
+  `-ne`, `-lt`, `-le`, `-gt`, `-ge`, and a leading `!` negating the rest)
 
 A builtin always takes precedence over a PATH binary of the same name; that determinism is the point. A system
 binary remains reachable through an explicit path (`/bin/echo`).
