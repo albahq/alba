@@ -183,14 +183,21 @@ mod tests {
     use alba_core::{BeamId, load_project};
 
     /// A real project on disk: a Beamfile whose `build` beam watches
-    /// `src/**/*.rs`, one matching source file, one git-ignored artifact
-    /// directory that also matches the pattern shape.
+    /// `src/**/*.rs`, one matching source file, and two git-ignored
+    /// artifacts. `target/gen.rs` fails the `src/**/*.rs` pattern outright
+    /// (`target/` isn't under `src/`), so it is rejected by the cheap
+    /// pre-filter alone. `src/generated/gen.rs` genuinely matches the
+    /// pattern's shape, so rejecting it depends on `.gitignore` handling
+    /// — only reachable once `classify` falls through to re-running
+    /// `expand_globs`.
     fn project_on_disk() -> (tempfile::TempDir, WatchSet) {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\nsrc/generated/\n").unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/generated")).unwrap();
         std::fs::create_dir_all(dir.path().join("target")).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("src/generated/gen.rs"), "generated").unwrap();
         std::fs::write(dir.path().join("target/gen.rs"), "generated").unwrap();
         std::fs::write(
             dir.path().join("Beamfile"),
@@ -222,15 +229,20 @@ mod tests {
         ));
     }
 
-    /// The typical feedback-loop path: a build artifact whose name shape
-    /// matches the pattern but that `.gitignore` declares uninteresting.
+    /// Both git-ignored artifacts are rejected, but for different reasons —
+    /// see `project_on_disk`. `src/generated/gen.rs` is the case that
+    /// actually proves `.gitignore` handling: it would classify as `Input`
+    /// if `classify` answered from the pattern match alone, without ever
+    /// consulting `expand_globs`.
     #[test]
     fn a_gitignored_file_never_triggers() {
         let (dir, mut set) = project_on_disk();
-        assert!(matches!(
-            set.classify(&dir.path().join("target/gen.rs")),
-            Relevance::Irrelevant
-        ));
+        for gitignored in ["target/gen.rs", "src/generated/gen.rs"] {
+            assert!(matches!(
+                set.classify(&dir.path().join(gitignored)),
+                Relevance::Irrelevant
+            ));
+        }
     }
 
     #[test]
@@ -282,7 +294,10 @@ mod tests {
     #[test]
     fn file_count_counts_the_resolved_inputs() {
         let (_dir, set) = project_on_disk();
-        assert_eq!(set.file_count(), 1); // src/lib.rs; target/gen.rs is ignored
+        // src/lib.rs only: src/generated/gen.rs matches the pattern too, so
+        // this count would be 2 if `expand_globs`'s own `.gitignore`
+        // handling weren't what's actually doing the excluding.
+        assert_eq!(set.file_count(), 1);
     }
 
     /// Only the target's subgraph is watched: `free`'s absence of inputs
