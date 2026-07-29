@@ -102,7 +102,7 @@ pub(crate) fn run(
     match builtin {
         Builtin::True => Flow::Next(0),
         Builtin::False => Flow::Next(1),
-        Builtin::Exit => Flow::Exit(exit_code(args, state)),
+        Builtin::Exit => exit(args, state, stderr),
         Builtin::Pwd => {
             write_line(stdout, state.cwd.display());
             Flow::Next(0)
@@ -214,10 +214,24 @@ pub(crate) fn take_flags<'a, 'k>(
 
 /// `exit [n]`: an explicit `n` must parse as an integer; with no
 /// argument, the code of the last completed command.
-fn exit_code(args: &[String], state: &ShellState) -> i32 {
+///
+/// A non-numeric `n` is a usage error like any other, exit 2, rather
+/// than a silent fall back to the last code — which would let `exit
+/// $VERSION` on an unset variable end a beam in success. The program
+/// still stops: `exit` always exits, whatever it was handed.
+fn exit(args: &[String], state: &ShellState, stderr: OutTarget) -> Flow {
     match args.first() {
-        Some(n) => n.parse().unwrap_or(state.last_exit),
-        None => state.last_exit,
+        None => Flow::Exit(state.last_exit),
+        Some(code) => match code.parse() {
+            Ok(code) => Flow::Exit(code),
+            Err(_) => {
+                write_line(
+                    stderr,
+                    format_args!("exit: numeric argument required: {code}"),
+                );
+                Flow::Exit(2)
+            }
+        },
     }
 }
 

@@ -345,3 +345,28 @@ async fn an_absolute_path_bypasses_the_builtin_of_the_same_name() {
         "an explicit path must run the external script, not the silent `true` builtin"
     );
 }
+
+#[tokio::test]
+async fn exit_rejects_a_non_numeric_argument() {
+    // Falling back to the last command's code would silently turn a typo
+    // into a success. Exit 2, the code every builtin usage error uses,
+    // with the complaint on stderr.
+    let (code, lines) = run("true; exit abc; pwd").await;
+    assert_eq!(code, 2, "lines: {lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|(stream, text)| *stream == ShellStream::Stderr
+                && text.contains("exit: numeric argument required: abc")),
+        "lines: {lines:?}"
+    );
+    assert!(
+        stdout(&lines).is_empty(),
+        "a rejected `exit` still stops the program, lines: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn exit_without_an_argument_still_uses_the_last_code() {
+    assert_eq!(run("false; exit").await.0, 1);
+}
