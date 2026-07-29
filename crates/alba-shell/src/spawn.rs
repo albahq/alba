@@ -76,14 +76,8 @@ pub(crate) async fn run_external(
     // that could never arrive.
     let error_sink = stderr.try_clone();
 
-    let (stdout_stdio, stdout_task) = match stdout.into_stdio() {
-        Ok(prepared) => prepared,
-        Err(error) => return report_spawn_failure(error_sink, path, &error),
-    };
-    let (stderr_stdio, stderr_task) = match stderr.into_stdio() {
-        Ok(prepared) => prepared,
-        Err(error) => return report_spawn_failure(error_sink, path, &error),
-    };
+    let (stdout_stdio, stdout_sink) = stdout.into_stdio();
+    let (stderr_stdio, stderr_sink) = stderr.into_stdio();
 
     let mut command = build_command(path, args, env, cwd);
     command
@@ -92,10 +86,10 @@ pub(crate) async fn run_external(
         .stderr(stderr_stdio);
     let spawned = command.spawn();
     // The `Command` still owns this process's copy of every handle it
-    // was given, including the write end of any pipe a forwarding task
-    // is reading: dropping it here is what lets that reader ever reach
-    // EOF. Holding it until the end of the function would deadlock the
-    // drain below.
+    // was given, including the write end of a pipeline pipe and any
+    // redirected file: dropping it here is what lets the next stage's
+    // reader ever reach EOF. Holding it until the end of the function
+    // would deadlock a downstream stage.
     drop(command);
 
     let mut child = match spawned {
@@ -103,6 +97,24 @@ pub(crate) async fn run_external(
         Err(error) => return report_spawn_failure(error_sink, path, &error),
     };
     drop(error_sink);
+
+    // A sink comes back exactly when `into_stdio` asked for
+    // `Stdio::piped()`, which is exactly when the child has a handle to
+    // take, so these two always agree.
+    let mut stdout_task = stdout_sink.map(|sink| {
+        let handle = child
+            .stdout
+            .take()
+            .expect("child spawned with piped stdout");
+        tokio::spawn(sink.forward(handle))
+    });
+    let mut stderr_task = stderr_sink.map(|sink| {
+        let handle = child
+            .stderr
+            .take()
+            .expect("child spawned with piped stderr");
+        tokio::spawn(sink.forward(handle))
+    });
 
     let status: Option<ExitStatus> = tokio::select! {
         result = child.wait() => result.ok(),
@@ -119,14 +131,19 @@ pub(crate) async fn run_external(
     // benefit, since both pipes can stall for the same reason (a
     // surviving descendant) at the same time.
     //
-    // Giving up here only stops *waiting*: the forwarding tasks live on
-    // the blocking pool (see `OutTarget::into_stdio`), where a task that
-    // has already started cannot be cancelled. Each ends by itself as
-    // soon as the last write end of the pipe it reads is closed.
+    // Aborting on timeout is what makes that bound real rather than
+    // cosmetic: it drops the task, closing this process's read end of a
+    // pipe a stray descendant is still holding open. Without it the
+    // reader would live on past this call — and, because dropping a
+    // runtime waits for its tasks, could keep the whole host process
+    // from exiting.
     let drain = async {
-        tokio::join!(join(stdout_task), join(stderr_task));
+        tokio::join!(join(stdout_task.as_mut()), join(stderr_task.as_mut()));
     };
-    let _ = tokio::time::timeout(DRAIN_PERIOD, drain).await;
+    if tokio::time::timeout(DRAIN_PERIOD, drain).await.is_err() {
+        abort(stdout_task.as_ref());
+        abort(stderr_task.as_ref());
+    }
 
     status.and_then(|s| s.code()).unwrap_or(-1)
 }
@@ -134,9 +151,15 @@ pub(crate) async fn run_external(
 /// Waits for a forwarding task, if this target needed one at all (a file
 /// or a pipeline neighbour is handed straight to the child, with nothing
 /// in between to wait for).
-async fn join(task: Option<JoinHandle<()>>) {
+async fn join(task: Option<&mut JoinHandle<()>>) {
     if let Some(task) = task {
         let _ = task.await;
+    }
+}
+
+fn abort(task: Option<&JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
     }
 }
 

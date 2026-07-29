@@ -5,7 +5,8 @@
 //! capture buffer (command substitution), a redirected file, or one end
 //! of an `os_pipe` connecting two pipeline stages. Both dispatch paths
 //! consume it — `spawn.rs` turns each target into a `std::process::Stdio`
-//! ([`OutTarget::into_stdio`]), builtins turn theirs into a blocking
+//! ([`OutTarget::into_stdio`]) and drains the child's handle back into
+//! it ([`OutTarget::forward`]), builtins turn theirs into a blocking
 //! [`std::io::Write`] ([`OutTarget::writer`]).
 //!
 //! Ownership is the whole point of the module: a pipe's write end must
@@ -18,8 +19,8 @@ use std::io::Write;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
 
 use crate::{ShellOutputLine, ShellStream};
 
@@ -79,13 +80,20 @@ impl CommandIo {
         })
     }
 
-    /// Whether writing to these streams can block the calling thread.
-    /// A file or a pipe can (a full pipe blocks until its reader
-    /// drains), so a builtin holding one belongs in
+    /// Whether using these streams can block the calling thread. A file
+    /// or a pipe can — a full pipe blocks its writer until the reader
+    /// drains, an empty one blocks its reader until the writer produces
+    /// — so a builtin holding any of the three belongs in
     /// `tokio::task::spawn_blocking`; the channel and the capture buffer
-    /// never do.
+    /// never do, and `Null` yields EOF immediately.
+    ///
+    /// Stdin counts even though no builtin reads it yet: the moment one
+    /// does, a last pipeline stage would have a non-blocking stdout and
+    /// a blocking stdin, and running it inline would park a runtime
+    /// thread on the pipe feeding it — quite possibly the very thread
+    /// its own producer needs.
     pub(crate) fn can_block(&self) -> bool {
-        self.stdout.can_block() || self.stderr.can_block()
+        self.stdin.can_block() || self.stdout.can_block() || self.stderr.can_block()
     }
 }
 
@@ -111,42 +119,60 @@ impl OutTarget {
     }
 
     /// Turns this target into something a child process can be spawned
-    /// with. A file or a pipe is handed straight over; the channel and
-    /// the capture buffer are not file descriptors, so they get a fresh
-    /// `os_pipe` whose read end a forwarding task drains — the returned
-    /// [`JoinHandle`] is that task, which the caller must let finish so
-    /// no output is lost.
+    /// with. A file or a pipeline neighbour's pipe is a file descriptor
+    /// already, so it is handed straight over and nothing comes back.
+    /// The channel and the capture buffer are not, so the child gets
+    /// `Stdio::piped()` and this target comes back as the sink the
+    /// caller must [`forward`](Self::forward) the child's handle into.
     ///
-    /// The returned `Stdio` owns the only remaining parent-side handle
-    /// on the write end: the caller must drop it (by dropping the
-    /// `Command` it was given to) right after spawning, or the
-    /// forwarding task waits forever for an EOF that cannot come.
-    pub(crate) fn into_stdio(self) -> std::io::Result<(Stdio, Option<JoinHandle<()>>)> {
+    /// Deliberately *tokio's* pipe rather than one made here: only a
+    /// handle tokio created can be read with cancel-safe async io on
+    /// both unix and windows, and only an async reader can be aborted
+    /// when `spawn::run_external`'s drain gives up. An `os_pipe` read
+    /// would have to happen on a blocking thread that nothing can
+    /// interrupt, which would pin that thread — and, since dropping a
+    /// runtime waits for its blocking tasks, the whole host process —
+    /// for as long as a stray descendant held the write end open.
+    ///
+    /// The returned `Stdio` may own this process's only remaining handle
+    /// on a pipe's write end (the `File`/`Pipe` arms), so the caller
+    /// must drop it — by dropping the `Command` it was given to — right
+    /// after spawning.
+    pub(crate) fn into_stdio(self) -> (Stdio, Option<Self>) {
         match self {
-            Self::File(file) => Ok((Stdio::from(file), None)),
-            Self::Pipe(writer) => Ok((Stdio::from(writer), None)),
-            sink @ (Self::Lines { .. } | Self::Capture(_)) => {
-                let (reader, writer) = os_pipe::pipe()?;
-                // `spawn_blocking`, not `spawn`: `os_pipe`'s reader is a
-                // synchronous handle, and tokio has no portable async
-                // wrapper for an anonymous pipe (its `net::unix::pipe`
-                // is unix-only, and windows anonymous pipes are not
-                // overlapped). The trade-off is that this task cannot be
-                // aborted; see `spawn::run_external`'s drain.
-                let task = tokio::task::spawn_blocking(move || {
-                    let mut reader = reader;
-                    let mut sink = sink.writer();
-                    let _ = std::io::copy(&mut reader, &mut sink);
-                });
-                Ok((Stdio::from(writer), Some(task)))
+            Self::File(file) => (Stdio::from(file), None),
+            Self::Pipe(writer) => (Stdio::from(writer), None),
+            sink @ (Self::Lines { .. } | Self::Capture(_)) => (Stdio::piped(), Some(sink)),
+        }
+    }
+
+    /// Drains `reader` — a child's piped stdout or stderr — into this
+    /// target, to EOF or to the first error.
+    ///
+    /// Only ever called on the two targets [`into_stdio`](Self::into_stdio)
+    /// hands back, whose writes never block: sending on an unbounded
+    /// channel and appending to a buffer both return immediately, so
+    /// doing them from an async task is safe. Reading, the part that
+    /// does wait, is asynchronous and therefore abortable.
+    pub(crate) async fn forward(self, mut reader: impl AsyncRead + Unpin) {
+        let mut writer = self.writer();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if writer.write_all(&buffer[..read]).is_err() {
+                        break;
+                    }
+                }
             }
         }
     }
 
     /// A blocking writer onto this target, for builtins (and for
-    /// [`into_stdio`](Self::into_stdio)'s forwarding task). Writing a
-    /// `Lines` target emits one [`ShellOutputLine`] per `\n`, with a
-    /// final unterminated line flushed on drop.
+    /// [`forward`](Self::forward)). Writing a `Lines` target emits one
+    /// [`ShellOutputLine`] per `\n`, with a final unterminated line
+    /// flushed on drop.
     pub(crate) fn writer(self) -> Box<dyn Write + Send> {
         match self {
             Self::Lines { tx, stream } => Box::new(LineWriter {
@@ -168,6 +194,10 @@ impl InTarget {
             Self::File(file) => Stdio::from(file),
             Self::Pipe(reader) => Stdio::from(reader),
         }
+    }
+
+    fn can_block(&self) -> bool {
+        matches!(self, Self::File(_) | Self::Pipe(_))
     }
 }
 
