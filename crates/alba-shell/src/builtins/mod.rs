@@ -168,9 +168,18 @@ pub(crate) fn command_error(stderr: OutTarget, message: impl std::fmt::Display) 
 }
 
 /// Consumes leading flags from `known` off the front of `args`, in any
-/// order, stopping at the first argument that is not one of them. That
-/// first stray `-`-prefixed argument is returned as the error, so the
-/// caller can report exactly which option it did not recognize.
+/// order, stopping at the first argument that is not one of them.
+///
+/// A `-`-prefixed argument is decomposed letter by letter, so `-rf` is
+/// exactly `-r -f` and `-pv` names `-p` and `-v` separately: the grouped
+/// spelling is what real scripts write, and treating it as one opaque
+/// option would reject `rm -rf` outright. The error carries the single
+/// option that was not recognized (`-z` for `rm -rz`), never the group it
+/// was written in, so the message blames the right letter.
+///
+/// A lone `-` and a `--` are both rejected: neither means anything to any
+/// builtin here (none reads standard input by name, and none has enough
+/// of a flag surface for an end-of-options marker to be worth freezing).
 ///
 /// `known: &[]` still has a job: a builtin with no flag surface at all
 /// (`mv`, `touch`, `cat`) calls this the same way, and it rejects any
@@ -178,21 +187,27 @@ pub(crate) fn command_error(stderr: OutTarget, message: impl std::fmt::Display) 
 /// ("anything outside a builtin's documented flag surface is a usage
 /// error") applies precisely because their surface is empty, not
 /// despite it.
-pub(crate) fn take_flags<'a>(
+pub(crate) fn take_flags<'a, 'k>(
     args: &'a [String],
-    known: &[&str],
-) -> Result<(Vec<&'a str>, &'a [String]), &'a str> {
+    known: &'k [&'k str],
+) -> Result<(Vec<&'k str>, &'a [String]), String> {
     let mut seen = Vec::new();
     let mut rest = args;
     while let Some(first) = rest.first() {
-        if known.contains(&first.as_str()) {
-            seen.push(first.as_str());
-            rest = &rest[1..];
-        } else if first.starts_with('-') {
-            return Err(first);
-        } else {
+        let Some(letters) = first.strip_prefix('-') else {
             break;
+        };
+        if letters.is_empty() {
+            return Err(first.clone());
         }
+        for letter in letters.chars() {
+            let spelled = format!("-{letter}");
+            match known.iter().copied().find(|flag| *flag == spelled) {
+                Some(flag) => seen.push(flag),
+                None => return Err(spelled),
+            }
+        }
+        rest = &rest[1..];
     }
     Ok((seen, rest))
 }

@@ -143,6 +143,14 @@ const CASES: &[Case] = &[
         want_stdout: &[],
     },
     Case {
+        // The grouped spelling every real script writes: `-rf` must mean
+        // exactly `-r -f`, on every platform.
+        name: "clean_rebuild_dir_grouped_flags",
+        script: "rm -rf dist && mkdir dist && test -d dist",
+        want_exit: 0,
+        want_stdout: &[],
+    },
+    Case {
         name: "exit_code_propagates",
         script: "exit 4",
         want_exit: 4,

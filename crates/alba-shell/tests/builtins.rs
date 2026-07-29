@@ -370,3 +370,37 @@ async fn an_explicit_path_bypasses_the_builtin_lookup_entirely() {
     let (code, lines) = run_in("./true", dir.path().to_path_buf()).await;
     assert_eq!(code, 127, "lines: {lines:?}");
 }
+
+#[tokio::test]
+async fn grouped_short_flags_are_decomposed() {
+    // `rm -rf` is the spelling every real script uses, and it must mean
+    // exactly `rm -r -f`; likewise `mkdir -pv` would name `-p` and `-v`
+    // separately rather than one unknown option called `-pv`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("dist/nested")).unwrap();
+    std::fs::write(dir.path().join("dist/nested/old.js"), "x").unwrap();
+    let (code, lines) = run_in("rm -rf dist && mkdir dist", dir.path().to_path_buf()).await;
+    assert_eq!(code, 0, "lines: {lines:?}");
+    assert!(dir.path().join("dist").is_dir());
+    assert!(!dir.path().join("dist/nested").exists());
+}
+
+#[tokio::test]
+async fn a_grouped_flag_reports_the_single_letter_it_did_not_know() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, lines) = run_in("rm -rz a.txt", dir.path().to_path_buf()).await;
+    assert_eq!(code, 2, "lines: {lines:?}");
+    assert!(
+        lines.iter().any(
+            |(stream, text)| *stream == ShellStream::Stderr && text == "rm: invalid option: -z"
+        ),
+        "lines: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_lone_dash_and_a_double_dash_stay_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(run_in("rm - a.txt", dir.path().to_path_buf()).await.0, 2);
+    assert_eq!(run_in("rm -- a.txt", dir.path().to_path_buf()).await.0, 2);
+}
