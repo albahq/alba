@@ -962,6 +962,15 @@ fn build_executor(
 
     match decl.name.value.as_str() {
         "shell" => Ok(ExecutorKind::Shell),
+        "system_shell" => {
+            if !decl.options.is_empty() {
+                return Err(CoreError::new(
+                    "executor `system_shell` takes no options".to_string(),
+                    decl.name.span,
+                ));
+            }
+            Ok(ExecutorKind::SystemShell)
+        }
         "docker" => {
             let image = options.remove("image").ok_or_else(|| {
                 CoreError::new(
@@ -973,10 +982,12 @@ fn build_executor(
         }
         other => {
             let err = CoreError::new(format!("unknown executor `{other}`"), decl.name.span);
-            Err(match suggest(other, ["shell", "docker"].into_iter()) {
-                Some(c) => err.with_help(format!("did you mean `{c}`?")),
-                None => err,
-            })
+            Err(
+                match suggest(other, ["shell", "system_shell", "docker"].into_iter()) {
+                    Some(c) => err.with_help(format!("did you mean `{c}`?")),
+                    None => err,
+                },
+            )
         }
     }
 }
@@ -1415,6 +1426,28 @@ beam b { run "x" }
         let err = load_str(r#"beam deploy { executor dokcer { image "x" } run "y" }"#).unwrap_err();
         assert!(err.message.contains("unknown executor"));
         assert_eq!(err.help.as_deref(), Some("did you mean `docker`?"));
+    }
+
+    #[test]
+    fn system_shell_executor_maps_to_its_kind() {
+        let project = load_str("beam b {\n  executor system_shell\n  run \"x\"\n}").unwrap();
+        assert_eq!(project.beams[0].executor, ExecutorKind::SystemShell);
+    }
+
+    #[test]
+    fn system_shell_rejects_options() {
+        let err = load_str("beam b {\n  executor system_shell { image \"i\" }\n  run \"x\"\n}")
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `system_shell` takes no options")
+        );
+    }
+
+    #[test]
+    fn unknown_executor_suggestions_include_system_shell() {
+        let err = load_str("beam b {\n  executor system_shel\n  run \"x\"\n}").unwrap_err();
+        assert_eq!(err.help.as_deref(), Some("did you mean `system_shell`?"));
     }
 
     #[test]

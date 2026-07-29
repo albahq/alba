@@ -320,7 +320,17 @@ impl<'a> Parser<'a> {
 
     fn parse_executor_decl(&mut self) -> Result<ExecutorDecl, ParseError> {
         let name = self.eat_ident()?;
-        self.expect(TokenKind::LBrace, "`{`")?;
+        // The `{ ... }` options block is optional: executors that take no
+        // options (`shell`, `system_shell`) can be declared as a bare name.
+        // Which names actually accept no options is `alba-core`'s concern,
+        // not the parser's.
+        if !self.check(&TokenKind::LBrace) {
+            return Ok(ExecutorDecl {
+                name,
+                options: Vec::new(),
+            });
+        }
+        self.advance();
         let mut options = Vec::new();
         while !self.check(&TokenKind::RBrace) {
             let opt_name = self.eat_ident()?;
@@ -675,6 +685,26 @@ beam deploy(target) {
             &beam.env[0].1.parts[..],
             [crate::TemplatePart::Expr(crate::Expr::Var(v))] if v.value == "target"
         ));
+    }
+
+    /// `executor system_shell` and `executor shell` name an executor that
+    /// takes no options, so the `{ ... }` block is optional. Which names
+    /// are actually valid executors is `alba-core`'s concern, not the
+    /// parser's — the parser only decides whether a block follows.
+    #[test]
+    fn executor_without_a_block_parses() {
+        let file = parse("beam b {\n  executor system_shell\n  run \"x\"\n}").unwrap();
+        let executor = file.beams[0].executor.as_ref().unwrap();
+        assert_eq!(executor.name.value, "system_shell");
+        assert!(executor.options.is_empty());
+    }
+
+    #[test]
+    fn executor_with_a_block_still_parses() {
+        let file = parse("beam b {\n  executor docker { image \"i\" }\n  run \"x\"\n}").unwrap();
+        let executor = file.beams[0].executor.as_ref().unwrap();
+        assert_eq!(executor.name.value, "docker");
+        assert_eq!(executor.options[0].0.value, "image");
     }
 
     #[test]

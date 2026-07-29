@@ -31,9 +31,13 @@ pub struct BeamId(pub String);
 /// How a beam's commands run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutorKind {
-    /// The default: the system shell. Which shell implementation
-    /// actually runs a beam is the engine's concern, not this model's.
+    /// The default, when a beam declares no `executor` field at all.
+    /// Which shell implementation actually runs a beam is the engine's
+    /// concern, not this model's.
     Shell,
+    /// `executor system_shell`: the host shell, the per-beam opt-out from
+    /// the embedded shell.
+    SystemShell,
     /// `executor docker { image "..." }`. The engine rejects this at run
     /// time until the docker executor exists; this crate only carries the
     /// image name through the model.
