@@ -424,8 +424,20 @@ async fn a_beamfile_change_reloads_and_reruns() {
     );
     session.send(vec![beamfile]);
 
+    // One trigger announces the whole cycle: the reload and the run that
+    // follows it are the answer to that one change, so nothing further is
+    // announced before the session settles back into waiting.
     session.event_matching(is_triggered).await;
-    session.event_matching(is_run_finished).await;
+    let mut further_triggers = 0;
+    loop {
+        let event = session.event().await;
+        further_triggers += usize::from(is_triggered(&event));
+        if is_waiting(&event) {
+            break;
+        }
+    }
+    assert_eq!(further_triggers, 0);
+
     let commands: Vec<String> = session
         .executor
         .calls()
@@ -460,12 +472,18 @@ async fn a_broken_beamfile_reports_waits_and_recovers() {
     assert_eq!(*errors.lock().unwrap(), vec![ObservedError::Load]);
     assert_eq!(session.executor.calls().len(), calls_before);
 
-    // The fix arrives: reload succeeds and the session runs again.
+    // The fix arrives: reload succeeds and the session runs again. The
+    // recovery announces itself — the earlier trigger belonged to the
+    // breaking edit, and the error report closed that cycle.
     session.touch(
         "Beamfile",
         "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-fixed\" }\n",
     );
     session.send(vec![beamfile]);
+    let RunEvent::WatchTriggered { paths } = session.event_matching(is_triggered).await else {
+        unreachable!()
+    };
+    assert!(paths.is_empty());
     session.event_matching(is_run_finished).await;
     assert!(
         session
@@ -498,11 +516,17 @@ async fn a_renamed_target_reports_and_recovers_on_the_next_edit() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(errors.lock().unwrap().contains(&ObservedError::Run));
 
+    // Recovery from an unbuildable watched set announces itself the same
+    // way recovery from an unparsable Beamfile does.
     session.touch(
         "Beamfile",
         "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-back\" }\n",
     );
     session.send(vec![beamfile]);
+    let RunEvent::WatchTriggered { paths } = session.event_matching(is_triggered).await else {
+        unreachable!()
+    };
+    assert!(paths.is_empty());
     session.event_matching(is_run_finished).await;
 
     session.finish().await;

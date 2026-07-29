@@ -127,6 +127,7 @@ pub async fn watch(
                 {
                     Reloaded::Project(fresh_project, fresh_sources) => {
                         (project, sources) = (fresh_project, fresh_sources);
+                        announce_recovery(&events);
                         continue;
                     }
                     Reloaded::Exit(exit) => return exit,
@@ -214,8 +215,7 @@ pub async fn watch(
         // The next iteration schedules the beams as they are now written,
         // not as they were when the session started. Whichever way the
         // project comes back, it is the loop's next iteration that rebuilds
-        // the watched set and runs: the trigger above already announced
-        // this cycle, and a recovery must not announce a second one.
+        // the watched set and runs.
         if trigger.beamfile {
             match alba_core::load_project(beamfile) {
                 Ok((fresh_project, fresh_sources)) => {
@@ -228,6 +228,7 @@ pub async fn watch(
                     {
                         Reloaded::Project(fresh_project, fresh_sources) => {
                             (project, sources) = (fresh_project, fresh_sources);
+                            announce_recovery(&events);
                         }
                         Reloaded::Exit(exit) => return exit,
                     }
@@ -340,6 +341,23 @@ fn relative_to(root: &Path, canonical_root: Option<&Path>, path: &Path) -> PathB
         return relative.to_path_buf();
     }
     path.to_path_buf()
+}
+
+/// Announces the run that a recovered project is about to get.
+///
+/// The asymmetry with the reload that succeeds outright, which stays
+/// silent: there, the trigger just emitted announced the Beamfile change,
+/// and the run is that change being answered — one trigger, one cycle. A
+/// recovery has no such trigger to lean on. The one it could point at
+/// announced the *breaking* edit, and that cycle was closed by an error
+/// report; without this, the fixing save would produce a full run of
+/// output out of nowhere, leaving the user unable to tell whether what
+/// they are reading is the answer to their fix.
+///
+/// No paths are named: the session parked on batches it deliberately
+/// never classified, so it does not know which of them was the fix.
+fn announce_recovery(events: &UnboundedSender<RunEvent>) {
+    let _ = events.send(RunEvent::WatchTriggered { paths: Vec::new() });
 }
 
 /// How the broken-project idle state ended.
