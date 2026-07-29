@@ -52,10 +52,10 @@ impl Executor for EmbeddedShellExecutor {
         // ending is what ends the forwarding. Waiting instead for the
         // channel to close would be waiting for the last sender clone to
         // drop, and a cancelled pipeline can leave a stage detached
-        // holding one: a builtin stage sits on the blocking pool, which
-        // nothing can abort, so "the channel closed" can trail "the run
-        // finished" by however long that stage takes. Awaiting it here
-        // would hand the whole cancellation delay straight back to the
+        // holding one: a builtin stage runs on a detached thread, which is
+        // not waited on by the runtime, so "the channel closed" can trail
+        // "the run finished" by however long that stage takes. Awaiting it
+        // here would hand the whole cancellation delay straight back to the
         // caller, which is precisely what `alba_shell::execute` returning
         // promptly is meant to prevent.
         let result = loop {

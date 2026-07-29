@@ -66,13 +66,13 @@ pub(crate) enum Flow {
 ///
 /// Returning is what ends the run, and it is the only thing that does.
 /// A cancelled pipeline can leave a stage detached (a builtin stage runs
-/// on the blocking pool, which nothing can abort), and such a stage still
-/// holds a clone of `env.output`: the channel therefore stays open past
-/// this point, for as long as that stage lives. A caller must forward
-/// lines *while* this future runs and stop once it resolves, draining
-/// whatever is already queued. Treating "the channel closed" as "the run
-/// finished" would wait out exactly the stage cancellation exists to stop
-/// waiting for.
+/// on a detached thread, which is not waited on by the runtime), and such
+/// a stage still holds a clone of `env.output`: the channel therefore stays
+/// open past this point, for as long as that stage lives. A caller must
+/// forward lines *while* this future runs and stop once it resolves,
+/// draining whatever is already queued. Treating "the channel closed" as
+/// "the run finished" would wait out exactly the stage cancellation exists
+/// to stop waiting for.
 pub async fn execute(program: &Program, env: ShellEnv) -> ShellResult {
     let mut state = ShellState::new(env.env, env.cwd);
     let stdout = OutTarget::Lines {
@@ -254,10 +254,10 @@ async fn exec_stages(
     let mut code = 0;
     for stage in stages {
         // Bounded by the token, not just by the stage: a builtin stage
-        // runs on the blocking pool, which nothing can abort, so a `cat`
-        // parked on a pipe a stray descendant still holds open would
-        // otherwise keep this loop — and the whole run — waiting for as
-        // long as that descendant lived, deaf to a Ctrl-C throughout.
+        // runs on a detached thread, which is not waited on by the runtime,
+        // so a `cat` parked on a pipe a stray descendant still holds open
+        // would otherwise keep this loop — and the whole run — waiting for
+        // as long as that descendant lived, deaf to a Ctrl-C throughout.
         // The remaining stages are left detached, exactly as the external
         // path already leaves an abandoned drain reader.
         let flow = tokio::select! {
@@ -433,6 +433,11 @@ async fn run_builtin(
         // run is over and nobody is waiting for the answer any more.
         let _ = tx.send((flow, owned));
     });
+    // Trade-off: the detached thread is not waited on, so cancellation
+    // returns promptly. The cost is that a builtin abandoned mid-write to
+    // a redirected file leaves truncated output when the process exits,
+    // where the old runtime-drop behavior would have waited for the write
+    // to complete. This only affects cancelled runs.
     let (flow, owned) = rx.await.expect("builtin panicked");
     *state = owned;
     flow

@@ -83,9 +83,9 @@ impl CommandIo {
     /// Whether using these streams can block the calling thread. A file
     /// or a pipe can — a full pipe blocks its writer until the reader
     /// drains, an empty one blocks its reader until the writer produces
-    /// — so a builtin holding any of the three belongs in
-    /// `tokio::task::spawn_blocking`; the channel and the capture buffer
-    /// never do, and `Null` yields EOF immediately.
+    /// — so a builtin holding any of the three must run on a separate
+    /// thread; the channel and the capture buffer never do, and `Null`
+    /// yields EOF immediately.
     ///
     /// Stdin counts even though no builtin reads it yet: the moment one
     /// does, a last pipeline stage would have a non-blocking stdout and
