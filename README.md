@@ -246,3 +246,40 @@ ever runs rather than partway through a build. Parameterized beams (their
 `run` template cannot be rendered until their arguments arrive),
 `executor system_shell` beams, and `executor docker` beams are not
 statically checked this way.
+
+### Upgrading a Beamfile written for the host shell
+
+The embedded shell is the default for every beam that does not say
+otherwise, so a Beamfile written when `run` meant `sh -c` may need a
+look. The breaks to expect, in rough order of how often they bite:
+
+- **Control flow and functions.** `if`, `for`, `while`, `case`, and
+  function definitions are out of subset. Move the logic into a script
+  the beam invokes, or declare `executor system_shell` on that beam.
+- **Special parameters.** Everything but `$?` is rejected: `$$`, `$!`,
+  `$#`, `$*`, `$@`, and `$1` to `$9`. A command that built a temporary
+  name out of `$$` needs another way to spell it.
+- **Builtin flags.** The sixteen builtins have deliberately narrow flag
+  surfaces (`rm -r -f`, `cp -r`, `mkdir -p`, `echo -n`, and nothing
+  else), and a builtin always wins over the PATH binary of the same
+  name. A flag outside that surface is a usage error rather than a
+  silently different behavior. Reach the system binary with an explicit
+  path (`/bin/rm`) when you really need one of its own options.
+- **Hidden files.** `*` never matches an entry whose name starts with a
+  dot, exactly as `sh` behaves. A beam that ran under PowerShell on
+  Windows and counted on different wildcard rules has to name those
+  entries.
+- **Other out-of-subset syntax.** Heredocs, background jobs (`&`,
+  `wait`), subshells (`(...)`), `${VAR:-default}`, arithmetic
+  `$((...))`, and brace expansion `{a,b}`.
+
+`alba check` catches the grammar half of this list statically, before
+anything runs: unsupported syntax and rejected parameters are parse
+errors. It cannot catch the runtime half, because an unsupported builtin
+flag is a perfectly valid parse. `rm --one-file-system dist` parses
+cleanly and fails only when the beam runs, so run the beam once to find
+those.
+
+Whenever the rewrite is not worth it, `executor system_shell` on that one
+beam restores exactly the previous behavior, and the rest of the Beamfile
+keeps the cross-platform guarantee.
