@@ -83,6 +83,22 @@ impl<W: Write> LineSink<W> {
             self.open = false;
         }
     }
+
+    /// Writes `text` exactly as given — no newline — and flushes, or does
+    /// nothing once the sink is closed. Exists for the clear-screen escape
+    /// sequence, which must not be followed by a newline and must reach the
+    /// terminal before the next run's first line.
+    pub fn raw(&mut self, text: &str) {
+        if !self.open {
+            return;
+        }
+        if write!(self.writer, "{text}")
+            .and_then(|()| self.writer.flush())
+            .is_err()
+        {
+            self.open = false;
+        }
+    }
 }
 
 impl LineSink<io::Stdout> {
@@ -120,6 +136,33 @@ pub fn status_label(status: &BeamStatus) -> String {
         BeamStatus::Failed { exit_code } => format!("failed (exit {exit_code})"),
         BeamStatus::FailedAllowed { .. } => "failed (allowed)".to_string(),
         BeamStatus::Cancelled => "cancelled".to_string(),
+    }
+}
+
+/// The status line a watch event renders to, `None` for every other
+/// event. Shared by the two text renderers so their phrasing cannot
+/// drift; both print it to stderr — it is Alba talking about the run,
+/// not the run's output (see the module doc comment).
+pub(super) fn watch_line(event: &RunEvent) -> Option<String> {
+    match event {
+        RunEvent::WatchWaiting { files } => {
+            Some(format!("watching — {files} files, waiting for changes"))
+        }
+        RunEvent::WatchTriggered { paths } if paths.is_empty() => {
+            Some("changes detected — running".to_string())
+        }
+        RunEvent::WatchTriggered { paths } => {
+            let named = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            let rest = paths.len().saturating_sub(3);
+            if rest == 0 {
+                Some(format!("change detected in {named} — running"))
+            } else {
+                Some(format!(
+                    "change detected in {named} and {rest} more — running"
+                ))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -253,5 +296,37 @@ mod tests {
         sink.line("second");
 
         assert_eq!(String::from_utf8(sink.writer).unwrap(), "first\nsecond\n");
+    }
+
+    #[test]
+    fn watch_lines_read_as_status_not_as_beam_output() {
+        assert_eq!(
+            watch_line(&RunEvent::WatchWaiting { files: 3 }),
+            Some("watching — 3 files, waiting for changes".to_string())
+        );
+        assert_eq!(
+            watch_line(&RunEvent::WatchTriggered {
+                paths: vec!["a.rs".into(), "b.rs".into()],
+            }),
+            Some("change detected in a.rs, b.rs — running".to_string())
+        );
+        // Beyond three paths, name the first three and count the rest.
+        assert_eq!(
+            watch_line(&RunEvent::WatchTriggered {
+                paths: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+            }),
+            Some("change detected in a, b, c and 2 more — running".to_string())
+        );
+        // A rescan has no paths to name.
+        assert_eq!(
+            watch_line(&RunEvent::WatchTriggered { paths: vec![] }),
+            Some("changes detected — running".to_string())
+        );
+        assert_eq!(
+            watch_line(&RunEvent::RunFinished {
+                summary: RunSummary::default()
+            }),
+            None
+        );
     }
 }

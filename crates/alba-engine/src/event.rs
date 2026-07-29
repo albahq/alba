@@ -23,7 +23,9 @@ use alba_executors::OutputLine;
 /// beam that never ran (cancelled before it acquired a slot, or skipped
 /// because a dependency failed) emits only `BeamFinished` with
 /// [`BeamStatus::Cancelled`]. Events from different beams interleave
-/// freely; `RunFinished` is always last.
+/// freely; `RunFinished` is last *per run* — in a watch session, it is
+/// followed by `WatchWaiting` and, once a change is seen, `WatchTriggered`
+/// before the next run's events begin.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
     BeamStarted {
@@ -51,6 +53,22 @@ pub enum RunEvent {
     },
     RunFinished {
         summary: RunSummary,
+    },
+    /// Watch mode only: the session finished a run and is now waiting.
+    /// `files` is how many files the watched `inputs` currently resolve
+    /// to — the status line's number. The first one a session emits also
+    /// announces the session itself.
+    WatchWaiting {
+        files: usize,
+    },
+    /// Watch mode only: relevant changes started a new run. `paths` are
+    /// project-root-relative display strings; empty means the watcher
+    /// overflowed and could not say what changed (rescan). Emitted after
+    /// the previous run's `RunFinished` — when that summary is full of
+    /// cancelled beams, this event is what marks the run as interrupted
+    /// by the watch rather than abandoned by the user.
+    WatchTriggered {
+        paths: Vec<String>,
     },
 }
 

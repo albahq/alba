@@ -20,14 +20,21 @@ pub struct GroupedRenderer {
     /// the orphan drain in the `RunFinished` arm, which sorts by id
     /// precisely so it does not leak this map's iteration order either.
     buffers: HashMap<String, Vec<String>>,
+    /// Watch mode only: whether a triggered run should clear the screen
+    /// first. Set once at construction — see [`GroupedRenderer::new`] —
+    /// and never `true` outside a watch session, since a plain `alba run`
+    /// has no session to clear between.
+    clear_between_runs: bool,
     out: LineSink<io::Stdout>,
     err: LineSink<io::Stderr>,
 }
 
 impl GroupedRenderer {
-    pub fn new() -> Self {
+    /// `clear_between_runs` is the watch session's own choice.
+    pub fn new(clear_between_runs: bool) -> Self {
         Self {
             buffers: HashMap::new(),
+            clear_between_runs,
             out: LineSink::stdout(),
             err: LineSink::stderr(),
         }
@@ -47,6 +54,16 @@ impl GroupedRenderer {
 
 impl Renderer for GroupedRenderer {
     fn handle(&mut self, event: &RunEvent) {
+        if let Some(line) = super::watch_line(event) {
+            if matches!(event, RunEvent::WatchTriggered { .. }) && self.clear_between_runs {
+                // \x1b[2J clears the screen, \x1b[3J the scrollback, \x1b[H
+                // homes the cursor: each triggered run starts on a clean
+                // page.
+                self.out.raw("\u{1b}[2J\u{1b}[3J\u{1b}[H");
+            }
+            self.err.line(&line);
+            return;
+        }
         match event {
             // A beam that produces no output at all still gets a group,
             // so the header is printed for every beam that ran rather
@@ -98,6 +115,7 @@ impl Renderer for GroupedRenderer {
                 }
                 print_summary(&mut self.err, summary);
             }
+            RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
         }
     }
 }
@@ -125,7 +143,7 @@ mod tests {
     /// on captured stdout, which a unit test cannot intercept.
     #[test]
     fn the_final_event_drains_any_beam_left_unfinished() {
-        let mut renderer = GroupedRenderer::new();
+        let mut renderer = GroupedRenderer::new(false);
 
         renderer.handle(&output("orphan", "would be lost"));
         assert!(renderer.buffers.contains_key("orphan"));

@@ -256,8 +256,10 @@ fn renderer(flags: &RunFlags) -> Box<dyn Renderer> {
     match flags.log_format {
         LogFormat::Json => Box::new(JsonRenderer::new()),
         LogFormat::Text => match flags.output.unwrap_or_else(default_output) {
-            OutputStyle::Interleaved => Box::new(InterleavedRenderer::new(crate::color_enabled())),
-            OutputStyle::Grouped => Box::new(GroupedRenderer::new()),
+            OutputStyle::Interleaved => {
+                Box::new(InterleavedRenderer::new(crate::color_enabled(), false))
+            }
+            OutputStyle::Grouped => Box::new(GroupedRenderer::new(false)),
         },
     }
 }

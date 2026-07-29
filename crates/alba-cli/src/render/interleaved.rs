@@ -28,16 +28,23 @@ const SEPARATOR: &str = "\u{2502}";
 
 pub struct InterleavedRenderer {
     color: bool,
+    /// Watch mode only: whether a triggered run should clear the screen
+    /// first. Set once at construction — see
+    /// [`InterleavedRenderer::new`] — and never `true` outside a watch
+    /// session, since a plain `alba run` has no session to clear between.
+    clear_between_runs: bool,
     out: LineSink<io::Stdout>,
     err: LineSink<io::Stderr>,
 }
 
 impl InterleavedRenderer {
     /// `color` comes from [`crate::color_enabled`] — the single TTY and
-    /// `NO_COLOR` gate the whole binary shares.
-    pub fn new(color: bool) -> Self {
+    /// `NO_COLOR` gate the whole binary shares. `clear_between_runs` is the
+    /// watch session's own choice, unrelated to color.
+    pub fn new(color: bool, clear_between_runs: bool) -> Self {
         Self {
             color,
+            clear_between_runs,
             out: LineSink::stdout(),
             err: LineSink::stderr(),
         }
@@ -56,6 +63,16 @@ impl InterleavedRenderer {
 
 impl Renderer for InterleavedRenderer {
     fn handle(&mut self, event: &RunEvent) {
+        if let Some(line) = super::watch_line(event) {
+            if matches!(event, RunEvent::WatchTriggered { .. }) && self.clear_between_runs {
+                // \x1b[2J clears the screen, \x1b[3J the scrollback, \x1b[H
+                // homes the cursor: each triggered run starts on a clean
+                // page.
+                self.out.raw("\u{1b}[2J\u{1b}[3J\u{1b}[H");
+            }
+            self.err.line(&line);
+            return;
+        }
         match event {
             RunEvent::BeamStarted { id } => self.line(&id.0, "started"),
             RunEvent::BeamCached { id } => self.line(&id.0, "cached — replaying last output"),
@@ -79,6 +96,7 @@ impl Renderer for InterleavedRenderer {
                 self.line(&id.0, &text);
             }
             RunEvent::RunFinished { summary } => print_summary(&mut self.err, summary),
+            RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
         }
     }
 }

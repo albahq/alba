@@ -94,6 +94,12 @@ enum WireEvent<'a> {
         /// `130` regardless of how far its beams got.
         exit_code: i32,
     },
+    WatchWaiting {
+        files: usize,
+    },
+    WatchTriggered {
+        paths: &'a [String],
+    },
 }
 
 #[derive(Serialize)]
@@ -128,6 +134,8 @@ impl<'a> From<&'a RunEvent> for WireEvent<'a> {
                 duration_ms: millis(duration),
             },
             RunEvent::RunFinished { summary } => WireEvent::from_summary(summary),
+            RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
+            RunEvent::WatchTriggered { paths } => WireEvent::WatchTriggered { paths },
         }
     }
 }
@@ -281,5 +289,26 @@ mod tests {
         assert_eq!(value["succeeded"][0], "a");
         assert_eq!(value["failed"][0], "b");
         assert_eq!(value["exit_code"], 1);
+    }
+
+    /// The exact wire shape, not just its parsed fields: a consumer's
+    /// script matches these strings verbatim, so the field order and the
+    /// tag's spelling are the contract, not an incidental detail `json()`'s
+    /// round trip through `Value` would hide.
+    #[test]
+    fn watch_events_serialize_with_their_own_tags() {
+        let waiting = RunEvent::WatchWaiting { files: 42 };
+        let triggered = RunEvent::WatchTriggered {
+            paths: vec!["src/lib.rs".to_string()],
+        };
+
+        let waiting = serde_json::to_string(&WireEvent::from(&waiting)).unwrap();
+        let triggered = serde_json::to_string(&WireEvent::from(&triggered)).unwrap();
+
+        assert_eq!(waiting, r#"{"event":"watch_waiting","files":42}"#);
+        assert_eq!(
+            triggered,
+            r#"{"event":"watch_triggered","paths":["src/lib.rs"]}"#
+        );
     }
 }
