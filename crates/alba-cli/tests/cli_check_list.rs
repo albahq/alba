@@ -58,19 +58,34 @@ fn check_rejects_invalid_embedded_shell_syntax() {
         .stderr(predicates::str::contains("unclosed single quote"));
 }
 
-/// Two beams whose `run` command could never be validated statically: a
-/// parameterized beam's template is unknowable until its arguments arrive
-/// (its unclosed quote here would only show up once `deploy` actually
-/// runs), and a `system_shell` beam does not speak the embedded shell's
-/// grammar at all. Both must be skipped rather than rejected, so `check`
-/// still exits 0 and still prints its usual success line.
+/// Three beams whose `run` command must never be validated statically,
+/// each for a different reason:
+///
+/// - `deploy`'s template is unknowable until its argument arrives (its
+///   unclosed quote here would only show up once `deploy` actually runs)
+///   — and it references its own parameter, so a render attempt against
+///   `beam.scope` alone would fail on its own, skipping it even without
+///   an explicit parameter check.
+/// - `legacy` opts out to the host shell, which does not speak this
+///   grammar at all.
+/// - `untouched` is the case that would slip past a render-failure
+///   coincidence: it takes a parameter but never references it, so
+///   rendering its template against `beam.scope` alone *succeeds* — an
+///   implementation that skipped parameterized beams only because their
+///   template failed to render (rather than checking `params.is_empty()`
+///   directly) would validate this one anyway and reject its unclosed
+///   quote, which the spec says must not happen.
+///
+/// All three must be skipped, so `check` still exits 0 and still prints
+/// its usual success line for all three beams.
 #[test]
 fn check_skips_parameterized_and_system_shell_beams() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("Beamfile"),
         "beam deploy(target) { run \"echo {target} 'x\" }\n\
-         beam legacy { executor system_shell run \"if [ 1 ]; then echo y; fi\" }\n",
+         beam legacy { executor system_shell run \"if [ 1 ]; then echo y; fi\" }\n\
+         beam untouched(unused) { run \"echo 'unclosed\" }\n",
     )
     .unwrap();
     alba()
@@ -78,7 +93,7 @@ fn check_skips_parameterized_and_system_shell_beams() {
         .arg("check")
         .assert()
         .success()
-        .stdout(predicates::str::contains("2 beams"));
+        .stdout(predicates::str::contains("3 beams"));
 }
 
 /// A beam with no parameters and multiple valid embedded-shell commands
