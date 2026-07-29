@@ -79,13 +79,28 @@ pub enum WatchExit {
 }
 
 /// Mid-session trouble, handed to the caller's `on_error` for rendering.
+///
+/// Both variants carry the sources their spans index, because a session
+/// outlives the project it started on: by the time an error is reported,
+/// any number of reloads may have replaced the map the caller was holding
+/// when it started the session. Rendering against that stale map would
+/// draw the caret on text the error was never about.
 pub enum SessionError {
-    /// A Beamfile stopped loading.
+    /// A Beamfile stopped loading. [`alba_core::LoadError`] already pairs
+    /// the failure with every file read before it happened.
     Load(alba_core::LoadError),
     /// A run could not be carried out: an unknown target, or a beam the
     /// scheduler refuses. Reported rather than fatal — the fix is one
     /// Beamfile save away.
-    Run(EngineError),
+    Run {
+        error: EngineError,
+        /// The session's sources as of this failure. An
+        /// [`EngineError::Core`] carries a span and a
+        /// [`alba_core::SourceId`] that only this map resolves — the
+        /// scheduler stamps each one with the id of the file the offending
+        /// beam was declared in, precisely so the caret lands there.
+        sources: SourceMap,
+    },
 }
 
 /// Runs `target` and keeps re-running it as long as `watcher` reports
@@ -124,7 +139,10 @@ pub async fn watch(
                 // the save that got us here, most often. Nothing but a
                 // different Beamfile can change that answer, so park on
                 // one instead of re-running the same failure.
-                on_error(&SessionError::Run(EngineError::Core(error)));
+                on_error(&SessionError::Run {
+                    error: EngineError::Core(error),
+                    sources: sources.clone(),
+                });
                 match reload_when_beamfile_changes(beamfile, &mut *watcher, &cancel, on_error).await
                 {
                     Reloaded::Project(fresh_project, fresh_sources) => {
@@ -181,7 +199,10 @@ pub async fn watch(
             }
         };
         if let Err(error) = result {
-            on_error(&SessionError::Run(error));
+            on_error(&SessionError::Run {
+                error,
+                sources: sources.clone(),
+            });
         }
         if cancel.is_cancelled() {
             return WatchExit::Interrupted;

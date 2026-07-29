@@ -215,14 +215,19 @@ async fn watch_execute(
         Box::new(watcher),
         // Mid-session trouble is reported and survived, so this renders to
         // stderr and returns; only the session's own end decides the exit
-        // code. A `Load` error carries its own sources — the ones it was
-        // produced alongside, which may name a file the session's original
-        // map never knew about.
+        // code.
+        //
+        // Both arms render against the sources the error itself carries,
+        // never the map captured above: a session outlives the project it
+        // started on, and a reload renumbers spans and source ids out from
+        // under the startup map.
         &mut |error| {
             let mut err = LineSink::stderr();
             match error {
                 SessionError::Load(load) => err.line(crate::render_load_error(load).trim_end()),
-                SessionError::Run(run) => err.line(render_engine_error(run, sources).trim_end()),
+                SessionError::Run { error, sources } => {
+                    err.line(render_engine_error(error, sources).trim_end());
+                }
             }
         },
     )

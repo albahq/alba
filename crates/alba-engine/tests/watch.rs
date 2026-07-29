@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
 use alba_engine::{
-    CacheOptions, Executors, RunEvent, RunOptions, SessionError, WatchBatch, WatchExit, Watcher,
-    watch,
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, SessionError, WatchBatch,
+    WatchExit, Watcher, watch,
 };
 use alba_executors::{FakeBehavior, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -110,7 +110,7 @@ fn start_with_error_log(
     let session = start_reporting_to(beamfile, target, executor, false, move |error| {
         sink.lock().unwrap().push(match error {
             SessionError::Load(_) => ObservedError::Load,
-            SessionError::Run(_) => ObservedError::Run,
+            SessionError::Run { .. } => ObservedError::Run,
         });
     });
     (session, log)
@@ -528,6 +528,62 @@ async fn a_renamed_target_reports_and_recovers_on_the_next_edit() {
     };
     assert!(paths.is_empty());
     session.event_matching(is_run_finished).await;
+
+    session.finish().await;
+}
+
+/// A run error reported after a reload carries the *reloaded* sources.
+///
+/// What this protects: an [`EngineError::Core`] carries a span and a source
+/// id that index the project the session is running now, not the one the
+/// caller loaded before it started. Hand back the startup map and the
+/// caller draws the caret on text the error was never about — on a file
+/// that has since been edited, or on no file at all when the reload
+/// registered an import the old map never knew.
+#[tokio::test]
+async fn a_run_error_after_a_reload_carries_the_reloaded_sources() {
+    let reported = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&reported);
+    let mut session = start_reporting_to(
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n",
+        "build",
+        FakeExecutor::new(),
+        false,
+        move |error| {
+            if let SessionError::Run {
+                error: EngineError::Core(core),
+                sources,
+            } = error
+            {
+                // Exactly what the CLI's renderer does to place the caret.
+                let text = sources
+                    .get(core.source_id)
+                    .map_or_else(String::new, |(_, source)| source.to_string());
+                sink.lock().unwrap().push(text);
+            }
+        },
+    );
+    session.event_matching(is_waiting).await;
+
+    // Renaming the target is the cheapest way to make the *next* run fail
+    // after a successful reload: the reload works, the target is gone.
+    let beamfile = session.touch(
+        "Beamfile",
+        "beam renamed { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n",
+    );
+    session.send(vec![beamfile]);
+    session.event_matching(is_triggered).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let reported = reported.lock().unwrap().clone();
+    assert!(
+        !reported.is_empty(),
+        "the vanished target must be reported as a run error"
+    );
+    assert!(
+        reported.iter().all(|text| text.contains("renamed")),
+        "the error must resolve against the reloaded Beamfile, got: {reported:?}"
+    );
 
     session.finish().await;
 }
