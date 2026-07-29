@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::builtins::{take_flags, usage_error};
 use crate::interp::Flow;
 use crate::io::{CommandIo, OutTarget};
 
@@ -31,16 +32,23 @@ pub(crate) fn echo(args: &[String], stdout: OutTarget) -> Flow {
 /// Each argument names a file resolved against `cwd`; a file that
 /// cannot be opened reports `cat: NAME: no such file` and `cat` moves on
 /// to the next one rather than stopping. Exits 1 if any file failed, 0
-/// otherwise (always 0 with no arguments, whatever stdin held).
+/// otherwise (always 0 with no arguments, whatever stdin held). No
+/// flags: a leading `-`-prefixed argument is a usage error, not a file
+/// name, exit 2.
 pub(crate) fn cat(args: &[String], cwd: &Path, io: CommandIo) -> Flow {
     let CommandIo {
         stdin,
         stdout,
         stderr,
     } = io;
-    let mut out = stdout.writer();
 
-    if args.is_empty() {
+    let rest = match take_flags(args, &[]) {
+        Ok((_, rest)) => rest,
+        Err(flag) => return usage_error(stderr, format_args!("cat: invalid option: {flag}")),
+    };
+
+    let mut out = stdout.writer();
+    if rest.is_empty() {
         let mut input = stdin.reader();
         let _ = std::io::copy(&mut input, &mut out);
         return Flow::Next(0);
@@ -52,11 +60,17 @@ pub(crate) fn cat(args: &[String], cwd: &Path, io: CommandIo) -> Flow {
 
     let mut err = stderr.writer();
     let mut failed = false;
-    for arg in args {
+    for arg in rest {
         match std::fs::File::open(cwd.join(arg)) {
             Ok(mut file) => {
-                if std::io::copy(&mut file, &mut out).is_err() {
+                // `File::open` on a directory succeeds on unix; the
+                // failure only shows up once `copy` tries to read from
+                // it. Reported the same way as an open failure, rather
+                // than silently, so `cat somedir` never exits nonzero
+                // with nothing on stderr to say why.
+                if let Err(error) = std::io::copy(&mut file, &mut out) {
                     failed = true;
+                    let _ = writeln!(err, "cat: {arg}: {error}");
                 }
             }
             Err(_) => {

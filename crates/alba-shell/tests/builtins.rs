@@ -63,6 +63,37 @@ async fn cat_reports_a_missing_file_and_continues() {
     let (code, lines) = run_in("cat nope.txt a.txt", dir.path().to_path_buf()).await;
     assert_eq!(code, 1);
     assert_eq!(stdout(&lines), vec!["ok"]);
+    assert!(
+        lines
+            .iter()
+            .any(|(s, t)| *s == ShellStream::Stderr && t == "cat: nope.txt: no such file"),
+        "lines: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn cat_rejects_an_unknown_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, lines) = run_in("cat -n missing.txt", dir.path().to_path_buf()).await;
+    assert_eq!(code, 2, "lines: {lines:?}");
+    assert!(lines.iter().any(|(s, _)| *s == ShellStream::Stderr));
+}
+
+#[tokio::test]
+async fn cat_reports_a_directory_argument() {
+    // `File::open` on a directory succeeds on unix; the failure only
+    // shows up once `cat` tries to read from it. Before the fix this
+    // silently exited 1 with no stderr at all.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let (code, lines) = run_in("cat sub", dir.path().to_path_buf()).await;
+    assert_eq!(code, 1);
+    assert!(
+        lines
+            .iter()
+            .any(|(s, t)| *s == ShellStream::Stderr && t.contains("sub")),
+        "lines: {lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -110,6 +141,17 @@ async fn mv_reports_a_missing_source() {
     let dir = tempfile::tempdir().unwrap();
     let (code, lines) = run_in("mv missing.txt b.txt", dir.path().to_path_buf()).await;
     assert_eq!(code, 1);
+    assert!(lines.iter().any(|(s, _)| *s == ShellStream::Stderr));
+}
+
+#[tokio::test]
+async fn mv_rejects_an_unknown_flag() {
+    // `mv` has no flags at all: a leading `-r` must not be read as a
+    // (nonexistent) source file named `-r`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+    let (code, lines) = run_in("mv -r a.txt b.txt", dir.path().to_path_buf()).await;
+    assert_eq!(code, 2, "lines: {lines:?}");
     assert!(lines.iter().any(|(s, _)| *s == ShellStream::Stderr));
 }
 
@@ -186,6 +228,15 @@ async fn touch_reports_a_missing_parent_directory() {
 }
 
 #[tokio::test]
+async fn touch_rejects_an_unknown_flag() {
+    // `touch` has no flags at all: `-x` must not be read as a file name.
+    let dir = tempfile::tempdir().unwrap();
+    let (code, lines) = run_in("touch -x", dir.path().to_path_buf()).await;
+    assert_eq!(code, 2, "lines: {lines:?}");
+    assert!(!dir.path().join("-x").exists());
+}
+
+#[tokio::test]
 async fn sleep_accepts_decimals_and_rejects_garbage() {
     assert_eq!(run("sleep 0.05").await.0, 0);
     assert_eq!(run("sleep soon").await.0, 2);
@@ -194,6 +245,13 @@ async fn sleep_accepts_decimals_and_rejects_garbage() {
 #[tokio::test]
 async fn sleep_rejects_more_than_one_operand() {
     assert_eq!(run("sleep 0.01 0.01").await.0, 2);
+}
+
+#[tokio::test]
+async fn sleep_rejects_a_dash_argument() {
+    let (code, lines) = run("sleep -x").await;
+    assert_eq!(code, 2, "lines: {lines:?}");
+    assert!(lines.iter().any(|(s, _)| *s == ShellStream::Stderr));
 }
 
 #[tokio::test]
@@ -237,9 +295,78 @@ async fn test_covers_files_strings_and_numbers() {
 }
 
 #[tokio::test]
+async fn test_covers_the_remaining_numeric_operators() {
+    // The brief's own `test_covers_files_strings_and_numbers` only
+    // exercises `-gt`, `-le`, and `-lt`; this closes the other half of
+    // `binary`'s match (`-eq`, `-ne`, `-ge`).
+    assert_eq!(
+        run("test 1 -eq 1 && test 1 -ne 2 && test 2 -ge 2").await.0,
+        0
+    );
+    assert_eq!(run("test 1 -eq 2").await.0, 1);
+    assert_eq!(run("test 1 -ne 1").await.0, 1);
+    assert_eq!(run("test 1 -ge 2").await.0, 1);
+}
+
+#[tokio::test]
 async fn a_builtin_wins_over_path_but_an_explicit_path_does_not() {
     // `echo` must be ours even on unix where /bin/echo exists: our echo
     // treats -e as an argument (bash's interprets it as a flag).
+    //
+    // Note: this discriminates on Linux, where GNU coreutils' `/bin/echo`
+    // really does treat a leading `-e` as a flag (enabling backslash
+    // escapes) and would print just `tag`. It does *not* discriminate on
+    // macOS, where BSD's `/bin/echo` has no `-e` either and would
+    // coincidentally print `-e tag` too — see the two tests below for a
+    // check that holds on every platform regardless of which `echo`
+    // happens to be installed.
     let (_, lines) = run("echo -e tag").await;
     assert_eq!(stdout(&lines), vec!["-e tag"]);
+}
+
+#[tokio::test]
+async fn a_builtin_wins_even_with_no_path_binary_of_the_same_name() {
+    // Point `PATH` at a directory that provably has no `echo` in it (or
+    // anything else): if the builtin lookup were ever skipped, the
+    // subsequent `PATH` search would fail outright and this would exit
+    // 127 ("command not found"), never 0. This holds regardless of which
+    // real `echo` (if any) happens to be installed, unlike the test
+    // above.
+    let empty_path = tempfile::tempdir().unwrap();
+    let env = vec![("PATH".to_string(), empty_path.path().display().to_string())];
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let program = parse("echo hi").expect("parse");
+    let result = execute(
+        &program,
+        ShellEnv {
+            env,
+            cwd: std::env::current_dir().unwrap(),
+            output: tx,
+            cancel: CancellationToken::new(),
+        },
+    )
+    .await;
+    let mut lines = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        lines.push((line.stream, line.text));
+    }
+    assert_eq!(
+        result.exit_code, 0,
+        "an external lookup on an echo-less PATH would have failed with 127; \
+         only the builtin can have produced 0, lines: {lines:?}"
+    );
+    assert_eq!(stdout(&lines), vec!["hi"]);
+}
+
+#[tokio::test]
+async fn an_explicit_path_bypasses_the_builtin_lookup_entirely() {
+    // `./true` (a path, not a bare name) must never fall back to the
+    // `true` builtin just because no such file exists at that path: an
+    // explicit path bypasses builtin dispatch outright, so this is
+    // "command not found" (127), not the builtin's exit 0. This is the
+    // "an explicit path does not win" half the test above only names,
+    // never exercises.
+    let dir = tempfile::tempdir().unwrap();
+    let (code, lines) = run_in("./true", dir.path().to_path_buf()).await;
+    assert_eq!(code, 127, "lines: {lines:?}");
 }

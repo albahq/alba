@@ -167,6 +167,36 @@ pub(crate) fn command_error(stderr: OutTarget, message: impl std::fmt::Display) 
     Flow::Next(1)
 }
 
+/// Consumes leading flags from `known` off the front of `args`, in any
+/// order, stopping at the first argument that is not one of them. That
+/// first stray `-`-prefixed argument is returned as the error, so the
+/// caller can report exactly which option it did not recognize.
+///
+/// `known: &[]` still has a job: a builtin with no flag surface at all
+/// (`mv`, `touch`, `cat`) calls this the same way, and it rejects any
+/// leading `-`-prefixed argument as unrecognized — the frozen rule
+/// ("anything outside a builtin's documented flag surface is a usage
+/// error") applies precisely because their surface is empty, not
+/// despite it.
+pub(crate) fn take_flags<'a>(
+    args: &'a [String],
+    known: &[&str],
+) -> Result<(Vec<&'a str>, &'a [String]), &'a str> {
+    let mut seen = Vec::new();
+    let mut rest = args;
+    while let Some(first) = rest.first() {
+        if known.contains(&first.as_str()) {
+            seen.push(first.as_str());
+            rest = &rest[1..];
+        } else if first.starts_with('-') {
+            return Err(first);
+        } else {
+            break;
+        }
+    }
+    Ok((seen, rest))
+}
+
 /// `exit [n]`: an explicit `n` must parse as an integer; with no
 /// argument, the code of the last completed command.
 fn exit_code(args: &[String], state: &ShellState) -> i32 {

@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::builtins::{command_error, usage_error};
+use crate::builtins::{command_error, take_flags, usage_error};
 use crate::interp::Flow;
 use crate::io::OutTarget;
 
@@ -54,9 +54,14 @@ pub(crate) fn cp(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
 /// `mv src... dst`: renames each `src` onto `dst`, falling back to a
 /// copy-then-delete when the rename itself fails (crossing filesystems,
 /// for instance) — for a directory just as much as for a file. Same
-/// multiple-source rule as `cp`. No flags.
+/// multiple-source rule as `cp`. No flags: a leading `-`-prefixed
+/// argument is a usage error, not a source or destination name.
 pub(crate) fn mv(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
-    let Some((sources, dst)) = split_operands(args) else {
+    let rest = match take_flags(args, &[]) {
+        Ok((_, rest)) => rest,
+        Err(flag) => return usage_error(stderr, format_args!("mv: invalid option: {flag}")),
+    };
+    let Some((sources, dst)) = split_operands(rest) else {
         return usage_error(stderr, "mv: usage: mv src... dst");
     };
 
@@ -154,15 +159,20 @@ pub(crate) fn mkdir(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
 
 /// `touch file...`: creates an empty file if it does not exist, else
 /// updates its mtime to now. Every file is attempted; the exit code is 1
-/// if any of them failed.
+/// if any of them failed. No flags: a leading `-`-prefixed argument is a
+/// usage error, not a file name.
 pub(crate) fn touch(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
-    if args.is_empty() {
+    let rest = match take_flags(args, &[]) {
+        Ok((_, rest)) => rest,
+        Err(flag) => return usage_error(stderr, format_args!("touch: invalid option: {flag}")),
+    };
+    if rest.is_empty() {
         return usage_error(stderr, "touch: missing operand");
     }
 
     let mut writer = stderr.writer();
     let mut failed = false;
-    for path in args {
+    for path in rest {
         let target = cwd.join(path);
         let result = if target.exists() {
             std::fs::OpenOptions::new()
@@ -178,29 +188,6 @@ pub(crate) fn touch(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
         }
     }
     Flow::Next(if failed { 1 } else { 0 })
-}
-
-/// Consumes leading flags from `known` off the front of `args`, in any
-/// order, stopping at the first argument that is not one of them. That
-/// first stray `-`-prefixed argument is returned as the error, so the
-/// caller can report exactly which option it did not recognize.
-fn take_flags<'a>(
-    args: &'a [String],
-    known: &[&str],
-) -> Result<(Vec<&'a str>, &'a [String]), &'a str> {
-    let mut seen = Vec::new();
-    let mut rest = args;
-    while let Some(first) = rest.first() {
-        if known.contains(&first.as_str()) {
-            seen.push(first.as_str());
-            rest = &rest[1..];
-        } else if first.starts_with('-') {
-            return Err(first);
-        } else {
-            break;
-        }
-    }
-    Ok((seen, rest))
 }
 
 /// Splits `args` into every operand but the last (the sources) and the

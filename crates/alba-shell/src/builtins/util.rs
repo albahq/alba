@@ -14,20 +14,31 @@ use crate::io::OutTarget;
 /// `builtins::run_sleep`), so a cancellation during the wait stops it at
 /// once instead of waiting for a blocking-pool thread to notice; a
 /// cancelled sleep exits 130. Exactly one non-negative, finite operand
-/// is accepted; anything else is a usage error, exit 2.
+/// is accepted; anything else — no flags, so a `-`-prefixed argument
+/// included — is a usage error, exit 2.
 pub(crate) async fn sleep(args: &[String], stderr: OutTarget, cancel: &CancellationToken) -> Flow {
-    let duration = match args {
-        [only] => only
-            .parse::<f64>()
-            .ok()
-            .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok()),
-        _ => None,
-    };
-    let Some(duration) = duration else {
+    let [only] = args else {
         write_line(
             stderr,
             format_args!("sleep: invalid duration: {}", args.join(" ")),
         );
+        return Flow::Next(2);
+    };
+    // No flags at all: a leading `-` is rejected outright rather than
+    // left to coincidentally fail `f64` parsing (which it would, since
+    // every recognizable flag spelling is non-numeric) — the same
+    // "unrecognized option" wording every other flag-less or
+    // flag-bearing builtin uses.
+    if only.starts_with('-') {
+        write_line(stderr, format_args!("sleep: invalid option: {only}"));
+        return Flow::Next(2);
+    }
+    let duration = only
+        .parse::<f64>()
+        .ok()
+        .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok());
+    let Some(duration) = duration else {
+        write_line(stderr, format_args!("sleep: invalid duration: {only}"));
         return Flow::Next(2);
     };
 
