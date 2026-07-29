@@ -58,18 +58,30 @@ fn run(cli: Cli) -> i32 {
         // even loaded — see the `if let` there for why.
         Some(Command::Cache { .. }) => unreachable!("cache is dispatched before loading"),
         Some(Command::Check) => commands::check::run(&project),
+        // A named beam is taken as-is; an omitted one falls back to the
+        // declared `default`, the same target bare `alba` would have run —
+        // so `alba run` gains the run flags without losing that shortcut.
         Some(Command::Run {
             beam,
             params,
             flags,
-        }) => commands::run::run(
-            &project,
-            &sources,
-            &beamfile,
-            &alba_core::BeamId(beam),
-            params,
-            &flags,
-        ),
+        }) => match beam.map(alba_core::BeamId).or_else(|| {
+            project
+                .default
+                .as_ref()
+                .map(|default| default.value.clone())
+        }) {
+            Some(target) => {
+                commands::run::run(&project, &sources, &beamfile, &target, params, &flags)
+            }
+            None => {
+                LineSink::stderr().line(
+                    "no beam named and this Beamfile declares no `default`; \
+                     run `alba` to list the available beams",
+                );
+                EXIT_ALBA_ERROR
+            }
+        },
         // Bare `alba`: run the declared `default` with every run flag left
         // at its default, or fall back to listing when none is declared.
         None => match &project.default {

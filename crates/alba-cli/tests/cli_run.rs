@@ -423,6 +423,36 @@ fn jobs_zero_is_rejected() {
         ));
 }
 
+/// `alba run` with no beam named runs the declared `default`, exactly
+/// like bare `alba` — but with the run flags available.
+#[test]
+fn run_without_a_beam_runs_the_default() {
+    let dir = project(
+        "default hello\n\
+         beam hello { run \"echo salut\" }\n",
+    );
+
+    alba()
+        .current_dir(&dir)
+        .args(["run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("salut"));
+}
+
+/// Without a `default`, `alba run` cannot guess; it says so and exits 2.
+#[test]
+fn run_without_a_beam_and_no_default_is_an_error() {
+    let dir = project("beam hello { run \"echo salut\" }\n");
+
+    alba()
+        .current_dir(&dir)
+        .args(["run"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("default"));
+}
+
 /// The three specified output shapes, pinned as literal strings so a
 /// refactor cannot quietly change any of them. Durations are deliberately
 /// never asserted: they are the one part that legitimately varies.

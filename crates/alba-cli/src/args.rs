@@ -31,9 +31,9 @@ pub enum Command {
     Check,
     /// Run a beam and everything it needs.
     Run {
-        /// The beam to run.
+        /// The beam to run. Defaults to the Beamfile's `default` beam.
         #[arg(value_name = "BEAM")]
-        beam: String,
+        beam: Option<String>,
         /// Positional arguments bound, in order, to the parameters the
         /// beam declares (`beam deploy(target)` takes one).
         #[arg(value_name = "PARAM")]
