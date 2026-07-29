@@ -12,6 +12,13 @@
 //! the watch. The caller's token ends the session; each run gets a child
 //! token so a restart never looks like a user interrupt.
 //!
+//! A trigger that names a loaded Beamfile reloads the project first, so
+//! the next run schedules the beams as they are now written. A project
+//! the session cannot work from — one that no longer parses, one whose
+//! target beam is gone — parks the loop in
+//! [`reload_when_beamfile_changes`]: reported, executing nothing, until a
+//! save makes it loadable again.
+//!
 //! ## Why the loop reports errors through a callback
 //!
 //! A mid-session failure (a run that cannot be scheduled, a broken
@@ -87,8 +94,8 @@ pub enum SessionError {
 #[allow(clippy::too_many_arguments)]
 pub async fn watch(
     beamfile: &Path,
-    project: Project,
-    sources: SourceMap,
+    mut project: Project,
+    mut sources: SourceMap,
     target: BeamId,
     options: RunOptions,
     executors: Executors,
@@ -111,8 +118,19 @@ pub async fn watch(
         let mut set = match WatchSet::new(&project, &target, &sources) {
             Ok(set) => set,
             Err(error) => {
+                // The target is not in this project — a beam renamed by
+                // the save that got us here, most often. Nothing but a
+                // different Beamfile can change that answer, so park on
+                // one instead of re-running the same failure.
                 on_error(&SessionError::Run(EngineError::Core(error)));
-                return idle_until_the_session_ends(&mut *watcher, &cancel).await;
+                match reload_when_beamfile_changes(beamfile, &mut *watcher, &cancel, on_error).await
+                {
+                    Reloaded::Project(fresh_project, fresh_sources) => {
+                        (project, sources) = (fresh_project, fresh_sources);
+                        continue;
+                    }
+                    Reloaded::Exit(exit) => return exit,
+                }
             }
         };
 
@@ -127,7 +145,7 @@ pub async fn watch(
         // A batch that lands while the run is in flight cancels it and is
         // held here, so the wait phase below starts the next run at once
         // instead of announcing a wait nobody is waiting for.
-        let mut pending: Option<Vec<PathBuf>> = None;
+        let mut pending: Option<Trigger> = None;
         let result = {
             let run_future = run(
                 &project,
@@ -143,8 +161,8 @@ pub async fn watch(
                     result = &mut run_future => break result,
                     batch = watcher.next_batch() => match batch {
                         Some(batch) => {
-                            if let Some(paths) = relevant(&mut set, batch) {
-                                merge(&mut pending, paths);
+                            if let Some(trigger) = relevant(&mut set, batch) {
+                                merge(&mut pending, trigger);
                                 run_cancel.cancel();
                             }
                         }
@@ -167,8 +185,8 @@ pub async fn watch(
         }
 
         // ---- wait phase ------------------------------------------------
-        let paths = match pending.take() {
-            Some(paths) => paths,
+        let trigger = match pending.take() {
+            Some(trigger) => trigger,
             None => {
                 let _ = events.send(RunEvent::WatchWaiting {
                     files: set.file_count(),
@@ -178,8 +196,8 @@ pub async fn watch(
                         () = cancel.cancelled() => return WatchExit::Interrupted,
                         batch = watcher.next_batch() => match batch {
                             Some(batch) => {
-                                if let Some(paths) = relevant(&mut set, batch) {
-                                    break paths;
+                                if let Some(trigger) = relevant(&mut set, batch) {
+                                    break trigger;
                                 }
                             }
                             None => return WatchExit::WatcherClosed,
@@ -189,36 +207,87 @@ pub async fn watch(
             }
         };
         let _ = events.send(RunEvent::WatchTriggered {
-            paths: display_paths(&root, &paths),
+            paths: display_paths(&root, &trigger.paths),
         });
-    }
-}
 
-/// What a batch amounts to once classified: the paths that concern the
-/// session, `None` when none of them do. An empty vector is a trigger
-/// too — that is what a rescan looks like, a change the watcher cannot
-/// name.
-fn relevant(set: &mut WatchSet, batch: WatchBatch) -> Option<Vec<PathBuf>> {
-    match batch {
-        WatchBatch::Rescan => Some(Vec::new()),
-        WatchBatch::Paths(paths) => {
-            let relevant: Vec<PathBuf> = paths
-                .into_iter()
-                .filter(|path| matches!(set.classify(path), Relevance::Beamfile | Relevance::Input))
-                .collect();
-            (!relevant.is_empty()).then_some(relevant)
+        // ---- reload phase ----------------------------------------------
+        // The next iteration schedules the beams as they are now written,
+        // not as they were when the session started. Whichever way the
+        // project comes back, it is the loop's next iteration that rebuilds
+        // the watched set and runs: the trigger above already announced
+        // this cycle, and a recovery must not announce a second one.
+        if trigger.beamfile {
+            match alba_core::load_project(beamfile) {
+                Ok((fresh_project, fresh_sources)) => {
+                    (project, sources) = (fresh_project, fresh_sources);
+                }
+                Err(error) => {
+                    on_error(&SessionError::Load(error));
+                    match reload_when_beamfile_changes(beamfile, &mut *watcher, &cancel, on_error)
+                        .await
+                    {
+                        Reloaded::Project(fresh_project, fresh_sources) => {
+                            (project, sources) = (fresh_project, fresh_sources);
+                        }
+                        Reloaded::Exit(exit) => return exit,
+                    }
+                }
+            }
         }
     }
 }
 
-/// Folds a fresh trigger's paths into the one already held, so a burst of
-/// batches during a single run announces one run over their union.
-fn merge(pending: &mut Option<Vec<PathBuf>>, fresh: Vec<PathBuf>) {
+/// A batch the session acts on.
+struct Trigger {
+    /// The changed paths that concern the session. Empty is a trigger
+    /// too — that is what a rescan looks like, a change the watcher
+    /// cannot name.
+    paths: Vec<PathBuf>,
+    /// Whether one of them is a loaded Beamfile, in which case the
+    /// project is reloaded before the next run.
+    beamfile: bool,
+}
+
+/// What a batch amounts to once classified, `None` when none of its paths
+/// concern the session.
+fn relevant(set: &mut WatchSet, batch: WatchBatch) -> Option<Trigger> {
+    match batch {
+        // The watcher cannot say what changed, so the Beamfile is among
+        // the candidates; a reload is one file read and a parse, far
+        // cheaper than running a stale project until the next save.
+        WatchBatch::Rescan => Some(Trigger {
+            paths: Vec::new(),
+            beamfile: true,
+        }),
+        WatchBatch::Paths(paths) => {
+            let mut trigger = Trigger {
+                paths: Vec::new(),
+                beamfile: false,
+            };
+            for path in paths {
+                match set.classify(&path) {
+                    Relevance::Beamfile => {
+                        trigger.beamfile = true;
+                        trigger.paths.push(path);
+                    }
+                    Relevance::Input => trigger.paths.push(path),
+                    Relevance::Irrelevant => {}
+                }
+            }
+            (!trigger.paths.is_empty()).then_some(trigger)
+        }
+    }
+}
+
+/// Folds a fresh trigger into the one already held, so a burst of batches
+/// during a single run announces one run over their union.
+fn merge(pending: &mut Option<Trigger>, fresh: Trigger) {
     match pending {
         Some(existing) => {
-            for path in fresh {
-                if !existing.contains(&path) {
-                    existing.push(path);
+            existing.beamfile |= fresh.beamfile;
+            for path in fresh.paths {
+                if !existing.paths.contains(&path) {
+                    existing.paths.push(path);
                 }
             }
         }
@@ -273,22 +342,40 @@ fn relative_to(root: &Path, canonical_root: Option<&Path>, path: &Path) -> PathB
     path.to_path_buf()
 }
 
-/// Sees the session out once its watched set could not be built. The
-/// project is fixed for the session's lifetime, so rebuilding it would
-/// fail identically; the loop stays alive only to end on the same terms
-/// as a healthy one.
-async fn idle_until_the_session_ends(
+/// How the broken-project idle state ended.
+enum Reloaded {
+    /// A Beamfile that loads again, and the sources it came from.
+    Project(Project, SourceMap),
+    /// The session ended before one arrived.
+    Exit(WatchExit),
+}
+
+/// The broken-project idle state: the last load — or the watched set
+/// built from it — failed and was reported; nothing may execute until a
+/// Beamfile the session can work from exists again.
+///
+/// Every subsequent batch retries the reload rather than being classified
+/// first: the stale `WatchSet` could still name the Beamfiles it knew
+/// about, but not one that a fixed `import` line has only just added, and
+/// a retry is one file read plus a parse. Repeated failures are reported
+/// each time: the user just saved the file and is looking at the terminal
+/// for an answer.
+async fn reload_when_beamfile_changes(
+    beamfile: &Path,
     watcher: &mut dyn Watcher,
     cancel: &CancellationToken,
-) -> WatchExit {
+    on_error: &mut (dyn FnMut(&SessionError) + Send),
+) -> Reloaded {
     loop {
         tokio::select! {
-            () = cancel.cancelled() => return WatchExit::Interrupted,
-            batch = watcher.next_batch() => {
-                if batch.is_none() {
-                    return WatchExit::WatcherClosed;
-                }
-            }
+            () = cancel.cancelled() => return Reloaded::Exit(WatchExit::Interrupted),
+            batch = watcher.next_batch() => match batch {
+                Some(_) => match alba_core::load_project(beamfile) {
+                    Ok((project, sources)) => return Reloaded::Project(project, sources),
+                    Err(error) => on_error(&SessionError::Load(error)),
+                },
+                None => return Reloaded::Exit(WatchExit::WatcherClosed),
+            },
         }
     }
 }

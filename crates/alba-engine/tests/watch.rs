@@ -11,7 +11,7 @@
 //! does.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
@@ -86,7 +86,43 @@ impl Session {
     }
 }
 
+/// Session-error kinds observed, in order. The engine's error types are
+/// not `Clone`, so the log keeps a tag per error rather than the error.
+#[derive(Debug, PartialEq)]
+enum ObservedError {
+    Load,
+    Run,
+}
+
 fn start(beamfile: &str, target: &str, executor: FakeExecutor, force: bool) -> Session {
+    start_reporting_to(beamfile, target, executor, force, |_| {})
+}
+
+/// A session whose `on_error` reports are recorded, so a test can assert
+/// what the caller was told and in which order.
+fn start_with_error_log(
+    beamfile: &str,
+    target: &str,
+    executor: FakeExecutor,
+) -> (Session, Arc<Mutex<Vec<ObservedError>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&log);
+    let session = start_reporting_to(beamfile, target, executor, false, move |error| {
+        sink.lock().unwrap().push(match error {
+            SessionError::Load(_) => ObservedError::Load,
+            SessionError::Run(_) => ObservedError::Run,
+        });
+    });
+    (session, log)
+}
+
+fn start_reporting_to(
+    beamfile: &str,
+    target: &str,
+    executor: FakeExecutor,
+    force: bool,
+    mut on_error: impl FnMut(&SessionError) + Send + 'static,
+) -> Session {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
@@ -130,7 +166,7 @@ fn start(beamfile: &str, target: &str, executor: FakeExecutor, force: bool) -> S
                 Box::new(ScriptedWatcher {
                     batches: batches_rx,
                 }),
-                &mut |_: &SessionError| {},
+                &mut on_error,
             )
             .await
         }
@@ -366,6 +402,108 @@ async fn trigger_latency_stays_imperceptible() {
     session.send(vec![changed]);
     session.event_matching(is_triggered).await;
     assert!(sent_at.elapsed() < Duration::from_secs(2));
+
+    session.finish().await;
+}
+
+/// Editing the Beamfile mid-session is picked up without a restart: the
+/// next run executes the *new* command.
+#[tokio::test]
+async fn a_beamfile_change_reloads_and_reruns() {
+    let mut session = start(
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-v1\" }\n",
+        "build",
+        FakeExecutor::new(),
+        false,
+    );
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch(
+        "Beamfile",
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-v2\" }\n",
+    );
+    session.send(vec![beamfile]);
+
+    session.event_matching(is_triggered).await;
+    session.event_matching(is_run_finished).await;
+    let commands: Vec<String> = session
+        .executor
+        .calls()
+        .iter()
+        .map(|call| call.command.clone())
+        .collect();
+    assert!(commands.iter().any(|c| c.contains("compile-v1")));
+    assert!(commands.iter().any(|c| c.contains("compile-v2")));
+
+    session.finish().await;
+}
+
+/// A Beamfile that stops parsing is reported, nothing executes, and the
+/// session resumes as soon as it parses again.
+#[tokio::test]
+async fn a_broken_beamfile_reports_waits_and_recovers() {
+    let (mut session, errors) = start_with_error_log(
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n",
+        "build",
+        FakeExecutor::new(),
+    );
+    session.event_matching(is_waiting).await;
+    let calls_before = session.executor.calls().len();
+
+    let beamfile = session.touch("Beamfile", "beam build { this does not parse");
+    session.send(vec![beamfile.clone()]);
+    session.event_matching(is_triggered).await;
+
+    // The load failure is reported; no run happens on a broken project.
+    // Give the loop a moment to (wrongly) start one before asserting.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(*errors.lock().unwrap(), vec![ObservedError::Load]);
+    assert_eq!(session.executor.calls().len(), calls_before);
+
+    // The fix arrives: reload succeeds and the session runs again.
+    session.touch(
+        "Beamfile",
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-fixed\" }\n",
+    );
+    session.send(vec![beamfile]);
+    session.event_matching(is_run_finished).await;
+    assert!(
+        session
+            .executor
+            .calls()
+            .iter()
+            .any(|call| call.command.contains("compile-fixed"))
+    );
+
+    session.finish().await;
+}
+
+/// A target that vanishes on reload (renamed beam) is a run error, not a
+/// crash: reported, and the session waits for the next Beamfile change.
+#[tokio::test]
+async fn a_renamed_target_reports_and_recovers_on_the_next_edit() {
+    let (mut session, errors) = start_with_error_log(
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n",
+        "build",
+        FakeExecutor::new(),
+    );
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch(
+        "Beamfile",
+        "beam renamed { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n",
+    );
+    session.send(vec![beamfile.clone()]);
+    session.event_matching(is_triggered).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(errors.lock().unwrap().contains(&ObservedError::Run));
+
+    session.touch(
+        "Beamfile",
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-back\" }\n",
+    );
+    session.send(vec![beamfile]);
+    session.event_matching(is_run_finished).await;
 
     session.finish().await;
 }
