@@ -18,6 +18,7 @@ dependencies = [
  "alba-core",
  "alba-engine",
  "alba-executors",
+ "alba-shell",
  "alba-syntax",
  "assert_cmd",
  "clap",

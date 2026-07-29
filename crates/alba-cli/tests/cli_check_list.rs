@@ -36,6 +36,70 @@ fn check_renders_parse_error_with_exit_2() {
         .stderr(predicates::str::contains("did you mean `description`?"));
 }
 
+/// A beam with no parameters using the default (embedded-shell) executor
+/// has its `run` template rendered and parsed statically: unsupported
+/// syntax must surface at `check` time rather than waiting for `alba run`
+/// to discover it. `alba check`'s own diagnostic goes to stderr, matching
+/// every other Beamfile diagnostic this binary renders.
+#[test]
+fn check_rejects_invalid_embedded_shell_syntax() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam bad { run \"echo 'unclosed\" }",
+    )
+    .unwrap();
+    alba()
+        .current_dir(&dir)
+        .arg("check")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("beam `bad`"))
+        .stderr(predicates::str::contains("unclosed single quote"));
+}
+
+/// Two beams whose `run` command could never be validated statically: a
+/// parameterized beam's template is unknowable until its arguments arrive
+/// (its unclosed quote here would only show up once `deploy` actually
+/// runs), and a `system_shell` beam does not speak the embedded shell's
+/// grammar at all. Both must be skipped rather than rejected, so `check`
+/// still exits 0 and still prints its usual success line.
+#[test]
+fn check_skips_parameterized_and_system_shell_beams() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam deploy(target) { run \"echo {target} 'x\" }\n\
+         beam legacy { executor system_shell run \"if [ 1 ]; then echo y; fi\" }\n",
+    )
+    .unwrap();
+    alba()
+        .current_dir(&dir)
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 beams"));
+}
+
+/// A beam with no parameters and multiple valid embedded-shell commands
+/// (including a pipeline) is validated and passes: `check` must not reject
+/// the syntax the embedded shell actually supports.
+#[test]
+fn check_accepts_valid_embedded_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam ok { run [\"echo one\", \"cat a.txt | cat\"] }",
+    )
+    .unwrap();
+    alba()
+        .current_dir(&dir)
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\u{2713} Beamfile: 1 beam"));
+}
+
 /// Beamfile with two described beams and no `default` declaration: a bare
 /// `alba` invocation must list both ids and both descriptions on stdout,
 /// sorted by id (`build` before `test`), and exit 0.

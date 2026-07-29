@@ -12,6 +12,7 @@ path = "src/main.rs"
 alba-core = { path = "../alba-core" }
 alba-engine = { path = "../alba-engine" }
 alba-executors = { path = "../alba-executors" }
+alba-shell = { path = "../alba-shell" }
 alba-syntax = { path = "../alba-syntax" }
 clap.workspace = true
 owo-colors.workspace = true
