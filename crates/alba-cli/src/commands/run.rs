@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
-use alba_engine::{CacheOptions, EngineError, RunEvent, RunOptions, RunSummary};
+use alba_engine::{CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary};
 use alba_executors::SystemShellExecutor;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -85,11 +85,13 @@ async fn execute(
     tokio::spawn(watch_interrupts(cancel.clone()));
     let consumer = tokio::spawn(consume(incoming, renderer(flags), cancel.clone()));
 
+    // Temporary: both slots point at the system shell until the embedded
+    // shell executor exists to take the `Shell` slot.
     let result = alba_engine::run(
         project,
         target,
         options,
-        Arc::new(SystemShellExecutor),
+        Executors::uniform(Arc::new(SystemShellExecutor)),
         events,
         cancel.clone(),
     )

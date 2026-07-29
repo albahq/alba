@@ -78,6 +78,55 @@ pub struct RunOptions {
     pub cache: Option<CacheOptions>,
 }
 
+/// The executors a run can dispatch to, chosen per beam.
+#[derive(Clone)]
+pub struct Executors {
+    /// `ExecutorKind::Shell`: the default (the embedded shell, once the
+    /// CLI wires it in).
+    pub embedded: Arc<dyn Executor>,
+    /// `ExecutorKind::SystemShell`: the per-beam opt-out.
+    pub system: Arc<dyn Executor>,
+}
+
+impl Executors {
+    /// Both slots on the same executor: what tests and `alba check` want.
+    pub fn uniform(executor: Arc<dyn Executor>) -> Self {
+        Self {
+            embedded: Arc::clone(&executor),
+            system: executor,
+        }
+    }
+
+    /// Which executor a beam's declared kind dispatches to.
+    ///
+    /// `Docker` never reaches here: [`plan`] rejects a docker beam during
+    /// validation, before any beam task is built, so this beam's kind is
+    /// always `Shell` or `SystemShell` by the time a task asks.
+    fn for_beam(&self, kind: &ExecutorKind) -> Arc<dyn Executor> {
+        match kind {
+            ExecutorKind::Shell => Arc::clone(&self.embedded),
+            ExecutorKind::SystemShell => Arc::clone(&self.system),
+            ExecutorKind::Docker { .. } => {
+                unreachable!("docker executor is rejected during validation, before scheduling")
+            }
+        }
+    }
+}
+
+/// The fingerprint's own name for a beam's executor: participates in the
+/// cache key (see [`crate::cache::BeamFacts::executor`]) so switching a
+/// beam between `Shell` and `SystemShell` invalidates its cache entry even
+/// when nothing else about it changed.
+fn executor_label(kind: &ExecutorKind) -> &'static str {
+    match kind {
+        ExecutorKind::Shell => "embedded",
+        ExecutorKind::SystemShell => "system",
+        ExecutorKind::Docker { .. } => {
+            unreachable!("docker executor is rejected during validation, before scheduling")
+        }
+    }
+}
+
 /// Runs `target` and everything it needs, and reports what happened.
 ///
 /// Returns `Err` only for something Alba itself cannot do — an unknown
@@ -91,7 +140,7 @@ pub async fn run(
     project: &Project,
     target: &BeamId,
     options: RunOptions,
-    executor: Arc<dyn Executor>,
+    executors: Executors,
     events: UnboundedSender<RunEvent>,
     cancel: CancellationToken,
 ) -> Result<RunSummary, EngineError> {
@@ -151,7 +200,7 @@ pub async fn run(
             dependencies,
             status,
             slots: Arc::clone(&slots),
-            executor: Arc::clone(&executor),
+            executor: executors.for_beam(&beam.executor),
             events: events.clone(),
             cancel: cancel.clone(),
             stop: stop.clone(),
@@ -456,6 +505,7 @@ async fn process(
             &plan.cwd.to_string_lossy(),
             &plan.env,
             &task.args,
+            executor_label(&task.beam.executor),
         )),
         (None, None) => None,
     };
@@ -521,6 +571,7 @@ async fn assess(
         args: task.args.clone(),
         needs,
         force: task.force,
+        executor: executor_label(&task.beam.executor),
     };
     // Off the runtime's worker threads: `decide` walks a directory tree
     // and reads every input file whole through `std::fs`. Doing that in an
@@ -551,6 +602,7 @@ struct CacheableBeam {
     args: Vec<String>,
     needs: Vec<String>,
     force: bool,
+    executor: &'static str,
 }
 
 impl CacheableBeam {
@@ -597,6 +649,7 @@ impl CacheableBeam {
             env: &self.env,
             args: &self.args,
             needs: &self.needs,
+            executor: self.executor,
         });
 
         let hit = (!self.force)

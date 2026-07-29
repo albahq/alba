@@ -9,8 +9,9 @@
 //! themselves.
 //!
 //! Everything a caller needs is [`run`]: give it a project, a target,
-//! [`RunOptions`], an executor, a channel to receive [`RunEvent`]s on, and
-//! a cancellation token, and it reports back a [`RunSummary`].
+//! [`RunOptions`], the [`Executors`] to dispatch each beam's declared kind
+//! to, a channel to receive [`RunEvent`]s on, and a cancellation token, and
+//! it reports back a [`RunSummary`].
 
 mod cache;
 mod event;
@@ -18,7 +19,7 @@ mod scheduler;
 
 pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
-pub use scheduler::{RunOptions, run};
+pub use scheduler::{Executors, RunOptions, run};
 
 use alba_core::{BeamId, CoreError};
 

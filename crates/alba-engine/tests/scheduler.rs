@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
-use alba_engine::{BeamStatus, EngineError, RunEvent, RunOptions, RunSummary, run};
+use alba_engine::{BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, run};
 use alba_executors::{
     CommandSpec, ExecContext, ExecError, ExecResult, Executor, FakeBehavior, FakeExecutor,
     OutputLine, Stream,
@@ -82,6 +82,26 @@ async fn run_target_with_cancel(
     executor: Arc<dyn Executor>,
     cancel: CancellationToken,
 ) -> Outcome {
+    run_target_with_executors(
+        source,
+        target,
+        options,
+        Executors::uniform(executor),
+        cancel,
+    )
+    .await
+}
+
+/// Like [`run_target_with_cancel`], but for a scenario that needs the
+/// embedded and system slots to be distinguishable executors rather than
+/// one executor wearing both hats.
+async fn run_target_with_executors(
+    source: &str,
+    target: &str,
+    options: RunOptions,
+    executors: Executors,
+    cancel: CancellationToken,
+) -> Outcome {
     let project = load_str(source).expect("the test Beamfile must load");
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -89,7 +109,7 @@ async fn run_target_with_cancel(
         &project,
         &BeamId(target.to_string()),
         options,
-        executor,
+        executors,
         events_tx,
         cancel,
     )
@@ -765,6 +785,61 @@ async fn parameter_count_must_match_the_target() {
         missing.error().to_string(),
         "beam `deploy` expects 1 parameter (`target`), got 0"
     );
+}
+
+/// A beam declaring `executor system_shell` dispatches to `Executors::system`
+/// while every other beam keeps using `Executors::embedded` — the two slots
+/// are genuinely independent, not just two names for one executor.
+#[tokio::test]
+async fn a_system_shell_beam_uses_the_system_executor() {
+    const SOURCE: &str = r#"
+beam a { run "step a" }
+beam b { executor system_shell run "step b" }
+beam all { needs [a, b] run "step all" }
+"#;
+
+    let embedded = Arc::new(FakeExecutor::new());
+    let system = Arc::new(FakeExecutor::new());
+    let executors = Executors {
+        embedded: embedded.clone(),
+        system: system.clone(),
+    };
+
+    let outcome = run_target_with_executors(
+        SOURCE,
+        "all",
+        options(2, false),
+        executors,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(ids(&outcome.summary().succeeded), ["a", "b", "all"]);
+    assert_eq!(
+        commands(&embedded),
+        ["step a", "step all"],
+        "the default-executor beams must run on the embedded slot only"
+    );
+    assert_eq!(
+        commands(&system),
+        ["step b"],
+        "the system-shell beam must run on the system slot only"
+    );
+}
+
+/// `executor system_shell` is a real, implemented executor kind: it must
+/// not trip the same unschedulability gate that rejects `docker`.
+#[tokio::test]
+async fn a_system_shell_beam_passes_validation() {
+    const SOURCE: &str = r#"
+beam build { executor system_shell run "step build" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    assert_eq!(ids(&outcome.summary().succeeded), ["build"]);
+    assert_eq!(commands(&executor), ["step build"]);
 }
 
 #[tokio::test]

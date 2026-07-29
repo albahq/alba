@@ -10,8 +10,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use alba_core::{BeamId, load_str};
-use alba_engine::{BeamStatus, CacheOptions, RunEvent, RunOptions, RunSummary, run};
+use alba_core::{BeamId, ExecutorKind, load_str};
+use alba_engine::{BeamStatus, CacheOptions, Executors, RunEvent, RunOptions, RunSummary, run};
 use alba_executors::{FakeBehavior, FakeExecutor};
 use tokio_util::sync::CancellationToken;
 
@@ -105,7 +105,7 @@ async fn run_prepared(
         &project,
         &BeamId(target.to_string()),
         options,
-        executor.clone(),
+        Executors::uniform(executor.clone()),
         events_tx,
         CancellationToken::new(),
     )
@@ -692,6 +692,54 @@ async fn a_changed_cwd_reruns() {
         different.executed().len(),
         1,
         "a beam that now runs somewhere else must rerun"
+    );
+}
+
+/// A cached beam's manifest was computed under one executor; replaying it
+/// after the beam switched to the other must not happen, because the two
+/// executors can run the very same command differently (the whole reason
+/// `system_shell` exists as an opt-out). `unchanged` is the control: it
+/// proves the cache really does hit here absent the switch, so the
+/// `switched` assertion is not vacuous.
+#[tokio::test]
+async fn switching_executor_kind_invalidates_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    let unchanged = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    let switched = run_prepared(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+        |project| project.beams[0].executor = ExecutorKind::SystemShell,
+    )
+    .await;
+
+    assert!(
+        unchanged.executed().is_empty(),
+        "precondition: an unchanged rerun must still hit"
+    );
+    assert_eq!(
+        switched.executed(),
+        vec!["generate"],
+        "switching a beam's executor must invalidate its cache entry rather than replay it"
     );
 }
 

@@ -18,6 +18,10 @@ pub(crate) struct BeamFacts<'a> {
     pub env: &'a [(String, String)],
     pub args: &'a [String],
     pub needs: &'a [String],
+    /// Which executor this beam dispatches to (`"embedded"` or
+    /// `"system"`): a beam replayed under one executor must not be
+    /// mistaken for a hit computed under the other.
+    pub executor: &'static str,
 }
 
 /// The blake3 hex fingerprint of `facts`. Any change to how this feeds
@@ -36,8 +40,11 @@ pub(crate) fn fingerprint(facts: &BeamFacts<'_>) -> String {
     for command in facts.commands {
         item(&mut hasher, command);
     }
-    // Right after the commands: where they run completes what runs, and
-    // the same command in another directory is another invocation.
+    item(&mut hasher, "executor");
+    item(&mut hasher, facts.executor);
+    // Right after the commands and the executor that runs them: where
+    // they run completes what runs, and the same command in another
+    // directory is another invocation.
     item(&mut hasher, "cwd");
     item(&mut hasher, facts.cwd);
     item(&mut hasher, "env");
@@ -67,6 +74,7 @@ pub(crate) fn static_contribution(
     cwd: &str,
     env: &[(String, String)],
     args: &[String],
+    executor: &'static str,
 ) -> String {
     fingerprint(&BeamFacts {
         files: &[],
@@ -75,6 +83,7 @@ pub(crate) fn static_contribution(
         env,
         args,
         needs: &[],
+        executor,
     })
 }
 
@@ -112,6 +121,7 @@ mod tests {
         env: &[(&str, &str)],
         args: &[&str],
         needs: &[&str],
+        executor: &'static str,
     ) -> String {
         fingerprint(&BeamFacts {
             files: &pairs(files),
@@ -120,6 +130,7 @@ mod tests {
             env: &pairs(env),
             args: &strings(args),
             needs: &strings(needs),
+            executor,
         })
     }
 
@@ -132,6 +143,7 @@ mod tests {
             &[("K", "v")],
             &[],
             &[],
+            "embedded",
         );
         let b = facts_fingerprint(
             &[("src/a.rs", "h1")],
@@ -140,6 +152,7 @@ mod tests {
             &[("K", "v")],
             &[],
             &[],
+            "embedded",
         );
         assert_eq!(a, b);
     }
@@ -153,6 +166,7 @@ mod tests {
             &[("K", "v")],
             &["arg"],
             &["n1"],
+            "embedded",
         );
 
         let variants = [
@@ -163,6 +177,7 @@ mod tests {
                 &[("K", "v")],
                 &["arg"],
                 &["n1"],
+                "embedded",
             ),
             facts_fingerprint(
                 &[("b", "h1")],
@@ -171,6 +186,7 @@ mod tests {
                 &[("K", "v")],
                 &["arg"],
                 &["n1"],
+                "embedded",
             ),
             facts_fingerprint(
                 &[("a", "h1")],
@@ -179,6 +195,7 @@ mod tests {
                 &[("K", "v")],
                 &["arg"],
                 &["n1"],
+                "embedded",
             ),
             facts_fingerprint(
                 &[("a", "h1")],
@@ -187,6 +204,7 @@ mod tests {
                 &[("K", "v")],
                 &["arg"],
                 &["n1"],
+                "embedded",
             ),
             facts_fingerprint(
                 &[("a", "h1")],
@@ -195,6 +213,7 @@ mod tests {
                 &[("K", "w")],
                 &["arg"],
                 &["n1"],
+                "embedded",
             ),
             facts_fingerprint(
                 &[("a", "h1")],
@@ -203,6 +222,7 @@ mod tests {
                 &[("K", "v")],
                 &["other"],
                 &["n1"],
+                "embedded",
             ),
             facts_fingerprint(
                 &[("a", "h1")],
@@ -211,6 +231,16 @@ mod tests {
                 &[("K", "v")],
                 &["arg"],
                 &["n2"],
+                "embedded",
+            ),
+            facts_fingerprint(
+                &[("a", "h1")],
+                &["cmd"],
+                "/p",
+                &[("K", "v")],
+                &["arg"],
+                &["n1"],
+                "system",
             ),
         ];
         for variant in variants {
@@ -222,18 +252,23 @@ mod tests {
     /// plain concatenation would collide them.
     #[test]
     fn adjacent_items_cannot_collide_by_concatenation() {
-        let joined = facts_fingerprint(&[], &["ab"], "/p", &[], &[], &[]);
-        let split = facts_fingerprint(&[], &["a", "b"], "/p", &[], &[], &[]);
+        let joined = facts_fingerprint(&[], &["ab"], "/p", &[], &[], &[], "embedded");
+        let split = facts_fingerprint(&[], &["a", "b"], "/p", &[], &[], &[], "embedded");
         assert_ne!(joined, split);
     }
 
     #[test]
     fn the_static_contribution_ignores_files_and_needs() {
-        let contribution =
-            static_contribution(&strings(&["cmd"]), "/p", &pairs(&[("K", "v")]), &[]);
+        let contribution = static_contribution(
+            &strings(&["cmd"]),
+            "/p",
+            &pairs(&[("K", "v")]),
+            &[],
+            "embedded",
+        );
         assert_eq!(
             contribution,
-            facts_fingerprint(&[], &["cmd"], "/p", &[("K", "v")], &[], &[])
+            facts_fingerprint(&[], &["cmd"], "/p", &[("K", "v")], &[], &[], "embedded")
         );
     }
 

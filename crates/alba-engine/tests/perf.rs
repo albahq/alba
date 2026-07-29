@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
-use alba_engine::{CacheOptions, RunOptions, run};
+use alba_engine::{CacheOptions, Executors, RunOptions, run};
 use alba_executors::FakeExecutor;
 use tokio_util::sync::CancellationToken;
 
@@ -47,7 +47,7 @@ async fn run_once(dir: &Path) -> alba_engine::RunSummary {
         &project,
         &BeamId("build".to_string()),
         options(dir),
-        Arc::new(FakeExecutor::new()),
+        Executors::uniform(Arc::new(FakeExecutor::new())),
         events,
         CancellationToken::new(),
     )

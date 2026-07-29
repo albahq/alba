@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever the manifest layout *or the fingerprint recipe*
 /// changes incompatibly: a manifest from another version is a miss, which
 /// re-runs the beam and rewrites the entry — no migration, ever.
-pub(crate) const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 2;
 
 /// What the last successful run of a beam left behind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
