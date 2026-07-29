@@ -166,6 +166,35 @@ pub(super) fn watch_line(event: &RunEvent) -> Option<String> {
     }
 }
 
+/// The two text renderers' shared handling of a watch event: prints
+/// [`watch_line`] to `err` and, for a triggered run when `clear_between_runs`
+/// is set, clears the screen on `out` first. Returns whether `event` was a
+/// watch event at all, so a renderer's `handle` can `return` on `true` and
+/// fall through to its own match otherwise.
+///
+/// Centralized here rather than repeated in `interleaved.rs` and
+/// `grouped.rs`: both renderers happen to store their sinks under the same
+/// `out`/`err` names, so the control flow and the clear-screen escape
+/// sequence are exactly as duplicable as the phrasing `watch_line` already
+/// guards against drifting.
+pub(super) fn handle_watch_event(
+    event: &RunEvent,
+    out: &mut LineSink<io::Stdout>,
+    err: &mut LineSink<io::Stderr>,
+    clear_between_runs: bool,
+) -> bool {
+    let Some(line) = watch_line(event) else {
+        return false;
+    };
+    if matches!(event, RunEvent::WatchTriggered { .. }) && clear_between_runs {
+        // \x1b[2J clears the screen, \x1b[3J the scrollback, \x1b[H homes
+        // the cursor: each triggered run starts on a clean page.
+        out.raw("\u{1b}[2J\u{1b}[3J\u{1b}[H");
+    }
+    err.line(&line);
+    true
+}
+
 /// Writes the one-line run summary to `sink` (stderr), e.g.
 /// `✓ 3 succeeded · ✗ 1 failed · ⊘ 2 cancelled · 4.1s`.
 ///

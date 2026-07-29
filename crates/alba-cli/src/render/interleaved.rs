@@ -63,14 +63,7 @@ impl InterleavedRenderer {
 
 impl Renderer for InterleavedRenderer {
     fn handle(&mut self, event: &RunEvent) {
-        if let Some(line) = super::watch_line(event) {
-            if matches!(event, RunEvent::WatchTriggered { .. }) && self.clear_between_runs {
-                // \x1b[2J clears the screen, \x1b[3J the scrollback, \x1b[H
-                // homes the cursor: each triggered run starts on a clean
-                // page.
-                self.out.raw("\u{1b}[2J\u{1b}[3J\u{1b}[H");
-            }
-            self.err.line(&line);
+        if super::handle_watch_event(event, &mut self.out, &mut self.err, self.clear_between_runs) {
             return;
         }
         match event {
