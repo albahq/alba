@@ -63,6 +63,16 @@ pub(crate) enum Flow {
 
 /// Walks `program` to completion, returning its exit code. An empty
 /// program exits 0.
+///
+/// Returning is what ends the run, and it is the only thing that does.
+/// A cancelled pipeline can leave a stage detached (a builtin stage runs
+/// on the blocking pool, which nothing can abort), and such a stage still
+/// holds a clone of `env.output`: the channel therefore stays open past
+/// this point, for as long as that stage lives. A caller must forward
+/// lines *while* this future runs and stop once it resolves, draining
+/// whatever is already queued. Treating "the channel closed" as "the run
+/// finished" would wait out exactly the stage cancellation exists to stop
+/// waiting for.
 pub async fn execute(program: &Program, env: ShellEnv) -> ShellResult {
     let mut state = ShellState::new(env.env, env.cwd);
     let stdout = OutTarget::Lines {
@@ -380,13 +390,25 @@ async fn exec_command(
 /// capture buffer they never block, so the builtin runs inline; onto a
 /// file or a pipe they can, and a blocking write on a runtime thread
 /// would stall every other task — including, for a pipeline, the very
-/// stage meant to drain that pipe. The state travels into the blocking
-/// pool and back so a redirected `cd` or `export` still takes effect.
+/// stage meant to drain that pipe. The state travels out to that thread
+/// and back so a redirected `cd` or `export` still takes effect.
+///
+/// A dedicated thread rather than [`tokio::task::spawn_blocking`],
+/// deliberately: a builtin's blocking read or write cannot be
+/// interrupted, and a cancelled pipeline abandons the stage running it
+/// (see [`exec_stages`]). The runtime waits for every blocking-pool task
+/// before it can be dropped, so an abandoned one there would hold the
+/// whole host process open until whatever it is parked on let go, which
+/// is exactly the wait cancellation exists to end. Nothing waits for a
+/// plain thread: dropping the receiving end abandons it, and process exit
+/// does not stop for it. The cost is one thread spawn per redirected or
+/// piped builtin, which is a few microseconds against work that is about
+/// to touch the filesystem anyway.
 ///
 /// `sleep` never goes through any of that: it is dispatched straight to
 /// [`builtins::run_sleep`], a genuinely asynchronous, cancellable wait,
 /// so a cancellation lands the instant it fires rather than once a
-/// blocking-pool thread happens to notice.
+/// separate thread happens to notice.
 async fn run_builtin(
     builtin: Builtin,
     args: &[String],
@@ -404,12 +426,14 @@ async fn run_builtin(
 
     let args = args.to_vec();
     let mut owned = state.clone();
-    let (flow, owned) = tokio::task::spawn_blocking(move || {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
         let flow = builtins::run(builtin, &args, &mut owned, io);
-        (flow, owned)
-    })
-    .await
-    .expect("builtin panicked");
+        // A failed send means this stage was abandoned while it ran: the
+        // run is over and nobody is waiting for the answer any more.
+        let _ = tx.send((flow, owned));
+    });
+    let (flow, owned) = rx.await.expect("builtin panicked");
     *state = owned;
     flow
 }

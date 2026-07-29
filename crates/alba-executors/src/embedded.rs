@@ -35,40 +35,63 @@ impl Executor for EmbeddedShellExecutor {
             }
         }
 
+        let ExecContext { output, cancel } = ctx;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<alba_shell::ShellOutputLine>();
-        let forward = {
-            let output = ctx.output.clone();
-            tokio::spawn(async move {
-                while let Some(line) = rx.recv().await {
-                    let stream = match line.stream {
-                        alba_shell::ShellStream::Stdout => Stream::Stdout,
-                        alba_shell::ShellStream::Stderr => Stream::Stderr,
-                    };
-                    let _ = output.send(OutputLine {
-                        stream,
-                        text: line.text,
-                    });
-                }
-            })
-        };
-
-        let result = alba_shell::execute(
+        let shell = alba_shell::execute(
             &program,
             alba_shell::ShellEnv {
                 env,
                 cwd: cmd.cwd,
                 output: tx,
-                cancel: ctx.cancel,
+                cancel,
             },
-        )
-        .await;
-        // Dropping `tx` above (moved into `ShellEnv`) is what lets the
-        // forwarding task's `recv` loop end; join it so every line reaches
-        // `ctx.output` before this returns.
-        let _ = forward.await;
+        );
+        tokio::pin!(shell);
+
+        // Lines are forwarded *while* the run is in flight, and the run
+        // ending is what ends the forwarding. Waiting instead for the
+        // channel to close would be waiting for the last sender clone to
+        // drop, and a cancelled pipeline can leave a stage detached
+        // holding one: a builtin stage sits on the blocking pool, which
+        // nothing can abort, so "the channel closed" can trail "the run
+        // finished" by however long that stage takes. Awaiting it here
+        // would hand the whole cancellation delay straight back to the
+        // caller, which is precisely what `alba_shell::execute` returning
+        // promptly is meant to prevent.
+        let result = loop {
+            tokio::select! {
+                Some(line) = rx.recv() => forward(&output, line),
+                result = &mut shell => break result,
+            }
+        };
+
+        // The run is over, but lines it already emitted may still be
+        // queued ahead of this point. Take those, in order, before
+        // returning: nothing the run produced is lost, and anything a
+        // detached stage sends afterwards belongs to no run at all.
+        while let Ok(line) = rx.try_recv() {
+            forward(&output, line);
+        }
 
         Ok(ExecResult {
             exit_code: result.exit_code,
         })
     }
+}
+
+/// Relays one shell output line to the executor's own output channel. A
+/// failed send means the receiver is gone, which is never a reason to
+/// interrupt a running command.
+fn forward(
+    output: &tokio::sync::mpsc::UnboundedSender<OutputLine>,
+    line: alba_shell::ShellOutputLine,
+) {
+    let stream = match line.stream {
+        alba_shell::ShellStream::Stdout => Stream::Stdout,
+        alba_shell::ShellStream::Stderr => Stream::Stderr,
+    };
+    let _ = output.send(OutputLine {
+        stream,
+        text: line.text,
+    });
 }

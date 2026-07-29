@@ -369,16 +369,20 @@ async fn a_stage_that_fails_before_running_still_closes_its_pipe() {
 /// The pipeline's producer exits immediately but leaves a descendant
 /// holding the pipe's write end, so the `cat` stage stays parked in a
 /// read that will not return until that descendant is gone. `cat` is a
-/// builtin with blocking io, which means it runs on the blocking pool,
-/// where nothing can abort it: the only thing that can keep `execute`
-/// from waiting the descendant out is the join itself honouring the
-/// token.
+/// builtin with blocking io, running on a thread nothing can interrupt:
+/// the only thing that can keep `execute` from waiting the descendant out
+/// is the stage join itself honouring the token.
 ///
-/// Unix-only because there is no portable way to spawn a command that
-/// exits while a descendant of its own keeps an inherited handle open.
-/// The defect this guards is not unix-only — a builtin stage parked on
-/// any slow reader behaves the same way on every platform — but the
-/// reproduction is.
+/// Scope, precisely: this pins `execute`'s own contract, and nothing
+/// beyond it. It drops the receiving end of the output channel and never
+/// forwards a line, so it cannot see whether a *caller* that does forward
+/// lines returns promptly, nor whether an abandoned stage keeps the host
+/// process alive. Both of those are the executor's contract, covered
+/// portably by `alba-executors`' `tests/embedded.rs`.
+///
+/// Unix-only because `sh -c '... &'` is the shortest way to spawn a
+/// command that exits while a descendant keeps an inherited handle open.
+/// The defect it guards is not unix-only; the one-line reproduction is.
 #[cfg(unix)]
 #[tokio::test]
 async fn cancellation_returns_promptly_while_a_builtin_stage_is_blocked() {
