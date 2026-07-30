@@ -49,6 +49,15 @@ const ALTERNATE_SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 /// prefix, in the region the two headers always disagree on.
 const RUN_FINISHED: &str = "finished";
 
+/// What the exit replay owes for this fixture's green run: the count
+/// `alba-cli`'s `render::print_summary` puts in its summary line
+/// (`✓ 1 succeeded · 0.0s`), written to stderr once the alternate screen
+/// is already restored. Nothing the interface draws ever spells this —
+/// the tree's footer and the header both count with glyphs (`✔ 1`) — so
+/// seeing it in the bytes that follow `q` is evidence of the replay
+/// itself, not of a frame.
+const RUN_SUMMARY: &str = "1 succeeded";
+
 /// Kills the child on every exit path — including a failed assertion or a
 /// deadline expiry — so a failing smoke test never leaves a stray `alba`
 /// holding the pty open behind it.
@@ -158,15 +167,24 @@ fn the_tui_opens_restores_and_replays_on_q() {
     };
 
     // Drain whatever the quit produced (the restore sequence and the
-    // replay): bounded by the same deadline, so a stuck restore fails
-    // the test instead of hanging it.
+    // replay) into its *own* buffer: bounded by the same deadline, so a
+    // stuck restore fails the test instead of hanging it.
+    //
+    // Kept apart from `seen` because everything the interface drew is in
+    // there already — the beam's own output included, painted into the
+    // alternate screen long before `q` was sent (the wait loop above
+    // depends on exactly that). An assertion over the whole buffer
+    // therefore proves nothing about the replay: it passes just as well
+    // with `replay` deleted outright. Only what arrives after the quit
+    // can.
+    let mut after_quit = String::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         match chunks_rx.recv_timeout(remaining) {
-            Ok(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+            Ok(chunk) => after_quit.push_str(&String::from_utf8_lossy(&chunk)),
             Err(_) => break,
         }
     }
@@ -176,13 +194,21 @@ fn the_tui_opens_restores_and_replays_on_q() {
         "the alternate screen was never entered"
     );
     assert!(
-        seen.contains(ALTERNATE_SCREEN_LEAVE),
-        "the alternate screen was never left"
+        after_quit.contains(ALTERNATE_SCREEN_LEAVE),
+        "the alternate screen was never left; got after q: {after_quit:?}"
     );
     assert!(
         seen.contains("hello-from-the-beam"),
-        "no trace of the run in the replay; got tail: {:?}",
+        "the beam's output never reached the screen; got tail: {:?}",
         &seen[seen.len().saturating_sub(500)..]
+    );
+    // The exit replay itself: this fixture's run is green, so what it
+    // owes is `render::print_summary`'s own summary line — the one thing
+    // here written to stderr *after* the screen is restored, and so the
+    // one thing nothing the interface drew can stand in for.
+    assert!(
+        after_quit.contains(RUN_SUMMARY),
+        "the exit replay never printed the run's summary; got after q: {after_quit:?}"
     );
     assert_eq!(status.exit_code(), 0, "a green run quit with q exits 0");
 }

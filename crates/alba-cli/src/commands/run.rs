@@ -486,7 +486,12 @@ fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'
 /// capped: a beam that produced more than [`alba_tui::logs::MAX_LINES`]
 /// lines is replayed from wherever the buffer starts, and says so rather
 /// than passing a partial log off as the whole one.
-fn replay(err: &mut LineSink<std::io::Stderr>, outcome: &alba_tui::TuiOutcome) {
+///
+/// Generic over the sink's writer for the same reason
+/// [`crate::render::print_summary`] is: the caller hands it the real
+/// stderr, while a test hands it a buffer and reads back exactly what
+/// the user would have been left looking at.
+fn replay<W: std::io::Write>(err: &mut LineSink<W>, outcome: &alba_tui::TuiOutcome) {
     if let Some(summary) = &outcome.last_summary {
         crate::render::print_summary(err, summary);
     }
@@ -950,6 +955,109 @@ mod tests {
 
         assert_eq!(ui_enabled(&flags, true), UiDecision::Headless);
         assert_eq!(ui_enabled(&flags, false), UiDecision::Headless);
+    }
+
+    /// What `replay` wrote, as lines — the interface is gone by the time
+    /// it runs, so this is literally what the user is left looking at.
+    fn replayed(outcome: &alba_tui::TuiOutcome) -> Vec<String> {
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut sink = LineSink::new(&mut buffer);
+            replay(&mut sink, outcome);
+        }
+        String::from_utf8(buffer)
+            .expect("the replay writes UTF-8")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn outcome(
+        summary: Option<RunSummary>,
+        failed_logs: Vec<(String, Vec<String>)>,
+    ) -> alba_tui::TuiOutcome {
+        alba_tui::TuiOutcome {
+            last_run_code: summary.as_ref().map(RunSummary::exit_code),
+            last_summary: summary,
+            failed_logs,
+        }
+    }
+
+    /// A green run leaves the summary and nothing else: no beam failed,
+    /// so there is no output to replay under a header.
+    #[test]
+    fn the_replay_of_a_green_run_is_its_summary() {
+        let summary = RunSummary {
+            succeeded: vec![BeamId("ok".to_string())],
+            ..RunSummary::default()
+        };
+
+        let lines = replayed(&outcome(Some(summary), Vec::new()));
+
+        assert_eq!(lines.len(), 1, "got: {lines:?}");
+        assert!(
+            lines[0].contains("1 succeeded"),
+            "the summary the text renderers print, got: {lines:?}"
+        );
+    }
+
+    /// A failing run leaves the summary, then each failed beam's own
+    /// buffered output under its own header — the whole point of the
+    /// replay, since the alternate screen took the run with it.
+    #[test]
+    fn the_replay_of_a_failing_beam_carries_its_buffered_output() {
+        let summary = RunSummary {
+            failed: vec![BeamId("bad".to_string())],
+            ..RunSummary::default()
+        };
+        let logs = vec![(
+            "bad".to_string(),
+            vec!["boom 1".to_string(), "boom 2".to_string()],
+        )];
+
+        let lines = replayed(&outcome(Some(summary), logs));
+
+        assert!(lines[0].contains("1 failed"), "got: {lines:?}");
+        assert_eq!(
+            &lines[1..],
+            ["\u{2500}\u{2500} bad \u{2500}\u{2500}", "boom 1", "boom 2"],
+            "the beam's header, then every line it printed"
+        );
+    }
+
+    /// A beam that overflowed the interface's ring buffer is replayed
+    /// from wherever the buffer starts, and says so rather than passing
+    /// a partial log off as the whole one.
+    #[test]
+    fn a_truncated_beams_replay_discloses_what_is_missing() {
+        let summary = RunSummary {
+            failed: vec![BeamId("chatty".to_string())],
+            ..RunSummary::default()
+        };
+        let logs = vec![(
+            "chatty".to_string(),
+            (0..alba_tui::logs::MAX_LINES)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>(),
+        )];
+
+        let lines = replayed(&outcome(Some(summary), logs));
+
+        assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
+        assert!(
+            lines[2].contains(&format!("at most {} lines", alba_tui::logs::MAX_LINES)),
+            "the disclosure comes before the lines themselves, got: {:?}",
+            lines[2]
+        );
+        assert_eq!(lines[3], "line 0");
+        assert_eq!(lines.len(), 3 + alba_tui::logs::MAX_LINES);
+    }
+
+    /// A session that quit before any run finished has nothing to say:
+    /// no summary, no beams, and so not a single line.
+    #[test]
+    fn a_session_with_no_finished_run_replays_nothing() {
+        assert!(replayed(&outcome(None, Vec::new())).is_empty());
     }
 
     /// An orderly goodbye is not a failure and owes no line.

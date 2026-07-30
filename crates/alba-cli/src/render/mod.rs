@@ -205,7 +205,11 @@ pub(super) fn handle_watch_event(
 /// nothing failed should not spend half its summary saying so. The total
 /// duration is always last, so the line is never empty even for a run
 /// whose every bucket happens to be empty.
-pub fn print_summary(sink: &mut LineSink<io::Stderr>, summary: &RunSummary) {
+///
+/// Generic over the sink's writer rather than fixed to stderr: the
+/// renderers all pass their own `LineSink<io::Stderr>`, while a test can
+/// pass one over a buffer and read back the very line the user sees.
+pub fn print_summary<W: Write>(sink: &mut LineSink<W>, summary: &RunSummary) {
     sink.line(&summary_line(summary));
 }
 
