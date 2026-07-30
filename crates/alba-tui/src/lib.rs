@@ -34,6 +34,12 @@ use crate::state::AppState;
 /// is in flight — an idle screen shows nothing that a clock changes.
 const TICK: Duration = Duration::from_millis(80);
 
+/// How many queued events one frame may absorb. Coalescing a burst into
+/// a single redraw is the point; draining an endlessly refilled queue is
+/// not, since nothing else — not a keystroke, not the tick — is polled
+/// until the batch ends.
+const MAX_BATCH: usize = 256;
+
 pub struct TuiOptions {
     pub target: String,
     pub watch: bool,
@@ -83,9 +89,15 @@ pub async fn run(
                     state.apply(&event, now);
                     // Whatever is already queued behind it folds into the
                     // same frame: a beam flooding its output must cost one
-                    // redraw, not one per line.
-                    while let Ok(event) = events.try_recv() {
-                        state.apply(&event, now);
+                    // redraw, not one per line. Bounded, because a beam
+                    // producing faster than this loop drains would
+                    // otherwise keep the batch non-empty forever and
+                    // starve both the keyboard and the tick.
+                    for _ in 0..MAX_BATCH {
+                        match events.try_recv() {
+                            Ok(event) => state.apply(&event, now),
+                            Err(_) => break,
+                        }
                     }
                     dirty = true;
                 }
@@ -132,7 +144,10 @@ fn dispatch(state: &mut AppState, commands: &UnboundedSender<SessionCommand>, ac
     match action {
         Action::Quit => {
             // Quitting on a run in flight abandons it: its summary,
-            // whatever it ends up saying, is not a verdict on the sources.
+            // whatever it ends up saying, is not a verdict on the
+            // sources. Outside a run the call is inert (`AppState`
+            // marks nothing when nothing is running), which is what
+            // leaves a finished run's code standing.
             state.mark_user_cancelled();
             state.should_quit = true;
         }
@@ -148,7 +163,9 @@ fn dispatch(state: &mut AppState, commands: &UnboundedSender<SessionCommand>, ac
             if let Some(beam) = state.selected_beam() {
                 let id = BeamId(beam.id.clone());
                 // The session cancels the run in flight for us; the state
-                // has to know the superseded run may not vouch.
+                // has to know the superseded run may not vouch. Inert
+                // when no run is in flight, so re-running from an idle
+                // session does not disown the run that just finished.
                 state.mark_user_cancelled();
                 let _ = commands.send(SessionCommand::RunBeam { id, force });
             }
@@ -183,12 +200,12 @@ fn dispatch(state: &mut AppState, commands: &UnboundedSender<SessionCommand>, ac
         Action::EnterSearch => state.enter_search(),
         Action::SearchNext => state.search_next(),
         Action::SearchPrevious => state.search_previous(),
-        // Copy and Graph have neither state nor a renderer yet. Entering
-        // a mode nothing draws would leave the user facing an unchanged
-        // screen whose keys no longer do what the bottom bar says, so
-        // until those modes exist their keys do nothing at all.
-        Action::EnterCopy | Action::EnterGraph => {}
-        Action::EnterHelp => state.mode = state::Mode::Help,
+        // Copy, Graph, and Help have no renderer yet. Entering a mode
+        // nothing draws leaves the user facing an unchanged screen whose
+        // bottom bar advertises `q quit` while, modal, `q` is swallowed
+        // as a plain character — a false affordance. Until each mode's
+        // own task lands, its key does nothing at all.
+        Action::EnterCopy | Action::EnterGraph | Action::EnterHelp => {}
         Action::LeaveMode => state.leave_mode(),
         Action::Key(key) => state.handle_modal_key(key),
         // Click-to-select and drag-to-copy arrive with the copy mode that
@@ -330,6 +347,49 @@ mod tests {
             outcome.last_summary.expect("a run finished").failed,
             vec![id("bad")]
         );
+    }
+
+    /// A session that quits before any run finished has nothing to
+    /// replay and no code to offer — the CLI falls back to 130.
+    #[test]
+    fn a_session_with_no_finished_run_carries_no_outcome() {
+        let state = running(&["build"]);
+
+        let outcome = outcome(&state);
+
+        assert_eq!(outcome.last_run_code, None);
+        assert!(outcome.last_summary.is_none());
+        assert!(outcome.failed_logs.is_empty());
+    }
+
+    /// A beam can fail without printing a line (a missing binary, a
+    /// silent non-zero exit): it still belongs in the replay, with an
+    /// empty body rather than a missing entry.
+    #[test]
+    fn a_failed_beam_that_printed_nothing_still_gets_an_entry() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started(&["bad"]), now);
+        state.apply(&finished("bad", BeamStatus::Failed { exit_code: 127 }), now);
+        state.apply(&summary_event(&["bad"], &[]), now);
+
+        let outcome = outcome(&state);
+
+        assert_eq!(outcome.failed_logs, vec![("bad".to_string(), Vec::new())]);
+    }
+
+    /// A mode with no renderer must not be enterable: the screen would
+    /// not change, but the keymap would go modal behind a bottom bar
+    /// still advertising the Normal-mode keys.
+    #[test]
+    fn modes_with_no_renderer_are_not_enterable_yet() {
+        let (commands, _receiver) = commands();
+        let mut state = AppState::new("build", false);
+
+        for action in [Action::EnterCopy, Action::EnterGraph, Action::EnterHelp] {
+            dispatch(&mut state, &commands, action);
+            assert_eq!(state.mode, state::Mode::Normal, "{action:?} entered a mode");
+        }
     }
 
     /// `q` on a run in flight abandons it: the summary that lands after
