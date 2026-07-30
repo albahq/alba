@@ -13,19 +13,41 @@ use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 const ALTERNATE_SCREEN_ENTER: &str = "\u{1b}[?1049h";
 const ALTERNATE_SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 
-/// The header's own account of a finished run (see
+/// The word the header's own account of a finished run carries (see
 /// `alba-tui/src/ui/header.rs::finished_line`, format `"alba · run
-/// {target} finished · {counts} · {duration}"`), for the `ok` target this
-/// test always runs. Unlike the beam's own output — which lands on the
-/// pty as soon as `RunEvent::BeamOutput` is applied, well before the run
-/// is over — this text is only drawn once `Phase::Finished` and
-/// `last_summary` are set, and that happens in the very same
-/// `RunEvent::RunFinished` match arm that sets `AppState::outcome`
-/// (`state.rs`, the field `exit_outcome()` reads). So seeing this text on
-/// the pty is synchronized with the exit code actually being decided:
-/// waiting for it before sending `q` is what closes the race, not the
-/// beam's own output arriving.
-const RUN_FINISHED: &str = "run ok finished";
+/// {target} finished · {counts} · {duration}"`) and nothing else in this
+/// interface ever renders. Unlike the beam's own output — which lands on
+/// the pty as soon as `RunEvent::BeamOutput` is applied, well before the
+/// run is over — this word is only drawn once `Phase::Finished` and
+/// `last_summary` are set, in the very same `RunEvent::RunFinished` match
+/// arm that sets `AppState::outcome` (`state.rs`, the field
+/// `exit_outcome()` reads). So seeing it on the pty is synchronized with
+/// the exit code actually being decided.
+///
+/// It also has to survive ratatui's own diffing, which this test does not
+/// get to skip: the header is one plain, unstyled `Line`
+/// (`ui/mod.rs::draw`), and `Buffer::diff` only ever forwards a cell whose
+/// symbol or style changed from the previously drawn frame
+/// (`ratatui::buffer::Buffer::diff`) — a cell that happens to match its
+/// predecessor is silently dropped from the byte stream, cursor-jumped
+/// over instead of printed. The frame right before this one's first
+/// appearance is either the idle header (`"alba · {target} · idle"`,
+/// drawn once before any event lands) or a `Running` header (`"alba · run
+/// {target} ── {bar} {done}/{total} · {duration}"`, drawn on every
+/// `RunEvent` batch while the beam is in flight) — nothing else is
+/// reachable for a one-beam, non-watch run. At the column where
+/// `"finished"` starts (right after `"{target} "`), the idle header has
+/// either run out of characters (its own text is shorter and ends inside
+/// the word "idle") or is drawing "─"/a bar cell/a digit there — never a
+/// Latin letter — so every one of the word's 8 cells differs from either
+/// possible predecessor at that same screen position, letter by letter,
+/// independently of the run's specific timings, digits or bar fill. That
+/// is what the original `"run ok finished"` token got wrong: its `"run
+/// ok"` prefix is byte-identical to the `Running` header's own `"run
+/// ok"`, so it could be skipped by the diff entirely, leaving this loop
+/// spinning to the deadline. `"finished"` alone starts past that shared
+/// prefix, in the region the two headers always disagree on.
+const RUN_FINISHED: &str = "finished";
 
 /// Kills the child on every exit path — including a failed assertion or a
 /// deadline expiry — so a failing smoke test never leaves a stray `alba`
