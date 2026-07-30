@@ -20,8 +20,10 @@ use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::logs::LogBuffer;
+use crate::search::SearchState;
 
 /// The log buffer the parked diagnostic goes to: a pseudo-beam, so a
 /// diagnostic that belongs to no beam still has a pane to be read in.
@@ -65,7 +67,7 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
-    Search,
+    Search(SearchState),
     Copy,
     Graph,
     Help,
@@ -81,6 +83,12 @@ pub struct AppState {
     pub phase: Phase,
     pub watch_enabled: bool,
     pub mode: Mode,
+    /// The most recently active search. `Mode::Search` carries the one
+    /// being typed; this is where it lands once `Esc` or `Enter` leaves
+    /// that mode, so the log pane keeps highlighting its matches until
+    /// the next search session (`enter_search`) starts a fresh, empty
+    /// one and replaces it.
+    pub last_search: Option<SearchState>,
     pub last_summary: Option<RunSummary>,
     pub should_quit: bool,
     /// The code the last run earned, or `None` when no run may vouch.
@@ -109,6 +117,7 @@ impl AppState {
             phase: Phase::Finished,
             watch_enabled,
             mode: Mode::Normal,
+            last_search: None,
             last_summary: None,
             should_quit: false,
             outcome: None,
@@ -242,6 +251,92 @@ impl AppState {
         matches!(self.phase, Phase::Running { .. })
     }
 
+    /// `/`: opens a fresh search over the selected beam's buffer. Any
+    /// previous session's matches stay in `last_search` until this one
+    /// is itself left, which is what keeps the log pane highlighted
+    /// right up to the moment a new search replaces it.
+    pub fn enter_search(&mut self) {
+        self.mode = Mode::Search(SearchState::new());
+    }
+
+    /// `Esc`: leaves whatever modal mode is active. Search stashes its
+    /// state into `last_search` first; the other modal modes carry no
+    /// payload, so there is nothing to keep.
+    pub fn leave_mode(&mut self) {
+        if let Mode::Search(search) = std::mem::replace(&mut self.mode, Mode::Normal) {
+            self.last_search = Some(search);
+        }
+    }
+
+    /// The modal keymap's entry point: routes a key event to whichever
+    /// mode is active. Search is the only one with a handler so far —
+    /// Copy, Graph, and Help belong to the tasks that give those modes
+    /// behaviour.
+    pub fn handle_modal_key(&mut self, key: KeyEvent) {
+        if matches!(self.mode, Mode::Search(_)) {
+            self.handle_search_key(key);
+        }
+    }
+
+    /// Search's own keymap: characters and Backspace edit the query,
+    /// `n`/`N` step through matches without re-triggering a rescan, and
+    /// `Enter` leaves search mode the same way `Esc` does (via
+    /// `leave_mode`), keeping the highlights in `last_search`.
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        let Mode::Search(mut search) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            unreachable!("handle_modal_key only calls this while Mode::Search is active")
+        };
+        match key.code {
+            KeyCode::Enter => {
+                self.last_search = Some(search);
+                return;
+            }
+            KeyCode::Char('n') => search.next(),
+            KeyCode::Char('N') => search.previous(),
+            KeyCode::Char(character) => {
+                search.push_char(character);
+                self.recompute_search(&mut search);
+            }
+            KeyCode::Backspace => {
+                search.pop_char();
+                self.recompute_search(&mut search);
+            }
+            _ => {}
+        }
+        self.sync_search_scroll(&search);
+        self.mode = Mode::Search(search);
+    }
+
+    /// Reruns the search against the selected beam's buffer — called
+    /// whenever the query changes, not on every keystroke (`n`/`N` step
+    /// the existing matches instead of rescanning them).
+    fn recompute_search(&self, search: &mut SearchState) {
+        let Some(id) = self.selected_beam().map(|row| row.id.clone()) else {
+            return;
+        };
+        if let Some(buffer) = self.logs.get(&id) {
+            search.update(buffer);
+        }
+    }
+
+    /// Translates `current_line` into a `Paused` offset on the selected
+    /// beam's buffer, riding the log pane's existing Following/Paused
+    /// scrolling rather than inventing a second mechanism for search to
+    /// keep its current match on screen.
+    fn sync_search_scroll(&mut self, search: &SearchState) {
+        let Some(line) = search.current_line() else {
+            return;
+        };
+        let Some(id) = self.selected_beam().map(|row| row.id.clone()) else {
+            return;
+        };
+        if let Some(buffer) = self.logs.get_mut(&id) {
+            let offset = buffer.len().saturating_sub(1).saturating_sub(line);
+            buffer.follow_tail();
+            buffer.scroll_up(offset);
+        }
+    }
+
     /// The table is rebuilt from every `RunStarted` rather than patched:
     /// a watch session reloads the Beamfile, so the beams and the edges
     /// of the next run are not necessarily those of the last.
@@ -296,6 +391,7 @@ mod tests {
     use super::*;
     use alba_core::BeamId;
     use alba_engine::{BeamStatus, RunEvent, RunSummary};
+    use crossterm::event::KeyModifiers;
     use std::time::{Duration, Instant};
 
     fn id(name: &str) -> BeamId {
@@ -610,6 +706,190 @@ mod tests {
         state.apply(&run_started("build", &["build"], &[]), now);
         assert_eq!(state.logs.get(DIAGNOSTIC_LOG).unwrap().len(), 0);
         assert!(state.running());
+    }
+
+    /// `/`: a fresh session starts with nothing typed and nothing matched.
+    #[test]
+    fn entering_search_starts_with_an_empty_query() {
+        let mut state = AppState::new("build", false);
+        state.enter_search();
+        let search = search_state(&state);
+        assert_eq!(search.query, "");
+        assert!(search.matches.is_empty());
+    }
+
+    /// Typing feeds the query, and the mode's `SearchState` picks up the
+    /// selected beam's matches on every keystroke.
+    #[test]
+    fn typing_narrows_the_selected_beams_matches() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "Compiling api"), now);
+        state.apply(&output("build", "warning: unused"), now);
+        state.apply(&output("build", "Compiling core"), now);
+
+        // "compil", not "compiling": 'n' is reserved for stepping matches
+        // even while the query is still being typed (see the dedicated
+        // `n_and_shift_n_step_matches_without_rescanning` test below), so
+        // it never reaches `push_char`.
+        state.enter_search();
+        for character in "compil".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+
+        assert_eq!(search_state(&state).matches, vec![0, 2]);
+    }
+
+    /// `Enter` leaves search mode but stashes the query and its matches
+    /// in `last_search`, which is what keeps the log pane highlighted.
+    #[test]
+    fn enter_leaves_search_mode_and_keeps_the_highlights() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "Compiling api"), now);
+
+        state.enter_search();
+        state.handle_modal_key(char_key('c'));
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(state.mode, Mode::Normal);
+        let last_search = state.last_search.expect("Enter stashes the search");
+        assert_eq!(last_search.query, "c");
+        assert_eq!(last_search.matches, vec![0]);
+    }
+
+    /// `Esc` (the event loop's `leave_mode`) keeps the highlights the
+    /// same way `Enter` does.
+    #[test]
+    fn leave_mode_stashes_search_into_last_search() {
+        let mut state = AppState::new("build", false);
+        state.enter_search();
+        state.handle_modal_key(char_key('x'));
+        state.leave_mode();
+
+        assert_eq!(state.mode, Mode::Normal);
+        assert_eq!(
+            state.last_search.expect("Esc stashes the search").query,
+            "x"
+        );
+    }
+
+    /// A fresh search session replaces whatever `last_search` was left
+    /// behind by the previous one.
+    #[test]
+    fn a_new_search_session_starts_past_the_previous_ones_highlights() {
+        let mut state = AppState::new("build", false);
+        state.enter_search();
+        state.handle_modal_key(char_key('x'));
+        state.leave_mode();
+        assert!(state.last_search.is_some());
+
+        state.enter_search();
+        assert_eq!(
+            search_state(&state).query,
+            "",
+            "the new session starts empty"
+        );
+    }
+
+    /// Backspace narrows the query back down, and the matches narrow
+    /// with it on the very next keystroke.
+    #[test]
+    fn backspace_shrinks_the_query() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "Compiling api"), now);
+
+        state.enter_search();
+        for character in "Compilx".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        assert!(search_state(&state).matches.is_empty());
+
+        state.handle_modal_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(search_state(&state).query, "Compil");
+        assert_eq!(search_state(&state).matches, vec![0]);
+    }
+
+    /// `n`/`N` step the existing matches; they must not be swallowed as
+    /// query characters, and stepping must not re-trigger a rescan (which
+    /// would reset `current` back to the first match). A consequence
+    /// worth flagging: because `n`/`N` are reserved this way even while
+    /// the query is still being typed, the query itself can never
+    /// contain the letters `n` or `N`.
+    #[test]
+    fn n_and_shift_n_step_matches_without_rescanning() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "Compiling api"), now);
+        state.apply(&output("build", "warning: unused"), now);
+        state.apply(&output("build", "Compiling core"), now);
+
+        state.enter_search();
+        for character in "compil".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        assert_eq!(search_state(&state).query, "compil");
+        assert_eq!(search_state(&state).current_line(), Some(0));
+
+        state.handle_modal_key(char_key('n'));
+        assert_eq!(search_state(&state).current_line(), Some(2));
+        assert_eq!(
+            search_state(&state).query,
+            "compil",
+            "'n' steps, it does not get typed into the query"
+        );
+
+        state.handle_modal_key(char_key('N'));
+        assert_eq!(search_state(&state).current_line(), Some(0));
+    }
+
+    /// The log pane rides the buffer's own Following/Paused scrolling:
+    /// searching for a match well above the tail pauses the buffer so
+    /// that match is the last line its view shows.
+    #[test]
+    fn searching_scrolls_the_buffer_to_the_current_match() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "ERROR here"), now);
+        for index in 0..50 {
+            state.apply(&output("build", &format!("line {index}")), now);
+        }
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+
+        assert_eq!(search_state(&state).current_line(), Some(0));
+        let buffer = state.logs.get("build").unwrap();
+        let view = buffer.view(5);
+        assert_eq!(
+            view.last().map(String::as_str),
+            Some("ERROR here"),
+            "the match is scrolled to the bottom of its view"
+        );
+    }
+
+    fn search_state(state: &AppState) -> &SearchState {
+        match &state.mode {
+            Mode::Search(search) => search,
+            other => panic!("expected Mode::Search, got {other:?}"),
+        }
+    }
+
+    fn char_key(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
     }
 
     fn output(beam: &str, text: &str) -> RunEvent {

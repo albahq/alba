@@ -147,6 +147,7 @@ fn action_in_modal_mode(event: &Event) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::SearchState;
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
     };
@@ -239,7 +240,7 @@ mod tests {
     fn ctrl_c_maps_to_cancel_or_quit_in_every_mode() {
         for mode in [
             Mode::Normal,
-            Mode::Search,
+            Mode::Search(SearchState::new()),
             Mode::Copy,
             Mode::Graph,
             Mode::Help,
@@ -253,11 +254,11 @@ mod tests {
     #[test]
     fn modal_input_passes_ordinary_keys_through() {
         assert_eq!(
-            action_for(&key(KeyCode::Char('q')), &Mode::Search),
+            action_for(&key(KeyCode::Char('q')), &Mode::Search(SearchState::new())),
             Action::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         );
         assert_eq!(
-            action_for(&key(KeyCode::Esc), &Mode::Search),
+            action_for(&key(KeyCode::Esc), &Mode::Search(SearchState::new())),
             Action::LeaveMode
         );
     }
@@ -345,7 +346,12 @@ mod tests {
     /// (for potential interpretation by the mode's handler).
     #[test]
     fn mouse_wheel_passes_through_in_modal_modes() {
-        for mode in [Mode::Search, Mode::Copy, Mode::Graph, Mode::Help] {
+        for mode in [
+            Mode::Search(SearchState::new()),
+            Mode::Copy,
+            Mode::Graph,
+            Mode::Help,
+        ] {
             let evt = mouse_event(MouseEventKind::ScrollUp);
             match action_for(&evt, &mode) {
                 Action::Mouse(me) => {
@@ -378,7 +384,12 @@ mod tests {
     /// Mouse clicks in modal modes pass through too.
     #[test]
     fn mouse_click_passes_through_in_modal_modes() {
-        for mode in [Mode::Search, Mode::Copy, Mode::Graph, Mode::Help] {
+        for mode in [
+            Mode::Search(SearchState::new()),
+            Mode::Copy,
+            Mode::Graph,
+            Mode::Help,
+        ] {
             let evt = mouse_event(MouseEventKind::Down(crossterm::event::MouseButton::Right));
             match action_for(&evt, &mode) {
                 Action::Mouse(me) => {
@@ -407,7 +418,7 @@ mod tests {
         });
         for mode in [
             Mode::Normal,
-            Mode::Search,
+            Mode::Search(SearchState::new()),
             Mode::Copy,
             Mode::Graph,
             Mode::Help,
@@ -432,7 +443,7 @@ mod tests {
         });
         for mode in [
             Mode::Normal,
-            Mode::Search,
+            Mode::Search(SearchState::new()),
             Mode::Copy,
             Mode::Graph,
             Mode::Help,

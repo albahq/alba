@@ -10,6 +10,7 @@ use alba_core::BeamId;
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::{OutputLine, Stream};
 use alba_tui::state::AppState;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -149,4 +150,40 @@ fn a_parked_session_renders_the_diagnostic() {
 fn a_tiny_terminal_gets_the_too_small_screen() {
     let state = AppState::new("build", false);
     insta::assert_snapshot!(drawn(&state, 30, 8));
+}
+
+/// Search mode: the bottom bar shows the query and the match counter,
+/// and the pane has scrolled so the current match (the earliest one, of
+/// two) is on screen even though it sits well above the tail.
+#[test]
+fn a_search_highlights_and_counts_matches() {
+    let mut state = AppState::new("build", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            target: id("build"),
+            beams: vec![id("build")],
+            edges: vec![],
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    for index in 0..10 {
+        state.apply(&output("build", &format!("line {index}")), now);
+    }
+    state.apply(&output("build", "ERROR one"), now);
+    for index in 10..24 {
+        state.apply(&output("build", &format!("line {index}")), now);
+    }
+    state.apply(&output("build", "ERROR two"), now);
+    for index in 24..28 {
+        state.apply(&output("build", &format!("line {index}")), now);
+    }
+
+    state.enter_search();
+    for character in "error".chars() {
+        state.handle_modal_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+
+    insta::assert_snapshot!(drawn(&state, 80, 24));
 }

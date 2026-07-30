@@ -73,14 +73,22 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 }
 
 /// The always-available actions for the current mode. Only `Mode::Normal`
-/// has a keymap here: Search, Copy, Graph, and Help belong to the tasks
-/// that give those modes behaviour, so every other mode falls back to the
-/// one action that always applies rather than this task guessing at their
-/// eventual keymaps.
-fn bottom_bar(mode: &Mode) -> &'static str {
+/// and `Mode::Search` have a keymap here: Copy, Graph, and Help belong to
+/// the tasks that give those modes behaviour, so they fall back to the
+/// one action that always applies rather than this task guessing at
+/// their eventual keymaps.
+fn bottom_bar(mode: &Mode) -> String {
     match mode {
-        Mode::Normal => "q quit · r rerun · f force · c cancel · w watch",
-        Mode::Search | Mode::Copy | Mode::Graph | Mode::Help => "q quit",
+        Mode::Normal => "q quit · r rerun · f force · c cancel · w watch".to_string(),
+        Mode::Search(search) => {
+            let total = search.matches.len();
+            let current = if total == 0 { 0 } else { search.current + 1 };
+            format!(
+                "/{} · {current}/{total} · n next · N prev · Esc done",
+                search.query
+            )
+        }
+        Mode::Copy | Mode::Graph | Mode::Help => "q quit".to_string(),
     }
 }
 
