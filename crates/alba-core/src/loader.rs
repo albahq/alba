@@ -102,7 +102,14 @@ use crate::model::{Beam, BeamId, Project, SourceId};
 /// into something renderable: look up `(path, source)` here and hand both
 /// to `alba_syntax::render_diagnostic(source, &path.display().to_string(),
 /// &diagnostic)`.
-#[derive(Debug, Default, Clone)]
+///
+/// Two maps are equal when they registered the same files with the same
+/// text — which is to say when loading found the project unchanged. A
+/// caller that reloads repeatedly (the watch session, on every batch its
+/// watcher delivers) uses that to tell a reload that changed something
+/// from one that only cost a file read: loading is deterministic, so equal
+/// sources mean an equal outcome, down to the rendered diagnostic.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SourceMap {
     entries: Vec<(PathBuf, String)>,
 }
