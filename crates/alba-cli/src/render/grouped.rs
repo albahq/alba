@@ -108,6 +108,7 @@ impl Renderer for GroupedRenderer {
                 }
                 print_summary(&mut self.err, summary);
             }
+            RunEvent::RunStarted { .. } => {}
             RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
         }
     }

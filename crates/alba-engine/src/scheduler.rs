@@ -147,6 +147,19 @@ pub async fn run(
     let started_at = Instant::now();
     let beams = plan(project, target, &options.params)?;
 
+    let _ = events.send(RunEvent::RunStarted {
+        target: target.clone(),
+        beams: beams.iter().map(|beam| beam.id.clone()).collect(),
+        edges: beams
+            .iter()
+            .flat_map(|beam| {
+                beam.needs
+                    .iter()
+                    .map(|need| (beam.id.clone(), need.value.clone()))
+            })
+            .collect(),
+    });
+
     let slots = Arc::new(Semaphore::new(options.jobs.max(1)));
     let stop = cancel.child_token();
     // One store for the whole run, shared by every task: it holds only a

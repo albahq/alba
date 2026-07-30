@@ -89,6 +89,7 @@ impl Renderer for InterleavedRenderer {
                 self.line(&id.0, &text);
             }
             RunEvent::RunFinished { summary } => print_summary(&mut self.err, summary),
+            RunEvent::RunStarted { .. } => {}
             RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
         }
     }

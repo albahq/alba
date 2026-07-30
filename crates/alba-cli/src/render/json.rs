@@ -60,6 +60,11 @@ impl super::Renderer for JsonRenderer {
 #[derive(Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum WireEvent<'a> {
+    RunStarted {
+        target: &'a str,
+        beams: Vec<&'a str>,
+        edges: Vec<(&'a str, &'a str)>,
+    },
     BeamStarted {
         beam: &'a str,
     },
@@ -112,6 +117,18 @@ enum WireStream {
 impl<'a> From<&'a RunEvent> for WireEvent<'a> {
     fn from(event: &'a RunEvent) -> Self {
         match event {
+            RunEvent::RunStarted {
+                target,
+                beams,
+                edges,
+            } => WireEvent::RunStarted {
+                target: &target.0,
+                beams: beams.iter().map(|id| id.0.as_str()).collect(),
+                edges: edges
+                    .iter()
+                    .map(|(from, to)| (from.0.as_str(), to.0.as_str()))
+                    .collect(),
+            },
             RunEvent::BeamStarted { id } => WireEvent::BeamStarted { beam: &id.0 },
             RunEvent::BeamCached { id } => WireEvent::BeamCached { beam: &id.0 },
             RunEvent::BeamOutput { id, line, replayed } => WireEvent::BeamOutput {
@@ -289,6 +306,25 @@ mod tests {
         assert_eq!(value["succeeded"][0], "a");
         assert_eq!(value["failed"][0], "b");
         assert_eq!(value["exit_code"], 1);
+    }
+
+    /// `run_started` is part of the public JSON contract: a consumer needs
+    /// the run boundary and the graph snapshot for the same reason the TUI
+    /// does.
+    #[test]
+    fn run_started_is_emitted_on_the_wire() {
+        let event = RunEvent::RunStarted {
+            target: BeamId("build".to_string()),
+            beams: vec![BeamId("codegen".to_string()), BeamId("build".to_string())],
+            edges: vec![(BeamId("build".to_string()), BeamId("codegen".to_string()))],
+        };
+
+        let line = serde_json::to_string(&WireEvent::from(&event)).unwrap();
+
+        assert_eq!(
+            line,
+            r#"{"event":"run_started","target":"build","beams":["codegen","build"],"edges":[["build","codegen"]]}"#
+        );
     }
 
     /// The exact wire shape, not just its parsed fields: a consumer's

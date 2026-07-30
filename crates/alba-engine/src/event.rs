@@ -23,11 +23,26 @@ use alba_executors::OutputLine;
 /// beam that never ran (cancelled before it acquired a slot, or skipped
 /// because a dependency failed) emits only `BeamFinished` with
 /// [`BeamStatus::Cancelled`]. Events from different beams interleave
-/// freely; `RunFinished` is last *per run* — in a watch session, it is
-/// followed by `WatchWaiting` and, once a change is seen, `WatchTriggered`
-/// before the next run's events begin.
+/// freely; `RunStarted` is first *per run*, before any
+/// `BeamStarted`/`BeamCached`; `RunFinished` is last *per run* — in a watch
+/// session, it is followed by `WatchWaiting` and, once a change is seen,
+/// `WatchTriggered` before the next run's events begin.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
+    /// A run is beginning. First event of every run, before any
+    /// `BeamStarted`/`BeamCached`, carrying the snapshot of what this run
+    /// will schedule: the target, its subgraph in plan order, and the
+    /// dependency edges between members of that subgraph. A snapshot rather
+    /// than something the consumer looks up, because a watch session
+    /// reloads the Beamfile mid-session — a run's graph is not known once
+    /// and for all.
+    RunStarted {
+        target: BeamId,
+        beams: Vec<BeamId>,
+        /// `(beam, dependency)`: the first needs the second. Both ends are
+        /// always members of `beams` — the subgraph is transitively closed.
+        edges: Vec<(BeamId, BeamId)>,
+    },
     BeamStarted {
         id: BeamId,
     },

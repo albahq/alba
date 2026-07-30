@@ -842,6 +842,39 @@ beam build { executor system_shell run "step build" }
     assert_eq!(commands(&executor), ["step build"]);
 }
 
+/// Every run announces its plan before any beam starts: the TUI's tree
+/// and graph are built from this snapshot, and a reloadable Beamfile
+/// means the graph is not known once and for all.
+#[tokio::test]
+async fn a_run_announces_its_plan_before_any_beam_starts() {
+    const SOURCE: &str = r#"
+beam codegen { run "step codegen" }
+beam build { needs [codegen] run "step build" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+    assert!(outcome.summary().failed.is_empty(), "precondition");
+
+    let first = outcome.events.first().expect("at least one event");
+    match first {
+        RunEvent::RunStarted {
+            target,
+            beams,
+            edges,
+        } => {
+            assert_eq!(target.0, "build");
+            assert_eq!(ids(beams), ["codegen", "build"]);
+            assert_eq!(edges.len(), 1);
+            assert_eq!(
+                (edges[0].0.0.as_str(), edges[0].1.0.as_str()),
+                ("build", "codegen")
+            );
+        }
+        other => panic!("first event must be RunStarted, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn only_the_target_beam_may_declare_parameters() {
     const SOURCE: &str = r#"
