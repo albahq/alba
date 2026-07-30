@@ -1,0 +1,29 @@
+---
+source: crates/alba-tui/tests/render.rs
+assertion_line: 134
+expression: "drawn(&state, 80, 24)"
+---
+"alba · parked · waiting for a valid Beamfile                                    "
+"BEAMS                         diagnostic                                        "
+"                              error: unknown target `nope`                      "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"✔ 0  ⚡ 0  ✖ 0  ○ 0           ● following                                       " Hidden by multi-width symbols: [(6, " ")]
+"q quit · r rerun · f force · c cancel · w watch                                 "

@@ -6,3 +6,4 @@
 pub mod logs;
 pub mod state;
 pub mod terminal;
+pub mod ui;

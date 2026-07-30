@@ -1,0 +1,13 @@
+---
+source: crates/alba-tui/tests/render.rs
+assertion_line: 141
+expression: "drawn(&state, 30, 8)"
+---
+"terminal too small (need at le"
+"                              "
+"                              "
+"                              "
+"                              "
+"                              "
+"                              "
+"                              "

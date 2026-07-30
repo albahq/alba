@@ -1,0 +1,29 @@
+---
+source: crates/alba-tui/tests/render.rs
+assertion_line: 121
+expression: "drawn(&state, 80, 24)"
+---
+"alba · waiting · 42 files watched                                               "
+"BEAMS                         logs ·                                            "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"✔ 0  ⚡ 0  ✖ 0  ○ 0           ● following                                       " Hidden by multi-width symbols: [(6, " ")]
+"q quit · r rerun · f force · c cancel · w watch                                 "
