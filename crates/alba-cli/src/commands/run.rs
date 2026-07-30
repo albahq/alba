@@ -419,9 +419,15 @@ async fn tui_execute(
     // The interface owns the last word either way: on its own exit it sent
     // `Shutdown`, and on a failure it dropped the command sender, which the
     // session reads as the same thing. So this joins on a session that is
-    // already stopping, and cannot hang. Its `WatchExit` says nothing the
-    // interface has not already reported on screen.
-    let _ = session.await;
+    // already stopping, and cannot hang.
+    let failure = session_failure(session.await);
+
+    // Everything below writes to a terminal the guard restored when
+    // `alba_tui::run` returned, so the alternate screen is gone and stderr
+    // reaches the shell the user is left looking at.
+    if let Some(message) = failure {
+        err.line(message);
+    }
 
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -431,15 +437,41 @@ async fn tui_execute(
         }
     };
 
-    // Only now: the terminal guard dropped when `alba_tui::run` returned,
-    // so the alternate screen is gone and stderr reaches the shell the user
-    // is left looking at.
     replay(&mut err, &outcome);
 
-    // No run that ran to completion means nothing here vouches for the
-    // sources: an abandoned run, a parked session, or a session the user
-    // quit before anything finished all report an interruption.
-    outcome.last_run_code.unwrap_or(EXIT_INTERRUPTED)
+    match failure {
+        // A session that did not end on its own terms is an Alba failure,
+        // the same [`EXIT_ALBA_ERROR`] the headless session reports for it.
+        // The last run's code would claim a session that concluded, and
+        // this one was cut off under the interface.
+        Some(_) => EXIT_ALBA_ERROR,
+        // No run that ran to completion means nothing here vouches for the
+        // sources: an abandoned run, a parked session, or a session the
+        // user quit before anything finished all report an interruption.
+        None => outcome.last_run_code.unwrap_or(EXIT_INTERRUPTED),
+    }
+}
+
+/// The stderr line a session owes when it did not end on its own terms,
+/// `None` for the ordinary goodbye.
+///
+/// [`WatchExit::WatcherClosed`] is the one the interface *cannot* report
+/// itself: the session ending closes the event channel, which the
+/// interface reads as "nothing left to drive" and leaves on, silently — so
+/// without this a watcher that died would take the whole session down
+/// without a word, and with whatever the last run happened to earn. The
+/// wording is the headless session's, deliberately: it is the same event.
+///
+/// A `JoinError` is a panic in the session task, which is a bug in Alba —
+/// reported rather than swallowed, for the same reason [`execute`] reports
+/// a panicking renderer: the report the interface just gave is incomplete
+/// and must not pass for a clean result.
+fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'static str> {
+    match exit {
+        Ok(WatchExit::Interrupted) => None,
+        Ok(WatchExit::WatcherClosed) => Some("the file watcher stopped; ending the session"),
+        Err(_) => Some("the session ended unexpectedly; this session's report is incomplete"),
+    }
 }
 
 /// What quitting the interface leaves behind on stderr: the last run's
@@ -918,6 +950,33 @@ mod tests {
 
         assert_eq!(ui_enabled(&flags, true), UiDecision::Headless);
         assert_eq!(ui_enabled(&flags, false), UiDecision::Headless);
+    }
+
+    /// An orderly goodbye is not a failure and owes no line.
+    #[test]
+    fn an_interrupted_session_is_not_a_failure() {
+        assert_eq!(session_failure(Ok(WatchExit::Interrupted)), None);
+    }
+
+    /// The one the interface cannot report itself: the session ending
+    /// closes its event channel, which reads as "nothing left to drive",
+    /// so the screen would just vanish without a word.
+    #[test]
+    fn a_dead_watcher_is_reported_the_way_the_headless_session_reports_it() {
+        let message = session_failure(Ok(WatchExit::WatcherClosed))
+            .expect("a session whose watcher died must say so");
+        assert!(message.contains("file watcher"), "got: {message}");
+    }
+
+    /// A panic in the session task is Alba's own bug, and it means the
+    /// report the interface just gave is incomplete — never a clean exit.
+    #[tokio::test]
+    async fn a_session_that_panicked_is_a_failure() {
+        let panicked = tokio::spawn(async { panic!("the session fell over") })
+            .await
+            .expect_err("the task must have panicked");
+
+        assert!(session_failure(Err(panicked)).is_some());
     }
 
     /// A run nobody interrupted reports what its beams earned.
