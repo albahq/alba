@@ -29,7 +29,14 @@ use crate::search::SearchState;
 
 /// The log buffer the parked diagnostic goes to: a pseudo-beam, so a
 /// diagnostic that belongs to no beam still has a pane to be read in.
-pub const DIAGNOSTIC_LOG: &str = "alba";
+///
+/// The space is what makes it a pseudo-beam rather than a beam name a
+/// project could also declare: a beam id is one or more identifiers
+/// (letters, digits and underscores) joined by `:`, so no real id can
+/// ever contain a space and no project can collide with this key. The
+/// value is never shown — `ui/logpane.rs` titles the parked pane
+/// `diagnostic` — so it answers to nothing but that constraint.
+pub const DIAGNOSTIC_LOG: &str = "alba diagnostic";
 
 #[derive(Debug, Clone)]
 pub enum BeamState {
@@ -1169,6 +1176,38 @@ mod tests {
         state.apply(&summary_event(&[]), now);
         state.apply(&RunEvent::WatchWaiting { files: 42 }, now);
         assert!(matches!(state.phase, Phase::Waiting { files: 42 }));
+    }
+
+    /// The diagnostic's pseudo-beam key must be one no project can also
+    /// declare, or a beam whose id collided with it would have the
+    /// parked diagnostic pushed into the very buffer holding its output.
+    #[test]
+    fn a_beam_named_alba_keeps_its_own_buffer_apart_from_the_diagnostic() {
+        let mut state = AppState::new("alba", true);
+        let now = Instant::now();
+        state.apply(&run_started("alba", &["alba"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("alba") }, now);
+        state.apply(&output("alba", "the beam's own line"), now);
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: nope\n".to_string(),
+            },
+            now,
+        );
+
+        assert_eq!(
+            lines(&state, "alba"),
+            vec![("the beam's own line".to_string(), false)],
+            "the diagnostic must not land in a real beam's buffer"
+        );
+        assert_eq!(
+            state
+                .logs
+                .get(DIAGNOSTIC_LOG)
+                .expect("the diagnostic has its own buffer")
+                .len(),
+            1
+        );
     }
 
     /// A run starting is the project loading again: the diagnostic that
