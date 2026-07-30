@@ -111,6 +111,7 @@ version = "0.1.0"
 dependencies = [
  "alba-core",
  "alba-engine",
+ "alba-executors",
  "arboard",
  "crossterm",
  "futures",

@@ -4,4 +4,5 @@
 //! headless renderers. Knows nothing about how a beam executes.
 
 pub mod logs;
+pub mod state;
 pub mod terminal;
