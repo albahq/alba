@@ -106,12 +106,18 @@ fn action_in_normal_mode(event: &Event) -> Action {
                 }
             }
 
-            // Arrow keys and Esc don't need modifier gating; they're unambiguous.
-            match key_event.code {
-                KeyCode::Down => return Action::SelectNext,
-                KeyCode::Up => return Action::SelectPrevious,
-                KeyCode::Esc => return Action::LeaveMode,
-                _ => {}
+            // The non-character bindings, gated exactly like the
+            // character ones above: a `Ctrl+Down` meant for the
+            // terminal's own multiplexer must not also move Alba's
+            // selection, any more than `Ctrl-q` fires Quit. `Ctrl-C`
+            // keeps its own arm in `action_for`, ahead of both gates.
+            if !has_disallowed_modifiers(key_event.modifiers) {
+                match key_event.code {
+                    KeyCode::Down => return Action::SelectNext,
+                    KeyCode::Up => return Action::SelectPrevious,
+                    KeyCode::Esc => return Action::LeaveMode,
+                    _ => {}
+                }
             }
 
             // Everything else passes through for potential interpretation.
@@ -402,6 +408,39 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The non-character bindings answer to the same modifier gate the
+    /// character ones do: a `Ctrl+Down` meant for the terminal's own
+    /// multiplexer must not also move Alba's selection.
+    #[test]
+    fn modifiers_gate_the_arrow_keys_and_esc_too() {
+        let mode = Mode::Normal;
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Esc] {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SUPER,
+            ] {
+                assert_eq!(
+                    action_for(&key_with_modifiers(code, modifiers), &mode),
+                    Action::Key(KeyEvent::new(code, modifiers)),
+                    "{code:?} with {modifiers:?} must not fire its unmodified binding"
+                );
+            }
+            // Unmodified, they still bind as before.
+            assert_ne!(
+                action_for(&key(code), &mode),
+                Action::Key(KeyEvent::new(code, KeyModifiers::NONE))
+            );
+        }
+    }
+
+    /// Ctrl-C keeps its own arm ahead of that gate: it fires in every
+    /// mode, gate or no gate.
+    #[test]
+    fn gating_the_arrow_keys_leaves_ctrl_c_alone() {
+        assert_eq!(action_for(&ctrl('c'), &Mode::Normal), Action::CancelOrQuit);
     }
 
     /// `?` closes help the same way `Esc` does — it is the key that
