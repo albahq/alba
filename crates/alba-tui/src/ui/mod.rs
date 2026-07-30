@@ -123,13 +123,18 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
                 search.query
             )
         }
-        Mode::Copy(_) => "hjkl/arrows move · v anchor · y copy · Esc cancel".to_string(),
-        Mode::Graph(_) => "↑↓←→ move · Enter select · Esc back".to_string(),
+        // Copy's, Graph's, and Help's text is the same constant
+        // `help.rs`'s own overlay lists for these three modes
+        // (`COPY_KEYS`/`GRAPH_KEYS`/`HELP_KEYS`) — one spelling of each,
+        // not two hand-copied literals the overlay and this bar could
+        // silently drift apart from each other.
+        Mode::Copy(_) => help::COPY_KEYS.to_string(),
+        Mode::Graph(_) => help::GRAPH_KEYS.to_string(),
         // While help is showing, only `Esc`/`?` (both close it) and
         // Ctrl-C do anything at all — `q` is swallowed as a plain
         // character the same as every other key `handle_modal_key`
         // doesn't recognize for this mode (see its own doc comment).
-        Mode::Help => "Esc or ? close".to_string(),
+        Mode::Help => help::HELP_KEYS.to_string(),
     }
 }
 
@@ -206,5 +211,33 @@ mod tests {
             "q quit · r rerun · f force · c cancel · w watch · n next · N prev",
             "falls back to the mode's own bar once the result has expired"
         );
+    }
+
+    /// Copy's, Graph's, and Help's bar text is asserted equal to
+    /// `help::COPY_KEYS`/`GRAPH_KEYS`/`HELP_KEYS` — the constants
+    /// `help.rs`'s own overlay lists for these three modes (its own
+    /// covering test,
+    /// `keymap_lines_build_copy_graph_and_help_from_the_shared_constants`,
+    /// checks the same constants from the overlay's side). A future edit
+    /// that reintroduces a hand-copied literal in either `bottom_bar` or
+    /// `help::keymap_lines` — rather than keeping both pointed at these
+    /// constants — desyncs the two screens silently unless one of these
+    /// two tests catches it.
+    #[test]
+    fn copy_graph_and_help_bars_match_their_shared_keymap_constants() {
+        use crate::copy::CopyState;
+        use crate::graph::GraphState;
+
+        let now = Instant::now();
+        let mut state = AppState::new("build", false);
+
+        state.mode = Mode::Copy(CopyState::new_at(0));
+        assert_eq!(bottom_bar(&state, now), help::COPY_KEYS);
+
+        state.mode = Mode::Graph(GraphState::new(0));
+        assert_eq!(bottom_bar(&state, now), help::GRAPH_KEYS);
+
+        state.mode = Mode::Help;
+        assert_eq!(bottom_bar(&state, now), help::HELP_KEYS);
     }
 }
