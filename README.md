@@ -392,8 +392,8 @@ quits if nothing is running.
 | --- | --- |
 | Any printable character | Add to the query (composing only, `n`/`N` included; stepping is the Normal-mode binding above). |
 | `Backspace` | Erase the last character. |
-| `Enter` | Commit the query, return to Normal, and keep the highlights. |
-| `Esc` | Cancel and return to Normal. |
+| `Enter` | Commit the query, return to Normal, and keep the highlights. Committing is what gives `n`/`N` something to step. |
+| `Esc` | Cancel and return to Normal: nothing is committed, the highlights go away, `n`/`N` have nothing to step, and the log pane resumes following the tail. |
 
 **Copy** (`v`)
 

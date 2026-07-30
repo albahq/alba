@@ -104,11 +104,12 @@ pub struct AppState {
     pub phase: Phase,
     pub watch_enabled: bool,
     pub mode: Mode,
-    /// The most recently active search. `Mode::Search` carries the one
-    /// being typed; this is where it lands once `Esc` or `Enter` leaves
-    /// that mode, so the log pane keeps highlighting its matches until
-    /// the next search session (`enter_search`) starts a fresh, empty
-    /// one and replaces it.
+    /// The most recently *committed* search. `Mode::Search` carries the
+    /// one being typed; this is where it lands when `Enter` commits it,
+    /// so the log pane keeps highlighting its matches until the next
+    /// search session (`enter_search`) starts a fresh, empty one and
+    /// replaces it. `Esc` cancels instead and clears this (`leave_mode`),
+    /// so `n`/`N` only ever step a query the reader committed.
     pub last_search: Option<CommittedSearch>,
     /// The text `y` or a mouse release last selected, waiting for the
     /// composition root (`lib::run`) to actually attempt the clipboard
@@ -432,17 +433,30 @@ impl AppState {
         self.mode = Mode::Help;
     }
 
-    /// `Esc`: leaves whatever modal mode is active. Search stashes its
-    /// state into `last_search` first, tagged with the beam it ran
-    /// against — the only modal mode whose payload is worth keeping
-    /// around after leaving. Copy's selection is simply discarded:
-    /// abandoning it without copying is exactly what `Esc` is for.
+    /// `Esc`: leaves whatever modal mode is active, discarding whatever
+    /// that mode was composing. Copy's selection is dropped without
+    /// copying, and a search is *cancelled*: nothing is committed, the
+    /// highlights go away, and the pane the search pinned while typing
+    /// is released back to following the tail — which is what the bottom
+    /// bar, the help overlay and the README have promised all along
+    /// (`Enter commit · Esc cancel`). `Enter`, in `handle_search_key`,
+    /// is the only thing that fills `last_search`, and so the only thing
+    /// `n`/`N` ever step.
+    ///
+    /// Cancelling drops any *earlier* committed search too, rather than
+    /// restoring it: the reader asked for the screen back, and leaving
+    /// an older query's highlights lit while the query bar is gone is
+    /// the same confusion under a different name.
     pub fn leave_mode(&mut self) {
-        if let Mode::Search(search) = std::mem::replace(&mut self.mode, Mode::Normal) {
-            self.last_search = Some(CommittedSearch {
-                beam: self.current_beam_id(),
-                search,
-            });
+        if matches!(
+            std::mem::replace(&mut self.mode, Mode::Normal),
+            Mode::Search(_)
+        ) {
+            self.last_search = None;
+            let id = self.current_beam_id();
+            if let Some(buffer) = self.logs.get_mut(&id) {
+                buffer.follow_tail();
+            }
         }
     }
 
@@ -463,9 +477,10 @@ impl AppState {
 
     /// Search's own keymap while composing: every printable character —
     /// `n`/`N` included — edits the query, `Backspace` erases from it,
-    /// and `Enter` commits the query and leaves search mode the same way
-    /// `Esc` does (via `leave_mode`), keeping the highlights in
-    /// `last_search`. Stepping is a Normal-mode binding on the committed
+    /// and `Enter` commits the query into `last_search` and returns to
+    /// Normal, keeping the highlights and the pane where the search left
+    /// it. `Esc` is the other way out and the opposite answer: it
+    /// cancels, keeping nothing (`leave_mode`). Stepping is a Normal-mode binding on the committed
     /// search (`search_next`/`search_previous`), not something typed
     /// here — the vim/less split, so the query itself can still contain
     /// `n` or `N`.
@@ -699,6 +714,14 @@ impl AppState {
         let Some(mut committed) = self.last_search.take() else {
             return;
         };
+        // An empty query matches nothing, and `sync_search_scroll` reads
+        // "nothing to show" as "resume following" — so without this,
+        // `n` after committing an empty query would yank a reader who
+        // had scrolled up straight back to the tail.
+        if committed.search.query.is_empty() {
+            self.last_search = Some(committed);
+            return;
+        }
         let selected = self.current_beam_id();
         if committed.beam != selected {
             // The selection has moved on since this search was
@@ -1333,34 +1356,78 @@ mod tests {
         assert_eq!(last_search.search.matches, vec![0]);
     }
 
-    /// `Esc` (the event loop's `leave_mode`) keeps the highlights the
-    /// same way `Enter` does.
+    /// `Esc` (the event loop's `leave_mode`) cancels: nothing is
+    /// committed, the highlights go away, and the pane the search pinned
+    /// while typing is released back to following — exactly what the
+    /// bottom bar, the help overlay and the README promise.
     #[test]
-    fn leave_mode_stashes_search_into_last_search() {
+    fn esc_cancels_the_search_it_leaves() {
         let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "ERROR here"), now);
+        for index in 0..50 {
+            state.apply(&output("build", &format!("line {index}")), now);
+        }
+
         state.enter_search();
-        state.handle_modal_key(char_key('x'));
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        assert!(
+            matches!(
+                state.logs.get("build").unwrap().scroll(),
+                crate::logs::Scroll::Paused { .. }
+            ),
+            "precondition: composing the query pinned the pane on the match"
+        );
+
         state.leave_mode();
 
         assert_eq!(state.mode, Mode::Normal);
-        assert_eq!(
-            state
-                .last_search
-                .expect("Esc stashes the search")
-                .search
-                .query,
-            "x"
+        assert!(
+            state.last_search.is_none(),
+            "Esc commits nothing, so nothing stays highlighted"
+        );
+        assert!(
+            matches!(
+                state.logs.get("build").unwrap().scroll(),
+                crate::logs::Scroll::Following
+            ),
+            "the pane is released rather than left pinned where the search left it"
         );
     }
 
-    /// A fresh search session replaces whatever `last_search` was left
-    /// behind by the previous one.
+    /// And with nothing committed, `n`/`N` have nothing to step: a
+    /// cancelled search must not keep answering them.
+    #[test]
+    fn n_steps_nothing_after_a_cancelled_search() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "ERROR here"), now);
+        state.apply(&output("build", "ERROR there"), now);
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        state.leave_mode();
+        state.search_next();
+
+        assert!(state.last_search.is_none());
+    }
+
+    /// A fresh search session replaces whatever `Enter` committed
+    /// before it.
     #[test]
     fn a_new_search_session_starts_past_the_previous_ones_highlights() {
         let mut state = AppState::new("build", false);
         state.enter_search();
         state.handle_modal_key(char_key('x'));
-        state.leave_mode();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(state.last_search.is_some());
 
         state.enter_search();
@@ -1368,6 +1435,35 @@ mod tests {
             search_state(&state).query,
             "",
             "the new session starts empty"
+        );
+    }
+
+    /// `n` on a committed *empty* query has nothing to step to, and must
+    /// not take that as licence to yank the pane back to the tail.
+    #[test]
+    fn n_on_an_empty_committed_query_leaves_the_pane_where_it_is() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        for index in 0..50 {
+            state.apply(&output("build", &format!("line {index}")), now);
+        }
+
+        // `/` then `Enter` with nothing typed: an empty committed search.
+        state.enter_search();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // The reader then scrolls up to read in peace.
+        state.logs.get_mut("build").unwrap().scroll_up(10);
+
+        state.search_next();
+
+        assert!(
+            matches!(
+                state.logs.get("build").unwrap().scroll(),
+                crate::logs::Scroll::Paused { offset: 10 }
+            ),
+            "an empty query steps nowhere, so it must not resume following either"
         );
     }
 
