@@ -146,7 +146,10 @@ pub fn status_label(status: &BeamStatus) -> String {
 pub(super) fn watch_line(event: &RunEvent) -> Option<String> {
     match event {
         RunEvent::WatchWaiting { files } => {
-            Some(format!("watching — {files} files, waiting for changes"))
+            let plural = if *files == 1 { "" } else { "s" };
+            Some(format!(
+                "watching — {files} file{plural}, waiting for changes"
+            ))
         }
         RunEvent::WatchTriggered { paths } if paths.is_empty() => {
             Some("changes detected — running".to_string())
@@ -332,6 +335,17 @@ mod tests {
         assert_eq!(
             watch_line(&RunEvent::WatchWaiting { files: 3 }),
             Some("watching — 3 files, waiting for changes".to_string())
+        );
+        // A one-file session is an ordinary one, not a plural.
+        assert_eq!(
+            watch_line(&RunEvent::WatchWaiting { files: 1 }),
+            Some("watching — 1 file, waiting for changes".to_string())
+        );
+        // A session parked on a project that will not load resolves
+        // nothing, and says so rather than claiming to be running.
+        assert_eq!(
+            watch_line(&RunEvent::WatchWaiting { files: 0 }),
+            Some("watching — 0 files, waiting for changes".to_string())
         );
         assert_eq!(
             watch_line(&RunEvent::WatchTriggered {
