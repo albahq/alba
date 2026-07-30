@@ -63,6 +63,7 @@ fn keymap_lines() -> Vec<String> {
         "  q quit · r rerun · f force (bypass cache) · c cancel · w watch".to_string(),
         "  t run the target the session was started for".to_string(),
         "  j/k, ↑/↓ move · n next match · N previous match · G tail".to_string(),
+        "  PgUp/PgDn, Ctrl-u/Ctrl-d scroll the log pane by half a page".to_string(),
         "  / search · v copy · g graph · ? help · Ctrl-C cancel/quit (any mode)".to_string(),
         String::new(),
         "Search (composing a query)".to_string(),

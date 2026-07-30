@@ -20,12 +20,21 @@ pub enum Action {
     CancelOrQuit, // Ctrl-C: cancel if running, else quit
     SelectNext,
     SelectPrevious,
-    Rerun { force: bool }, // r / f on the selected beam
-    RunSessionTarget,      // t: back to what the session was started for
-    CancelRun,             // c
-    ToggleWatch,           // w
+    Rerun {
+        force: bool,
+    }, // r / f on the selected beam
+    RunSessionTarget, // t: back to what the session was started for
+    CancelRun,        // c
+    ToggleWatch,      // w
     ScrollUp(usize),
     ScrollDown(usize),
+    /// PageUp / Ctrl-u: scroll the log pane up by half its height. The
+    /// height itself is not the keymap's to know (this module never sees
+    /// the terminal), so the event loop resolves it — the split the
+    /// mouse wheel's fixed three lines does not need.
+    ScrollHalfPageUp,
+    /// PageDown / Ctrl-d, the other way.
+    ScrollHalfPageDown,
     FollowTail,     // G
     EnterSearch,    // /
     EnterCopy,      // v
@@ -85,6 +94,22 @@ fn action_in_normal_mode(event: &Event) -> Action {
             // for Ctrl-C but we need to gate character bindings against other
             // modifiers (Alt, Super, and for non-char codes, Control).
 
+            // The two bindings that *are* a Ctrl combination, checked
+            // before the gate below turns CONTROL into a blanket refusal:
+            // `Ctrl-u`/`Ctrl-d` are what a reader of `less` or vim
+            // already reaches for to move a pane by half a screen, and
+            // nothing else in this keymap claims them.
+            if key_event.modifiers.contains(KeyModifiers::CONTROL)
+                && !key_event.modifiers.contains(KeyModifiers::ALT)
+                && !key_event.modifiers.contains(KeyModifiers::SUPER)
+            {
+                match key_event.code {
+                    KeyCode::Char('u') => return Action::ScrollHalfPageUp,
+                    KeyCode::Char('d') => return Action::ScrollHalfPageDown,
+                    _ => {}
+                }
+            }
+
             // Single character keys: gate out CONTROL, ALT, SUPER.
             // SHIFT is allowed and irrelevant (the character already carries case).
             if !has_disallowed_modifiers(key_event.modifiers) {
@@ -117,6 +142,8 @@ fn action_in_normal_mode(event: &Event) -> Action {
                 match key_event.code {
                     KeyCode::Down => return Action::SelectNext,
                     KeyCode::Up => return Action::SelectPrevious,
+                    KeyCode::PageUp => return Action::ScrollHalfPageUp,
+                    KeyCode::PageDown => return Action::ScrollHalfPageDown,
                     KeyCode::Esc => return Action::LeaveMode,
                     _ => {}
                 }
@@ -419,6 +446,60 @@ mod tests {
         assert_eq!(
             action_for(&key(KeyCode::Char('t')), &Mode::Normal),
             Action::RunSessionTarget
+        );
+    }
+
+    /// The log pane's keyboard scrolling: `PageUp`/`PageDown` and the
+    /// `less`/vim pair `Ctrl-u`/`Ctrl-d`. Before this the wheel was the
+    /// only way to move the pane at all, while the help overlay and the
+    /// README both claimed keys for it.
+    #[test]
+    fn page_keys_scroll_the_log_pane() {
+        let mode = Mode::Normal;
+        assert_eq!(
+            action_for(&key(KeyCode::PageUp), &mode),
+            Action::ScrollHalfPageUp
+        );
+        assert_eq!(
+            action_for(&key(KeyCode::PageDown), &mode),
+            Action::ScrollHalfPageDown
+        );
+        assert_eq!(action_for(&ctrl('u'), &mode), Action::ScrollHalfPageUp);
+        assert_eq!(action_for(&ctrl('d'), &mode), Action::ScrollHalfPageDown);
+    }
+
+    /// The page keys are gated like every other binding: Release does not
+    /// fire, and a modifier that is not part of the binding blocks it.
+    #[test]
+    fn page_keys_are_gated_like_every_other_binding() {
+        let mode = Mode::Normal;
+        assert_eq!(
+            action_for(
+                &key_with_kind(KeyCode::PageUp, KeyEventKind::Release),
+                &mode
+            ),
+            Action::None
+        );
+        assert_eq!(
+            action_for(
+                &key_with_modifiers(KeyCode::PageUp, KeyModifiers::CONTROL),
+                &mode
+            ),
+            Action::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            action_for(
+                &key_with_modifiers(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                ),
+                &mode
+            ),
+            Action::Key(KeyEvent::new(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            "Alt on top of Ctrl is a different chord, not this binding"
         );
     }
 
