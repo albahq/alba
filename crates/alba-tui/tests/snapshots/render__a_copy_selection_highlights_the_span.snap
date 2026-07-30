@@ -1,6 +1,5 @@
 ---
 source: crates/alba-tui/tests/render.rs
-assertion_line: 257
 expression: "drawn(&state, 80, 24)"
 ---
 "┌─ alba · run build ── ▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 0/1 · 0.0s ──────────────────────────────┐"

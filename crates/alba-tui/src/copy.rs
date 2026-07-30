@@ -151,9 +151,15 @@ fn slice_chars(text: &str, from: usize, to: usize) -> String {
 /// scroll window shows for a pane `pane_height` rows tall — the same
 /// `start` [`LogBuffer::view`] computes internally. Used to anchor a
 /// fresh copy-mode selection (`v`) at whatever line is actually on
-/// screen right now, following or paused.
+/// screen right now, following or paused. Clamped to the buffer's own
+/// last line: a `pane_height` of 0 (the terminal's size could not be
+/// read, or it is below the too-small floor) would otherwise put
+/// `scroll_window`'s `start` one line past the end, anchoring on a line
+/// that does not exist rather than the last one that does.
 pub fn top_visible_line(buffer: &LogBuffer, pane_height: usize) -> usize {
-    scroll_window(buffer, pane_height).0
+    scroll_window(buffer, pane_height)
+        .0
+        .min(buffer.len().saturating_sub(1))
 }
 
 /// Translates a row inside the log pane's content area (0 at the pane's
@@ -183,9 +189,10 @@ pub fn line_for_pane_row(buffer: &LogBuffer, pane_height: usize, row: usize) -> 
 
 /// The `(start, end)` line-index window `LogBuffer::view(pane_height)`
 /// draws from, mirroring its private computation exactly — shared by
-/// `top_visible_line` and `line_for_pane_row` so the two can never
-/// disagree about what is on screen.
-fn scroll_window(buffer: &LogBuffer, pane_height: usize) -> (usize, usize) {
+/// `top_visible_line`, `line_for_pane_row`, and `state.rs`'s
+/// `sync_copy_scroll` so none of the three can ever disagree about what
+/// is on screen.
+pub fn scroll_window(buffer: &LogBuffer, pane_height: usize) -> (usize, usize) {
     let offset = match buffer.scroll() {
         Scroll::Following => 0,
         Scroll::Paused { offset } => *offset,
@@ -376,6 +383,14 @@ mod tests {
     #[test]
     fn base64_encodes_hiya() {
         assert_eq!(base64(b"hiya"), "aGl5YQ==");
+    }
+
+    /// A length that is a multiple of 3 needs no padding at all — the
+    /// third and fourth output chars of every chunk are always real,
+    /// unlike the one- and two-byte tail cases above.
+    #[test]
+    fn base64_needs_no_padding_when_the_length_is_a_multiple_of_three() {
+        assert_eq!(base64(b"abc"), "YWJj");
     }
 
     /// The exact escape shape: OSC 52, clipboard target `c`, base64

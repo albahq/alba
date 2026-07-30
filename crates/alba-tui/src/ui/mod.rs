@@ -55,7 +55,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // so the block's own border fill supplies the rest of the dashes.
     let outer = Block::bordered()
         .title_top(Line::from(format!("─ {} ", header::text(state, now))))
-        .title_bottom(Line::from(format!("─ {} ", bottom_bar(state))));
+        .title_bottom(Line::from(format!("─ {} ", bottom_bar(state, now))));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -79,19 +79,24 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 /// guessing at their eventual keymaps.
 ///
 /// A copy just made (`AppState::last_copy_result`) takes over the bar
-/// entirely for the one draw it is shown on, regardless of mode — by the
-/// time it is set, `y` (or a mouse release) has already put the session
-/// back in `Mode::Normal`, so there is nothing else worth advertising
-/// that one frame.
+/// entirely, regardless of mode, for as long as `CopyResult::is_visible`
+/// says — by the time it is set, `y` (or a mouse release) has already
+/// put the session back in `Mode::Normal`, so there is nothing else
+/// worth advertising while it is shown. That window is a couple of
+/// seconds rather than the single frame a literal "for one draw" would
+/// give it: at the 80ms tick, or with a beam still flooding output, a
+/// one-draw message would be gone well under a blink.
 ///
 /// `n`/`N` live in the Normal-mode bar rather than Search's: they step
 /// the *committed* search (`AppState::last_search`), a Normal-mode
 /// binding (`input.rs`) the same way `j`/`k` are — advertising them
 /// while still composing a query would claim a key that, at that point,
 /// only ever types a character into it.
-fn bottom_bar(state: &AppState) -> String {
-    if let Some(result) = state.last_copy_result {
-        return format!("{result} · q quit");
+fn bottom_bar(state: &AppState, now: Instant) -> String {
+    if let Some(result) = &state.last_copy_result
+        && result.is_visible(now)
+    {
+        return format!("{} · q quit", result.message);
     }
     match &state.mode {
         Mode::Normal => {
@@ -124,10 +129,10 @@ fn format_duration(duration: Duration) -> String {
 /// cells. `None` below the too-small floor, where `draw` paints nothing
 /// but its one message and there is no pane to hit-test against.
 ///
-/// Copy mode's mouse handling (`lib::dispatch`) asks this rather than
-/// re-deriving the layout its own way, so a click can never drift out of
-/// sync with what `draw` actually painted: both go through the exact
-/// same `Layout` calls.
+/// Copy mode's mouse handling (`lib::dispatch_mouse`) asks this rather
+/// than re-deriving the layout its own way, so a click can never drift
+/// out of sync with what `draw` actually painted: both go through the
+/// exact same `Layout` calls.
 pub fn log_pane_content_area(width: u16, height: u16) -> Option<Rect> {
     if width < MIN_WIDTH || height < MIN_HEIGHT {
         return None;
@@ -160,5 +165,28 @@ mod tests {
     fn log_pane_content_area_is_none_below_the_floor() {
         assert_eq!(log_pane_content_area(MIN_WIDTH - 1, 24), None);
         assert_eq!(log_pane_content_area(80, MIN_HEIGHT - 1), None);
+    }
+
+    /// The copy result takes over the bar for its whole visible window,
+    /// then gives it back to the mode's own bar — the plan owner's
+    /// two-second ruling on the brief's "for one draw", checked at the
+    /// layer that actually decides what the bottom bar shows.
+    #[test]
+    fn bottom_bar_shows_the_copy_result_until_it_expires() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.record_copy_result("copied (OSC 52)", now);
+
+        assert_eq!(bottom_bar(&state, now), "copied (OSC 52) · q quit");
+        assert_eq!(
+            bottom_bar(&state, now + Duration::from_secs(1)),
+            "copied (OSC 52) · q quit",
+            "still visible partway through the window"
+        );
+        assert_eq!(
+            bottom_bar(&state, now + Duration::from_secs(3)),
+            "q quit · r rerun · f force · c cancel · w watch · n next · N prev",
+            "falls back to the mode's own bar once the result has expired"
+        );
     }
 }

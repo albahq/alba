@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::copy;
 use crate::logs::Scroll;
-use crate::state::{AppState, DIAGNOSTIC_LOG, Mode, Phase};
+use crate::state::{AppState, Mode, Phase};
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     let rows = Layout::vertical([
@@ -22,15 +22,16 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // A parked session has no beam worth showing: the diagnostic that
     // parked it, filed under a pseudo-beam key, is the only thing there
-    // is to read (see `state::DIAGNOSTIC_LOG`).
-    let (title, key) = if matches!(state.phase, Phase::Parked) {
-        ("diagnostic".to_string(), DIAGNOSTIC_LOG.to_string())
+    // is to read (see `state::DIAGNOSTIC_LOG`). `displayed_log_key` is
+    // the single source of truth for which key that is — copy mode's
+    // `v`/`y` resolve their own buffer through the very same method, so
+    // the selection highlight below and what `y` actually copies can
+    // never disagree about what is on screen.
+    let key = state.displayed_log_key();
+    let title = if matches!(state.phase, Phase::Parked) {
+        "diagnostic".to_string()
     } else {
-        let name = state
-            .selected_beam()
-            .map(|row| row.id.clone())
-            .unwrap_or_default();
-        (format!("logs · {name}"), name)
+        format!("logs · {key}")
     };
     frame.render_widget(Paragraph::new(title), rows[0]);
 

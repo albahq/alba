@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
 use alba_engine::{RunEvent, RunSummary, SessionCommand};
-use crossterm::event::MouseEvent;
+use crossterm::event::{MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::layout::Size;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -83,10 +83,6 @@ pub async fn run(
                 .terminal()
                 .draw(|frame| ui::draw(frame, &state, now))?;
             dirty = false;
-            // A copy result is shown for exactly the one draw that just
-            // happened — clearing it here rather than leaving it to
-            // linger past the frame it was meant for.
-            state.last_copy_result = None;
         }
 
         tokio::select! {
@@ -117,10 +113,21 @@ pub async fn run(
                     let action = input::action_for(&event, &state.mode);
                     // Best effort: an error querying the terminal's own
                     // size falls back to zero, which reads as "too small"
-                    // to `ui::log_pane_content_area` and simply makes a
-                    // click or `v` land nowhere, rather than panicking.
+                    // to `ui::log_pane_content_area` (no pane to click or
+                    // drag into) and clamps `enter_copy`'s anchor to the
+                    // buffer's own last line rather than one past it —
+                    // never a panic either way.
                     let terminal_size = guard.terminal().size().unwrap_or_default();
                     dispatch(&mut state, &commands, action, terminal_size);
+                    // The one place `AppState`'s copy intent turns into
+                    // the real clipboard side effect — kept out of
+                    // `dispatch` (and so out of `AppState`, which never
+                    // touches the terminal or a clipboard daemon itself)
+                    // and here at the composition root instead.
+                    if let Some(text) = state.pending_copy.take() {
+                        let message = copy::copy_to_clipboard(&text);
+                        state.record_copy_result(message, Instant::now());
+                    }
                     dirty = true;
                 }
                 // A terminal that can no longer be read cannot be driven
@@ -152,15 +159,27 @@ pub async fn run(
 /// Kept apart from the loop — and free of any terminal of its own — so
 /// the rules the exit code depends on can be tested by handing it an
 /// action and reading back what it did. `terminal_size` is the one bit
-/// of screen geometry two actions need (`EnterCopy`'s anchor, `Mouse`'s
-/// hit test): a plain size value rather than a live terminal, so this
-/// stays just as testable as everything else here.
+/// of screen geometry actions need (`EnterCopy`'s anchor, keyboard
+/// scrolling in copy mode, `Mouse`'s hit test): a plain size value
+/// rather than a live terminal, so this stays just as testable as
+/// everything else here.
+///
+/// Never attempts the clipboard write copy mode's `y` or a mouse release
+/// stages in `AppState::pending_copy` — that stays the caller's job
+/// (`lib::run`'s loop), so a test that presses `y` through `dispatch`
+/// alone can assert on `pending_copy` without ever reaching a real
+/// terminal or clipboard.
 fn dispatch(
     state: &mut AppState,
     commands: &UnboundedSender<SessionCommand>,
     action: Action,
     terminal_size: Size,
 ) {
+    // Refreshed before every action: `EnterCopy`'s anchor and copy
+    // mode's keyboard-driven scroll-follow both need to know the log
+    // pane's current content height, and this is the one place that
+    // reaches the terminal size to compute it.
+    state.set_pane_height(log_pane_height(terminal_size));
     match action {
         Action::Quit => {
             // Quitting on a run in flight abandons it: its summary,
@@ -220,10 +239,7 @@ fn dispatch(
         Action::EnterSearch => state.enter_search(),
         Action::SearchNext => state.search_next(),
         Action::SearchPrevious => state.search_previous(),
-        Action::EnterCopy => {
-            let pane_height = log_pane_height(terminal_size);
-            state.enter_copy(pane_height);
-        }
+        Action::EnterCopy => state.enter_copy(),
         // Graph and Help have no renderer yet. Entering a mode nothing
         // draws leaves the user facing an unchanged screen whose bottom
         // bar advertises `q quit` while, modal, `q` is swallowed as a
@@ -237,13 +253,22 @@ fn dispatch(
     }
 }
 
-/// Copy mode's own hit testing: a click, drag, or release only means
-/// something once it lands inside the log pane's own content area — the
-/// tree pane, the borders, and the title/footer rows are not part of the
-/// buffer copy mode addresses. Every other mode leaves a mouse event
-/// exactly as inert as before this task; their own hit testing (e.g.
-/// click-to-select in the tree) is a later task's to add.
+/// Copy mode's own hit testing: a click or a drag only means something
+/// once it lands inside the log pane's own content area — the tree
+/// pane, the borders, and the title/footer rows are not part of the
+/// buffer copy mode addresses. A release (`Up`) is the one exception:
+/// it always finishes whatever selection is already there, wherever the
+/// pointer ended up, since dragging off the bottom of the buffer or
+/// into the tree pane and letting go there are both routine and must
+/// not strand the user mid-selection with nothing copied. Every other
+/// mode leaves a mouse event exactly as inert as before this task;
+/// their own hit testing (e.g. click-to-select in the tree) is a later
+/// task's to add.
 fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) {
+    if matches!(mouse.kind, MouseEventKind::Up(_)) {
+        state.finish_copy();
+        return;
+    }
     let Some(area) = ui::log_pane_content_area(terminal_size.width, terminal_size.height) else {
         return;
     };
@@ -547,6 +572,42 @@ mod tests {
             state::Mode::Copy(copy) => assert_eq!(*copy, before, "the click changed nothing"),
             other => panic!("expected Mode::Copy, got {other:?}"),
         }
+    }
+
+    /// A release ending outside the log pane — dragging past the last
+    /// line or into the tree pane's own columns, and letting go there —
+    /// still finishes the copy. `dispatch` itself never touches the
+    /// clipboard (that is `lib::run`'s job, after `dispatch` returns),
+    /// so this only has to prove `pending_copy` ends up holding the
+    /// selection rather than being left stranded.
+    #[test]
+    fn a_release_outside_the_log_pane_still_stages_the_copy() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["build"]);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, Instant::now());
+        state.apply(&output("build", "alpha"), Instant::now());
+        dispatch(&mut state, &commands, Action::EnterCopy, size());
+
+        // Drag once inside the pane so the selection covers something.
+        let down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 34,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        dispatch(&mut state, &commands, Action::Mouse(down), size());
+
+        // Release far outside the pane, in the tree pane's own columns.
+        let up = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        dispatch(&mut state, &commands, Action::Mouse(up), size());
+
+        assert_eq!(state.mode, state::Mode::Normal);
+        assert_eq!(state.pending_copy.as_deref(), Some("p"));
     }
 
     /// `q` on a run in flight abandons it: the summary that lands after
