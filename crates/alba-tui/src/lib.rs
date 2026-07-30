@@ -152,12 +152,40 @@ pub async fn run(
     }
 
     let _ = commands.send(SessionCommand::Shutdown);
-    // Drain until the channel closes so the session's final events (the
-    // cancelled run's summary) still reach the state and the replay.
+    Ok(conclude(&mut state, &mut events).await)
+}
+
+/// Takes the session's verdict, then drains what the session still has to
+/// say — in that order, and the order is the whole point.
+///
+/// The drain exists to collect the material the exit replay prints: the
+/// cancelled run's summary and the failed beams' buffers arrive *after*
+/// the user asked to leave. But those same events are a run's life cycle,
+/// and folding them in moves the verdict: a `RunStarted` racing the quit
+/// resets `user_cancelled` (a new run is a fresh story, `AppState`'s rule
+/// and a correct one), and the cancelled `RunFinished` behind it then
+/// scores `0` — cancellations are not failures. That is how quitting an
+/// idle watch session just as a save triggered a rerun used to report
+/// success for a project whose last real run was red.
+///
+/// So the code is read while the state still describes the session the
+/// user chose to leave, and the drain can no longer install one. It gives
+/// the three answers the spec asks for: a run that ran to completion
+/// vouches with its own code, a run abandoned by quitting vouches for
+/// nothing (`start_run` already cleared the verdict), and a session that
+/// never finished a run has none to offer — the CLI reads both `None`s as
+/// an interruption.
+async fn conclude(state: &mut AppState, events: &mut UnboundedReceiver<RunEvent>) -> TuiOutcome {
+    let last_run_code = state.exit_outcome();
     while let Some(event) = events.recv().await {
         state.apply(&event, Instant::now());
     }
-    Ok(outcome(&state))
+    // Everything else is read from the drained state; only the verdict is
+    // the one taken above.
+    TuiOutcome {
+        last_run_code,
+        ..outcome(state)
+    }
 }
 
 /// Whether the tick alone — no event, no keystroke — should force a
@@ -513,6 +541,106 @@ mod tests {
             outcome.last_summary.expect("a run finished").failed,
             vec![id("bad")]
         );
+    }
+
+    /// An event channel holding `events` and already closed, so a drain
+    /// over it terminates: the session that would have sent more has
+    /// ended, which is the only state `conclude` is ever reached in.
+    fn closed_stream(events: Vec<RunEvent>) -> UnboundedReceiver<RunEvent> {
+        let (sender, receiver) = unbounded_channel();
+        for event in events {
+            sender.send(event).unwrap();
+        }
+        receiver
+    }
+
+    /// A run that ran to completion still vouches after the drain: `q`
+    /// on a green session is what makes `alba run build && ship` ship.
+    #[tokio::test]
+    async fn a_completed_run_still_vouches_after_the_drain() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started(&["build"]), now);
+        state.apply(&summary_event(&[], &["build"]), now);
+        assert_eq!(state.exit_outcome(), Some(0), "precondition");
+
+        let outcome = conclude(&mut state, &mut closed_stream(Vec::new())).await;
+
+        assert_eq!(outcome.last_run_code, Some(0));
+    }
+
+    /// `q` on a run in flight abandons it, and the summary that arrives
+    /// during the drain must not turn that into a verdict — while the
+    /// drain still collects it for the replay, which is what it is for.
+    #[tokio::test]
+    async fn a_run_abandoned_by_quitting_vouches_for_nothing() {
+        let mut state = running(&["bad"]);
+        state.mark_user_cancelled();
+        assert_eq!(state.exit_outcome(), None, "precondition");
+
+        let outcome = conclude(
+            &mut state,
+            &mut closed_stream(vec![
+                output("bad", "boom"),
+                finished("bad", BeamStatus::Failed { exit_code: 1 }),
+                summary_event(&["bad"], &[]),
+            ]),
+        )
+        .await;
+
+        assert_eq!(outcome.last_run_code, None, "an abandoned run cannot vouch");
+        assert_eq!(
+            outcome.failed_logs,
+            vec![("bad".to_string(), vec!["boom".to_string()])],
+            "the drain still collects the replay's material"
+        );
+        assert!(outcome.last_summary.is_some());
+    }
+
+    /// The regression: an idle watch session's verdict is taken *before*
+    /// the drain, so a run that starts during it cannot install one of
+    /// its own. Without this, `RunStarted` clears `user_cancelled` (a new
+    /// run is a fresh story) and the cancelled summary that follows scores
+    /// `0` — because cancellations are not failures — so quitting just as
+    /// a save triggered a rerun reported success for a red project.
+    #[tokio::test]
+    async fn a_run_starting_during_the_drain_cannot_install_a_verdict() {
+        let mut state = AppState::new("build", true);
+        let now = Instant::now();
+        state.apply(&run_started(&["bad"]), now);
+        state.apply(&summary_event(&["bad"], &[]), now);
+        assert_eq!(state.exit_outcome(), Some(1), "precondition: a red run");
+
+        let outcome = conclude(
+            &mut state,
+            &mut closed_stream(vec![
+                run_started(&["bad"]),
+                RunEvent::RunFinished {
+                    summary: RunSummary {
+                        cancelled: vec![id("bad")],
+                        ..RunSummary::default()
+                    },
+                },
+            ]),
+        )
+        .await;
+
+        assert_eq!(
+            outcome.last_run_code,
+            Some(1),
+            "the red run's verdict stands; the cancelled rerun cannot overwrite it with 0"
+        );
+    }
+
+    /// A session that quits before any run finished has nothing to
+    /// replay and no code to offer — the CLI falls back to 130.
+    #[tokio::test]
+    async fn a_session_that_never_finished_a_run_vouches_for_nothing() {
+        let mut state = running(&["build"]);
+
+        let outcome = conclude(&mut state, &mut closed_stream(Vec::new())).await;
+
+        assert_eq!(outcome.last_run_code, None);
     }
 
     /// A session that quits before any run finished has nothing to
