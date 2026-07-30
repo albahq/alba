@@ -4,16 +4,24 @@
 //! behave identically; the exit-code-on-SIGINT test is `#[cfg(unix)]`
 //! like the existing interrupt tests.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 struct WatchProcess {
     child: Child,
     lines: Receiver<String>,
     seen: Vec<String>,
+    /// Everything the session wrote to stderr, drained by its own thread.
+    /// Alba's commentary — the status lines, the diagnostics, and the
+    /// reasons a session cannot start at all — all go there, so a failure
+    /// here has to report it: a session that dies on `cannot start the
+    /// file watcher` and one that genuinely hangs both look like an empty
+    /// stdout otherwise.
+    errors: Arc<Mutex<String>>,
 }
 
 impl WatchProcess {
@@ -22,7 +30,7 @@ impl WatchProcess {
             .current_dir(dir)
             .args(args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -34,10 +42,34 @@ impl WatchProcess {
                 }
             }
         });
+
+        // Read into a shared buffer rather than a channel: stderr is never
+        // waited on, only reported, and a blocking read on a live session
+        // would otherwise pin the buffer at whatever was flushed last.
+        let stderr = child.stderr.take().unwrap();
+        let errors = Arc::new(Mutex::new(String::new()));
+        std::thread::spawn({
+            let errors = Arc::clone(&errors);
+            move || {
+                let mut reader = BufReader::new(stderr);
+                let mut chunk = [0u8; 1024];
+                while let Ok(read) = reader.read(&mut chunk) {
+                    if read == 0 {
+                        break;
+                    }
+                    errors
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&chunk[..read]));
+                }
+            }
+        });
+
         Self {
             child,
             lines,
             seen: Vec::new(),
+            errors,
         }
     }
 
@@ -54,10 +86,7 @@ impl WatchProcess {
                         return line;
                     }
                 }
-                Err(_) => panic!(
-                    "never saw {needle:?}; output so far:\n{}",
-                    self.seen.join("\n")
-                ),
+                Err(_) => panic!("never saw {needle:?}{}", self.context()),
             }
         }
     }
@@ -75,9 +104,16 @@ impl WatchProcess {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!(
-            "the session never exited; output so far:\n{}",
-            self.seen.join("\n")
+        panic!("the session never exited{}", self.context())
+    }
+
+    /// Both streams, for a panic message: what the session printed, and
+    /// what it complained about.
+    fn context(&self) -> String {
+        format!(
+            "\nstdout so far:\n{}\nstderr so far:\n{}",
+            self.seen.join("\n"),
+            self.errors.lock().unwrap()
         )
     }
 }
