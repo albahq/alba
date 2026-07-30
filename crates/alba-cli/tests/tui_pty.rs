@@ -13,6 +13,20 @@ use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 const ALTERNATE_SCREEN_ENTER: &str = "\u{1b}[?1049h";
 const ALTERNATE_SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 
+/// The header's own account of a finished run (see
+/// `alba-tui/src/ui/header.rs::finished_line`, format `"alba · run
+/// {target} finished · {counts} · {duration}"`), for the `ok` target this
+/// test always runs. Unlike the beam's own output — which lands on the
+/// pty as soon as `RunEvent::BeamOutput` is applied, well before the run
+/// is over — this text is only drawn once `Phase::Finished` and
+/// `last_summary` are set, and that happens in the very same
+/// `RunEvent::RunFinished` match arm that sets `AppState::outcome`
+/// (`state.rs`, the field `exit_outcome()` reads). So seeing this text on
+/// the pty is synchronized with the exit code actually being decided:
+/// waiting for it before sending `q` is what closes the race, not the
+/// beam's own output arriving.
+const RUN_FINISHED: &str = "run ok finished";
+
 /// Kills the child on every exit path — including a failed assertion or a
 /// deadline expiry — so a failing smoke test never leaves a stray `alba`
 /// holding the pty open behind it.
@@ -77,15 +91,20 @@ fn the_tui_opens_restores_and_replays_on_q() {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = String::new();
 
-    // Read until the run has actually finished, evidenced by the beam's
-    // own output landing on the pty — not merely the alternate screen
-    // opening. Entering the alternate screen happens well before the
-    // beam completes; quitting any earlier now correctly earns exit code
-    // 130 (a run that never finished does not get to vouch for a code),
-    // so `q` must not be sent until there is a completed run to report
-    // on. The output arrives inside the alternate screen, so it may be
-    // split across reads and interleaved with escape sequences — search
-    // the accumulated buffer, not a single chunk.
+    // Read until the run has actually finished, evidenced by the header's
+    // own finished-run line — not merely the alternate screen opening,
+    // and not merely the beam's output showing up. Entering the
+    // alternate screen happens well before the beam completes, and the
+    // beam's output reaches the pty (via `RunEvent::BeamOutput`) before
+    // the run is scored (via the later, distinct `RunEvent::RunFinished`
+    // that sets `AppState::outcome`) — so neither is proof the run is
+    // over. Quitting before it is over now correctly earns exit code 130
+    // (a run that never finished does not get to vouch for a code), so
+    // `q` must not be sent until `RUN_FINISHED` — synchronized with the
+    // outcome by construction, see its doc comment — has appeared. Output
+    // arrives inside the alternate screen, so it may be split across
+    // reads and interleaved with escape sequences — search the
+    // accumulated buffer, not a single chunk.
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -95,7 +114,7 @@ fn the_tui_opens_restores_and_replays_on_q() {
             Ok(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
             Err(_) => panic!("the run never finished on the pty; got: {seen:?}"),
         }
-        if seen.contains(ALTERNATE_SCREEN_ENTER) && seen.contains("hello-from-the-beam") {
+        if seen.contains(ALTERNATE_SCREEN_ENTER) && seen.contains(RUN_FINISHED) {
             break;
         }
     }
