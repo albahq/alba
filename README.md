@@ -206,15 +206,18 @@ prints a warning once at startup, since such a session can still only react
 to a Beamfile edit.
 
 A change that lands while a run is still in progress cancels that run and
-starts a new one right away rather than waiting for it to finish. The most
-recent change always wins.
+starts a new one right away rather than waiting for it to finish. Every
+change that lands during a run is folded into the next one, so a save the
+cancellation raced with is never dropped.
 
 Editing a loaded Beamfile reloads the project before the next run, so the
 session always schedules the beams as they are currently written. If the
 edit leaves the Beamfile unparsable, Alba renders the same diagnostic
 `alba check` would report for it, runs nothing, and sits idle until a later
 save produces a Beamfile that parses again, at which point the session
-resumes on its own.
+resumes on its own. While it sits there, the diagnostic is printed once
+rather than once per file change: it is reprinted only when a save actually
+changes the answer.
 
 `--force` only applies to the run the session starts with. Every run the
 watcher triggers afterward reads the cache normally; forcing those too
@@ -241,9 +244,12 @@ Piped through `--log-format json`, a session's stream carries two event
 kinds beyond an ordinary run's: `watch_waiting` (`files`, how many resolved
 input files the session is watching) while it sits idle between runs, and
 `watch_triggered` (`paths`, the changed paths that caused the next run) the
-moment one starts. `paths` is an empty array when the trigger cannot be
-pinned to specific files, such as a Beamfile that was broken and has just
-started parsing again.
+moment one starts. `paths` are relative to the project root, and the array
+is empty when the trigger cannot be pinned to specific files, such as a
+Beamfile that was broken and has just started parsing again. A session
+parked on a project that will not load reports `watch_waiting` with `files`
+at `0`: it is stopped, not running, and nothing is resolved while nothing
+loads.
 
 Two things are worth knowing before leaning on watch mode. A beam that
 writes to a git-tracked file matched by its own `inputs` triggers itself on
