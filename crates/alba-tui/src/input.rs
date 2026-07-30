@@ -48,9 +48,12 @@ fn has_disallowed_modifiers(modifiers: KeyModifiers) -> bool {
 /// Maps a terminal event and current mode to a user intent.
 pub fn action_for(event: &Event, mode: &Mode) -> Action {
     // Ctrl-C is handled uniformly across all modes before mode dispatch.
+    // Only Press and Repeat trigger actions; Release is ignored to prevent
+    // double-firing on Windows where both Press and Release are reported.
     match event {
         Event::Key(key_event)
-            if key_event.modifiers.contains(KeyModifiers::CONTROL)
+            if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && key_event.modifiers.contains(KeyModifiers::CONTROL)
                 && key_event.code == KeyCode::Char('c') =>
         {
             return Action::CancelOrQuit;
@@ -144,7 +147,9 @@ fn action_in_modal_mode(event: &Event) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+    };
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -155,7 +160,7 @@ mod tests {
             code,
             modifiers: KeyModifiers::NONE,
             kind,
-            state: unsafe { std::mem::zeroed() },
+            state: KeyEventState::NONE,
         })
     }
 
@@ -387,6 +392,57 @@ mod tests {
                     mode, other
                 ),
             }
+        }
+    }
+
+    /// Ctrl-C with Release must not fire CancelOrQuit (Windows reports both
+    /// Press and Release for every key; the Release must be filtered).
+    #[test]
+    fn ctrl_c_release_does_not_fire_in_any_mode() {
+        let ctrl_c_release = Event::Key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        });
+        for mode in [
+            Mode::Normal,
+            Mode::Search,
+            Mode::Copy,
+            Mode::Graph,
+            Mode::Help,
+        ] {
+            assert_eq!(
+                action_for(&ctrl_c_release, &mode),
+                Action::None,
+                "Ctrl-C Release should not fire in mode {:?}",
+                mode
+            );
+        }
+    }
+
+    /// Ctrl-C with Press must fire CancelOrQuit in all modes.
+    #[test]
+    fn ctrl_c_press_fires_in_all_modes() {
+        let ctrl_c_press = Event::Key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+        for mode in [
+            Mode::Normal,
+            Mode::Search,
+            Mode::Copy,
+            Mode::Graph,
+            Mode::Help,
+        ] {
+            assert_eq!(
+                action_for(&ctrl_c_press, &mode),
+                Action::CancelOrQuit,
+                "Ctrl-C Press should fire CancelOrQuit in mode {:?}",
+                mode
+            );
         }
     }
 }
