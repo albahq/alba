@@ -73,6 +73,18 @@ pub enum Mode {
     Help,
 }
 
+/// A committed search, tied to the beam it ran against. `search.matches`
+/// are line indices into whatever that beam's buffer held at the time —
+/// meaningless against a different beam's content, or against the same
+/// beam's buffer after a rerun has cleared it. `n`/`N` compare `beam`
+/// against the current selection before trusting `matches`, rather than
+/// stepping stale indices into whatever happens to be on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedSearch {
+    pub beam: String,
+    pub search: SearchState,
+}
+
 pub struct AppState {
     pub target: String,
     pub beams: Vec<BeamRow>,
@@ -88,7 +100,7 @@ pub struct AppState {
     /// that mode, so the log pane keeps highlighting its matches until
     /// the next search session (`enter_search`) starts a fresh, empty
     /// one and replaces it.
-    pub last_search: Option<SearchState>,
+    pub last_search: Option<CommittedSearch>,
     pub last_summary: Option<RunSummary>,
     pub should_quit: bool,
     /// The code the last run earned, or `None` when no run may vouch.
@@ -142,6 +154,18 @@ impl AppState {
                 // A rerun starts the beam's story fresh: whatever the
                 // previous attempt printed is no longer what happened.
                 self.logs.entry(id.0.clone()).or_default().clear();
+                // A committed search's matches are line indices into
+                // whatever that beam's buffer held when it was
+                // committed — the rerun just erased that, so stepping
+                // into them would silently pause the pane at an offset
+                // that describes nothing on screen. Recomputing against
+                // the now-empty buffer collapses `matches` instead.
+                if let Some(mut committed) = self.last_search.take() {
+                    if committed.beam == id.0 {
+                        self.recompute_search_against(&id.0, &mut committed.search);
+                    }
+                    self.last_search = Some(committed);
+                }
             }
             RunEvent::BeamOutput { id, line, replayed } => {
                 self.logs
@@ -239,6 +263,14 @@ impl AppState {
         self.beams.get(self.selected)
     }
 
+    /// The selected beam's id, or an empty string when there is none —
+    /// the same fallback `ui/logpane.rs` uses for "nothing to show".
+    fn current_beam_id(&self) -> String {
+        self.selected_beam()
+            .map(|row| row.id.clone())
+            .unwrap_or_default()
+    }
+
     pub fn select_next(&mut self) {
         self.select(self.selected + 1);
     }
@@ -267,11 +299,15 @@ impl AppState {
     }
 
     /// `Esc`: leaves whatever modal mode is active. Search stashes its
-    /// state into `last_search` first; the other modal modes carry no
-    /// payload, so there is nothing to keep.
+    /// state into `last_search` first, tagged with the beam it ran
+    /// against; the other modal modes carry no payload, so there is
+    /// nothing to keep.
     pub fn leave_mode(&mut self) {
         if let Mode::Search(search) = std::mem::replace(&mut self.mode, Mode::Normal) {
-            self.last_search = Some(search);
+            self.last_search = Some(CommittedSearch {
+                beam: self.current_beam_id(),
+                search,
+            });
         }
     }
 
@@ -299,7 +335,10 @@ impl AppState {
         };
         match key.code {
             KeyCode::Enter => {
-                self.last_search = Some(search);
+                self.last_search = Some(CommittedSearch {
+                    beam: self.current_beam_id(),
+                    search,
+                });
                 return;
             }
             KeyCode::Char(character) => {
@@ -329,12 +368,22 @@ impl AppState {
     }
 
     fn step_committed_search(&mut self, step: fn(&mut SearchState)) {
-        let Some(mut search) = self.last_search.take() else {
+        let Some(mut committed) = self.last_search.take() else {
             return;
         };
-        step(&mut search);
-        self.sync_search_scroll(&search);
-        self.last_search = Some(search);
+        let selected = self.current_beam_id();
+        if committed.beam != selected {
+            // The selection has moved on since this search was
+            // committed: the query is what the user typed, the beam is
+            // what they are now looking at, so re-run it there rather
+            // than stepping indices that describe a beam they have
+            // since left.
+            committed.beam = selected;
+            self.recompute_search(&mut committed.search);
+        }
+        step(&mut committed.search);
+        self.sync_search_scroll(&committed.search);
+        self.last_search = Some(committed);
     }
 
     /// Whenever the selected beam's buffer gains a line while a search is
@@ -357,11 +406,23 @@ impl AppState {
     /// keystroke (`search_next`/`search_previous` step the existing
     /// matches instead of rescanning them).
     fn recompute_search(&self, search: &mut SearchState) {
-        let Some(id) = self.selected_beam().map(|row| row.id.clone()) else {
-            return;
-        };
-        if let Some(buffer) = self.logs.get(&id) {
-            search.update(buffer);
+        self.recompute_search_against(&self.current_beam_id(), search);
+    }
+
+    /// Same as `recompute_search`, against an explicit beam rather than
+    /// whichever one is currently selected — for invalidating a
+    /// *committed* search whose beam a rerun just cleared, which need
+    /// not be the beam on screen right now (see the `BeamStarted` /
+    /// `BeamCached` arm of `apply`). A beam with no buffer yet (or
+    /// whose buffer is gone) matches nothing, the same as an empty
+    /// query would.
+    fn recompute_search_against(&self, beam: &str, search: &mut SearchState) {
+        match self.logs.get(beam) {
+            Some(buffer) => search.update(buffer),
+            None => {
+                search.matches.clear();
+                search.current = 0;
+            }
         }
     }
 
@@ -373,9 +434,7 @@ impl AppState {
     /// search with nothing to show must not leave the pane pinned to a
     /// stale view.
     fn sync_search_scroll(&mut self, search: &SearchState) {
-        let Some(id) = self.selected_beam().map(|row| row.id.clone()) else {
-            return;
-        };
+        let id = self.current_beam_id();
         let Some(buffer) = self.logs.get_mut(&id) else {
             return;
         };
@@ -806,8 +865,8 @@ mod tests {
 
         assert_eq!(state.mode, Mode::Normal);
         let last_search = state.last_search.expect("Enter stashes the search");
-        assert_eq!(last_search.query, "c");
-        assert_eq!(last_search.matches, vec![0]);
+        assert_eq!(last_search.search.query, "c");
+        assert_eq!(last_search.search.matches, vec![0]);
     }
 
     /// `Esc` (the event loop's `leave_mode`) keeps the highlights the
@@ -821,7 +880,11 @@ mod tests {
 
         assert_eq!(state.mode, Mode::Normal);
         assert_eq!(
-            state.last_search.expect("Esc stashes the search").query,
+            state
+                .last_search
+                .expect("Esc stashes the search")
+                .search
+                .query,
             "x"
         );
     }
@@ -907,14 +970,26 @@ mod tests {
         }
         state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(state.mode, Mode::Normal, "precondition");
-        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(0));
+        assert_eq!(
+            state.last_search.as_ref().unwrap().search.current_line(),
+            Some(0)
+        );
 
         state.search_next();
-        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(2));
+        assert_eq!(
+            state.last_search.as_ref().unwrap().search.current_line(),
+            Some(2)
+        );
         state.search_next(); // wraps
-        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(0));
+        assert_eq!(
+            state.last_search.as_ref().unwrap().search.current_line(),
+            Some(0)
+        );
         state.search_previous();
-        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(2));
+        assert_eq!(
+            state.last_search.as_ref().unwrap().search.current_line(),
+            Some(2)
+        );
     }
 
     /// Stepping with nothing committed must not panic.
@@ -924,6 +999,149 @@ mod tests {
         state.search_next();
         state.search_previous();
         assert!(state.last_search.is_none());
+    }
+
+    /// A search committed on one beam must not step stale indices into
+    /// whatever beam the user has since selected: `n` re-runs the same
+    /// query against the newly selected beam's own buffer.
+    #[test]
+    fn search_next_re_runs_the_query_against_a_newly_selected_beam() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["codegen", "build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        state.apply(&output("codegen", "line 0"), now);
+        state.apply(&output("codegen", "ERROR in codegen"), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "unrelated line"), now);
+        state.apply(&output("build", "another unrelated line"), now);
+
+        // Commit a search for "error" while "codegen" (index 0) is
+        // selected: it matches codegen's second line.
+        state.select(0);
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            state.last_search.as_ref().unwrap().beam,
+            "codegen",
+            "precondition"
+        );
+
+        // The user now looks at "build", which has no match at all.
+        state.select(1);
+        state.search_next();
+
+        assert_eq!(
+            state.last_search.as_ref().unwrap().beam,
+            "build",
+            "the committed search now tracks the beam actually on screen"
+        );
+        assert!(
+            state
+                .last_search
+                .as_ref()
+                .unwrap()
+                .search
+                .matches
+                .is_empty(),
+            "\"error\" matches nothing in build's own buffer"
+        );
+        assert!(
+            matches!(
+                state.logs.get("build").unwrap().scroll(),
+                crate::logs::Scroll::Following
+            ),
+            "no match in the new beam resumes following rather than pinning a stale offset"
+        );
+    }
+
+    /// Stepping into a beam that *does* match, after switching, lands on
+    /// that beam's own first match rather than an index computed against
+    /// the beam the search was originally run on.
+    #[test]
+    fn search_next_finds_the_new_beams_own_match_after_switching() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["codegen", "build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        state.apply(&output("codegen", "ERROR in codegen"), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "line 0"), now);
+        state.apply(&output("build", "ERROR in build"), now);
+
+        state.select(0);
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        state.select(1); // "build"
+        state.search_next();
+
+        assert_eq!(
+            state.last_search.as_ref().unwrap().search.current_line(),
+            Some(1),
+            "build's own \"ERROR in build\" line, not codegen's"
+        );
+    }
+
+    /// A rerun clears the beam's buffer; a search committed against the
+    /// previous run's content must not leave `n`/`N` stepping into
+    /// indices the cleared buffer no longer holds.
+    #[test]
+    fn a_rerun_invalidates_a_committed_search_on_the_same_beam() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "line 0"), now);
+        state.apply(&output("build", "ERROR here"), now);
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            state.last_search.as_ref().unwrap().search.matches,
+            vec![1],
+            "precondition"
+        );
+
+        // The beam reruns: BeamStarted clears its buffer.
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+
+        assert!(
+            state
+                .last_search
+                .as_ref()
+                .unwrap()
+                .search
+                .matches
+                .is_empty(),
+            "the cleared buffer no longer holds line 1"
+        );
+
+        // Stepping must not panic, and must not pin a stale offset.
+        state.search_next();
+        assert!(
+            state
+                .last_search
+                .as_ref()
+                .unwrap()
+                .search
+                .current_line()
+                .is_none(),
+            "still nothing to step to"
+        );
+        assert!(matches!(
+            state.logs.get("build").unwrap().scroll(),
+            crate::logs::Scroll::Following
+        ));
     }
 
     /// A still-running beam's output must not go stale just because the

@@ -44,7 +44,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         _ => state
             .last_search
             .as_ref()
-            .map(|search| search.query.as_str()),
+            .map(|committed| committed.search.query.as_str()),
     };
     let lines: Vec<Line> = buffer
         .map(|buffer| buffer.view(body_height))
