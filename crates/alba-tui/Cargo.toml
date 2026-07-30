@@ -1,0 +1,18 @@
+[package]
+name = "alba-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alba-core = { path = "../alba-core" }
+alba-engine = { path = "../alba-engine" }
+arboard.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
