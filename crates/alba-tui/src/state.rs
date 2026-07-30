@@ -148,6 +148,13 @@ impl AppState {
                     .entry(id.0.clone())
                     .or_default()
                     .push(line.text.clone(), *replayed);
+                // A still-running beam's search must not go stale while
+                // the user is not typing: a keystroke is not the only
+                // way the match set can change, the buffer gaining a
+                // matching line is another.
+                if self.selected_beam().is_some_and(|row| row.id == id.0) {
+                    self.resync_active_search();
+                }
             }
             RunEvent::BeamFinished {
                 id,
@@ -278,10 +285,14 @@ impl AppState {
         }
     }
 
-    /// Search's own keymap: characters and Backspace edit the query,
-    /// `n`/`N` step through matches without re-triggering a rescan, and
-    /// `Enter` leaves search mode the same way `Esc` does (via
-    /// `leave_mode`), keeping the highlights in `last_search`.
+    /// Search's own keymap while composing: every printable character —
+    /// `n`/`N` included — edits the query, `Backspace` erases from it,
+    /// and `Enter` commits the query and leaves search mode the same way
+    /// `Esc` does (via `leave_mode`), keeping the highlights in
+    /// `last_search`. Stepping is a Normal-mode binding on the committed
+    /// search (`search_next`/`search_previous`), not something typed
+    /// here — the vim/less split, so the query itself can still contain
+    /// `n` or `N`.
     fn handle_search_key(&mut self, key: KeyEvent) {
         let Mode::Search(mut search) = std::mem::replace(&mut self.mode, Mode::Normal) else {
             unreachable!("handle_modal_key only calls this while Mode::Search is active")
@@ -291,8 +302,6 @@ impl AppState {
                 self.last_search = Some(search);
                 return;
             }
-            KeyCode::Char('n') => search.next(),
-            KeyCode::Char('N') => search.previous(),
             KeyCode::Char(character) => {
                 search.push_char(character);
                 self.recompute_search(&mut search);
@@ -307,9 +316,46 @@ impl AppState {
         self.mode = Mode::Search(search);
     }
 
+    /// `n`: the Normal-mode binding that steps the *committed* search
+    /// (`last_search`) to its next match, wrapping. A no-op when nothing
+    /// has been committed yet.
+    pub fn search_next(&mut self) {
+        self.step_committed_search(SearchState::next);
+    }
+
+    /// `N`: same as `search_next`, the other way.
+    pub fn search_previous(&mut self) {
+        self.step_committed_search(SearchState::previous);
+    }
+
+    fn step_committed_search(&mut self, step: fn(&mut SearchState)) {
+        let Some(mut search) = self.last_search.take() else {
+            return;
+        };
+        step(&mut search);
+        self.sync_search_scroll(&search);
+        self.last_search = Some(search);
+    }
+
+    /// Whenever the selected beam's buffer gains a line while a search is
+    /// active, its match set must keep up without waiting for the next
+    /// keystroke — see the `BeamOutput` arm of `apply`.
+    fn resync_active_search(&mut self) {
+        if !matches!(self.mode, Mode::Search(_)) {
+            return;
+        }
+        let Mode::Search(mut search) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            unreachable!("checked above")
+        };
+        self.recompute_search(&mut search);
+        self.sync_search_scroll(&search);
+        self.mode = Mode::Search(search);
+    }
+
     /// Reruns the search against the selected beam's buffer — called
-    /// whenever the query changes, not on every keystroke (`n`/`N` step
-    /// the existing matches instead of rescanning them).
+    /// whenever the query or the buffer's contents change, not on every
+    /// keystroke (`search_next`/`search_previous` step the existing
+    /// matches instead of rescanning them).
     fn recompute_search(&self, search: &mut SearchState) {
         let Some(id) = self.selected_beam().map(|row| row.id.clone()) else {
             return;
@@ -322,18 +368,24 @@ impl AppState {
     /// Translates `current_line` into a `Paused` offset on the selected
     /// beam's buffer, riding the log pane's existing Following/Paused
     /// scrolling rather than inventing a second mechanism for search to
-    /// keep its current match on screen.
+    /// keep its current match on screen. No match (an empty query, or a
+    /// query the buffer no longer contains) resumes `Following`: a
+    /// search with nothing to show must not leave the pane pinned to a
+    /// stale view.
     fn sync_search_scroll(&mut self, search: &SearchState) {
-        let Some(line) = search.current_line() else {
-            return;
-        };
         let Some(id) = self.selected_beam().map(|row| row.id.clone()) else {
             return;
         };
-        if let Some(buffer) = self.logs.get_mut(&id) {
-            let offset = buffer.len().saturating_sub(1).saturating_sub(line);
-            buffer.follow_tail();
-            buffer.scroll_up(offset);
+        let Some(buffer) = self.logs.get_mut(&id) else {
+            return;
+        };
+        match search.current_line() {
+            Some(line) => {
+                let offset = buffer.len().saturating_sub(1).saturating_sub(line);
+                buffer.follow_tail();
+                buffer.scroll_up(offset);
+            }
+            None => buffer.follow_tail(),
         }
     }
 
@@ -730,12 +782,8 @@ mod tests {
         state.apply(&output("build", "warning: unused"), now);
         state.apply(&output("build", "Compiling core"), now);
 
-        // "compil", not "compiling": 'n' is reserved for stepping matches
-        // even while the query is still being typed (see the dedicated
-        // `n_and_shift_n_step_matches_without_rescanning` test below), so
-        // it never reaches `push_char`.
         state.enter_search();
-        for character in "compil".chars() {
+        for character in "compiling".chars() {
             state.handle_modal_key(char_key(character));
         }
 
@@ -807,24 +855,23 @@ mod tests {
         state.apply(&output("build", "Compiling api"), now);
 
         state.enter_search();
-        for character in "Compilx".chars() {
+        for character in "Compilingx".chars() {
             state.handle_modal_key(char_key(character));
         }
         assert!(search_state(&state).matches.is_empty());
 
         state.handle_modal_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(search_state(&state).query, "Compil");
+        assert_eq!(search_state(&state).query, "Compiling");
         assert_eq!(search_state(&state).matches, vec![0]);
     }
 
-    /// `n`/`N` step the existing matches; they must not be swallowed as
-    /// query characters, and stepping must not re-trigger a rescan (which
-    /// would reset `current` back to the first match). A consequence
-    /// worth flagging: because `n`/`N` are reserved this way even while
-    /// the query is still being typed, the query itself can never
-    /// contain the letters `n` or `N`.
+    /// The vim/less split: `n`/`N` are Normal-mode bindings that step the
+    /// *committed* search, so while a query is still being composed they
+    /// are ordinary characters like any other — the query can contain
+    /// them freely (`"running"`, `"warning"`, `"Compiling"`... are all
+    /// common in build output).
     #[test]
-    fn n_and_shift_n_step_matches_without_rescanning() {
+    fn n_and_shift_n_are_ordinary_characters_while_composing() {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
@@ -834,22 +881,131 @@ mod tests {
         state.apply(&output("build", "Compiling core"), now);
 
         state.enter_search();
-        for character in "compil".chars() {
+        for character in "compiling".chars() {
             state.handle_modal_key(char_key(character));
         }
-        assert_eq!(search_state(&state).query, "compil");
-        assert_eq!(search_state(&state).current_line(), Some(0));
 
-        state.handle_modal_key(char_key('n'));
-        assert_eq!(search_state(&state).current_line(), Some(2));
-        assert_eq!(
-            search_state(&state).query,
-            "compil",
-            "'n' steps, it does not get typed into the query"
+        assert_eq!(search_state(&state).query, "compiling");
+        assert_eq!(search_state(&state).matches, vec![0, 2]);
+    }
+
+    /// `search_next`/`search_previous` (the `n`/`N` Normal-mode bindings)
+    /// step the search `Enter` committed into `last_search`, wrapping.
+    #[test]
+    fn search_next_and_previous_step_the_committed_search() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "Compiling api"), now);
+        state.apply(&output("build", "warning: unused"), now);
+        state.apply(&output("build", "Compiling core"), now);
+
+        state.enter_search();
+        for character in "compiling".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode, Mode::Normal, "precondition");
+        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(0));
+
+        state.search_next();
+        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(2));
+        state.search_next(); // wraps
+        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(0));
+        state.search_previous();
+        assert_eq!(state.last_search.as_ref().unwrap().current_line(), Some(2));
+    }
+
+    /// Stepping with nothing committed must not panic.
+    #[test]
+    fn search_next_and_previous_are_no_ops_with_nothing_committed() {
+        let mut state = AppState::new("build", false);
+        state.search_next();
+        state.search_previous();
+        assert!(state.last_search.is_none());
+    }
+
+    /// A still-running beam's output must not go stale just because the
+    /// user has not typed since it arrived: `apply`'s `BeamOutput` arm
+    /// re-triggers the active search the same way a keystroke would.
+    #[test]
+    fn output_arriving_during_an_active_search_recomputes_it() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "line 0"), now);
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        assert!(
+            search_state(&state).matches.is_empty(),
+            "precondition: no match yet"
         );
 
-        state.handle_modal_key(char_key('N'));
-        assert_eq!(search_state(&state).current_line(), Some(0));
+        state.apply(&output("build", "ERROR: build failed"), now);
+
+        assert_eq!(
+            search_state(&state).matches,
+            vec![1],
+            "the new line is picked up without another keystroke"
+        );
+        assert_eq!(search_state(&state).current_line(), Some(1));
+    }
+
+    /// Output for a beam that is not selected must not disturb the
+    /// active search — it is not the buffer being searched.
+    #[test]
+    fn output_for_an_unselected_beam_does_not_recompute_the_search() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["codegen", "build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.select(1); // "build"
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+
+        state.apply(&output("codegen", "ERROR: not the searched beam"), now);
+
+        assert!(search_state(&state).matches.is_empty());
+    }
+
+    /// Backspacing down to an empty query (no matches left) must resume
+    /// following rather than leaving the pane pinned to a stale view.
+    #[test]
+    fn a_query_with_no_matches_resumes_following() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "ERROR here"), now);
+        for index in 0..50 {
+            state.apply(&output("build", &format!("line {index}")), now);
+        }
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        assert!(matches!(
+            state.logs.get("build").unwrap().scroll(),
+            crate::logs::Scroll::Paused { .. }
+        ));
+
+        for _ in 0.."error".len() {
+            state.handle_modal_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+
+        assert!(matches!(
+            state.logs.get("build").unwrap().scroll(),
+            crate::logs::Scroll::Following
+        ));
     }
 
     /// The log pane rides the buffer's own Following/Paused scrolling:

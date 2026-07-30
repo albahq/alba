@@ -25,4 +25,4 @@ expression: "drawn(&state, 80, 24)"
 "│                              │                                               │"
 "│                              │                                               │"
 "│✔ 0  ⚡ 0  ✖ 0  ○ 0           │↑ paused                                       │" Hidden by multi-width symbols: [(7, " ")]
-"└─ /error · 1/2 · Enter commit · Esc cancel ───────────────────────────────────┘"
+"└─ q quit · r rerun · f force · c cancel · w watch · n next · N prev ──────────┘"

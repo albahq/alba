@@ -1,6 +1,5 @@
 ---
 source: crates/alba-tui/tests/render.rs
-assertion_line: 123
 expression: "drawn(&state, 80, 24)"
 ---
 "┌─ alba · run build finished · ✖ 1 · 0.5s ─────────────────────────────────────┐"
@@ -26,4 +25,4 @@ expression: "drawn(&state, 80, 24)"
 "│                              │                                               │"
 "│                              │                                               │"
 "│✔ 0  ⚡ 0  ✖ 1  ○ 0           │● following                                    │" Hidden by multi-width symbols: [(7, " ")]
-"└─ q quit · r rerun · f force · c cancel · w watch ────────────────────────────┘"
+"└─ q quit · r rerun · f force · c cancel · w watch · n next · N prev ──────────┘"

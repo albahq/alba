@@ -77,14 +77,22 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 /// the tasks that give those modes behaviour, so they fall back to the
 /// one action that always applies rather than this task guessing at
 /// their eventual keymaps.
+///
+/// `n`/`N` live in the Normal-mode bar rather than Search's: they step
+/// the *committed* search (`AppState::last_search`), a Normal-mode
+/// binding (`input.rs`) the same way `j`/`k` are — advertising them
+/// while still composing a query would claim a key that, at that point,
+/// only ever types a character into it.
 fn bottom_bar(mode: &Mode) -> String {
     match mode {
-        Mode::Normal => "q quit · r rerun · f force · c cancel · w watch".to_string(),
+        Mode::Normal => {
+            "q quit · r rerun · f force · c cancel · w watch · n next · N prev".to_string()
+        }
         Mode::Search(search) => {
             let total = search.matches.len();
             let current = if total == 0 { 0 } else { search.current + 1 };
             format!(
-                "/{} · {current}/{total} · n next · N prev · Esc done",
+                "/{} · {current}/{total} · Enter commit · Esc cancel",
                 search.query
             )
         }

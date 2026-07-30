@@ -25,13 +25,15 @@ pub enum Action {
     ToggleWatch,           // w
     ScrollUp(usize),
     ScrollDown(usize),
-    FollowTail,    // G
-    EnterSearch,   // /
-    EnterCopy,     // v
-    EnterGraph,    // g
-    EnterHelp,     // ?
-    LeaveMode,     // Esc
-    Key(KeyEvent), // anything else, for the active mode to interpret
+    FollowTail,     // G
+    EnterSearch,    // /
+    EnterCopy,      // v
+    EnterGraph,     // g
+    EnterHelp,      // ?
+    SearchNext,     // n: step the committed search forward, wrapping
+    SearchPrevious, // N: step the committed search backward, wrapping
+    LeaveMode,      // Esc
+    Key(KeyEvent),  // anything else, for the active mode to interpret
     Mouse(MouseEvent),
     None,
 }
@@ -97,6 +99,8 @@ fn action_in_normal_mode(event: &Event) -> Action {
                     KeyCode::Char('G') => return Action::FollowTail,
                     KeyCode::Char('j') => return Action::SelectNext,
                     KeyCode::Char('k') => return Action::SelectPrevious,
+                    KeyCode::Char('n') => return Action::SearchNext,
+                    KeyCode::Char('N') => return Action::SearchPrevious,
                     _ => {}
                 }
             }
@@ -232,6 +236,14 @@ mod tests {
             action_for(&key(KeyCode::Char('k')), &mode),
             Action::SelectPrevious
         );
+        assert_eq!(
+            action_for(&key(KeyCode::Char('n')), &mode),
+            Action::SearchNext
+        );
+        assert_eq!(
+            action_for(&key(KeyCode::Char('N')), &mode),
+            Action::SearchPrevious
+        );
     }
 
     /// Ctrl-C is one action whose meaning the event loop resolves against
@@ -320,6 +332,58 @@ mod tests {
         // G naturally arrives with SHIFT from terminals, since it's uppercase.
         let event = key_with_modifiers(KeyCode::Char('G'), KeyModifiers::SHIFT);
         assert_eq!(action_for(&event, &mode), Action::FollowTail);
+    }
+
+    /// `n`/`N` step the committed search, gated exactly like every other
+    /// character binding on this file: Release does not fire, Repeat
+    /// does, and CONTROL/ALT/SUPER block the binding while SHIFT (the
+    /// only way `N` naturally arrives) does not.
+    #[test]
+    fn search_step_keys_are_gated_like_every_other_binding() {
+        let mode = Mode::Normal;
+        assert_eq!(
+            action_for(&key(KeyCode::Char('n')), &mode),
+            Action::SearchNext
+        );
+        assert_eq!(
+            action_for(&key(KeyCode::Char('N')), &mode),
+            Action::SearchPrevious
+        );
+        assert_eq!(
+            action_for(
+                &key_with_kind(KeyCode::Char('n'), KeyEventKind::Release),
+                &mode
+            ),
+            Action::None
+        );
+        assert_eq!(
+            action_for(
+                &key_with_kind(KeyCode::Char('n'), KeyEventKind::Repeat),
+                &mode
+            ),
+            Action::SearchNext
+        );
+        assert_eq!(
+            action_for(
+                &key_with_modifiers(KeyCode::Char('N'), KeyModifiers::SHIFT),
+                &mode
+            ),
+            Action::SearchPrevious,
+            "SHIFT is just how 'N' arrives, not a gate"
+        );
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
+            match action_for(&key_with_modifiers(KeyCode::Char('n'), modifiers), &mode) {
+                Action::Key(ke) => assert_eq!(ke.code, KeyCode::Char('n')),
+                other => panic!(
+                    "Expected Action::Key for modifiers {:?}, got {:?}",
+                    modifiers, other
+                ),
+            }
+        }
     }
 
     /// Mouse wheel up in Normal mode maps to ScrollUp(3).

@@ -187,3 +187,43 @@ fn a_search_highlights_and_counts_matches() {
 
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
+
+/// Once `Enter` commits the query, the session is back in `Mode::Normal`
+/// — a distinct state the user spends real time in — but the highlights
+/// and the scroll position it left behind stay exactly as they were:
+/// `last_search` is what keeps them alive, and the bottom bar goes back
+/// to Normal mode's own (now advertising `n`/`N`, the keys that step the
+/// committed search).
+#[test]
+fn a_committed_search_keeps_its_highlights_in_normal_mode() {
+    let mut state = AppState::new("build", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            target: id("build"),
+            beams: vec![id("build")],
+            edges: vec![],
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    for index in 0..10 {
+        state.apply(&output("build", &format!("line {index}")), now);
+    }
+    state.apply(&output("build", "ERROR one"), now);
+    for index in 10..24 {
+        state.apply(&output("build", &format!("line {index}")), now);
+    }
+    state.apply(&output("build", "ERROR two"), now);
+    for index in 24..28 {
+        state.apply(&output("build", &format!("line {index}")), now);
+    }
+
+    state.enter_search();
+    for character in "error".chars() {
+        state.handle_modal_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}
