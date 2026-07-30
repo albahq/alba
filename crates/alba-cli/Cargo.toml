@@ -14,6 +14,7 @@ alba-engine = { path = "../alba-engine" }
 alba-executors = { path = "../alba-executors" }
 alba-shell = { path = "../alba-shell" }
 alba-syntax = { path = "../alba-syntax" }
+alba-tui = { path = "../alba-tui" }
 clap.workspace = true
 owo-colors.workspace = true
 serde.workspace = true

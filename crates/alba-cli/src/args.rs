@@ -101,6 +101,17 @@ pub struct RunFlags {
     /// declares as `inputs` change. Ctrl-C ends the session.
     #[arg(long)]
     pub watch: bool,
+
+    /// Force the interactive interface on, even where it would default off
+    ///
+    /// It still needs a real terminal to draw on: down a pipe this is
+    /// refused rather than honoured.
+    #[arg(long, conflicts_with = "no_ui")]
+    pub ui: bool,
+
+    /// Force the headless output, even on a terminal
+    #[arg(long)]
+    pub no_ui: bool,
 }
 
 /// How the text renderers lay a run out.

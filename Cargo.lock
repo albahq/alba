@@ -26,6 +26,7 @@ dependencies = [
  "alba-executors",
  "alba-shell",
  "alba-syntax",
+ "alba-tui",
  "assert_cmd",
  "clap",
  "nix",

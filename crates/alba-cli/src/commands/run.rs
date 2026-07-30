@@ -23,6 +23,18 @@
 //! every run of the session rather than one run. The differences it does
 //! carry are the file watcher it must build up front, the errors the
 //! session hands back mid-flight for rendering, and its own exit codes.
+//!
+//! ## The interactive interface
+//!
+//! [`ui_enabled`] decides, before anything is built, which of the two front
+//! ends this run gets. [`tui_execute`] is the interactive one: the same
+//! session loop as [`watch_execute`], but its event stream feeds
+//! [`alba_tui`] instead of a [`Renderer`], and the interface answers back
+//! with [`alba_engine::SessionCommand`]s over a second channel. What the
+//! session was told to do is therefore no longer fixed at startup — `--watch`
+//! only sets where it *begins*. When the interface closes, [`replay`] puts
+//! the last run's summary and the failed beams' logs back on stderr, which
+//! the alternate screen would otherwise have taken with it.
 
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
@@ -55,6 +67,17 @@ pub fn run(
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
+    // Answered before anything is built: a refusal has nothing to run, and
+    // resolving it here leaves only the two front ends below.
+    let interactive = match ui_enabled(flags, std::io::stdout().is_terminal()) {
+        UiDecision::Tui => true,
+        UiDecision::Headless => false,
+        UiDecision::RefusedNoTty => {
+            LineSink::stderr().line("--ui needs a terminal; stdout is not one");
+            return EXIT_ALBA_ERROR;
+        }
+    };
+
     // `enable_all` is required, not incidental: the shell executor drives
     // child processes and the interrupt watcher waits on signals, both of
     // which need the I/O and signal drivers.
@@ -69,12 +92,55 @@ pub fn run(
         }
     };
 
-    if flags.watch {
+    // The interface subsumes `--watch` — it can turn watching on and off
+    // mid-session — so the flag only splits the two headless paths, which
+    // are otherwise exactly the program they were.
+    if interactive {
+        runtime.block_on(tui_execute(
+            project, sources, beamfile, target, params, flags,
+        ))
+    } else if flags.watch {
         runtime.block_on(watch_execute(
             project, sources, beamfile, target, params, flags,
         ))
     } else {
         runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+    }
+}
+
+/// Which of the two front ends a run gets.
+#[derive(Debug, PartialEq, Eq)]
+enum UiDecision {
+    /// The interactive interface.
+    Tui,
+    /// The existing renderers, on stdout and stderr.
+    Headless,
+    /// `--ui` on something that is not a terminal: an error, not a fallback.
+    RefusedNoTty,
+}
+
+/// The spec's activation table: the interface is the default on a terminal,
+/// and yields to headless for a machine-readable stream (`--log-format
+/// json`), an explicit text layout (`--output`, since asking for a layout
+/// is asking for text), or `--no-ui`.
+///
+/// `--ui` forces it the other way, but it still needs a real terminal to
+/// draw on. Off one it is *refused* rather than quietly downgraded: an
+/// interface drawn down a pipe would fill the reader's stream with escape
+/// codes, and silently ignoring the flag would hide the fact that what was
+/// asked for is impossible here.
+///
+/// Takes the TTY answer as an argument rather than asking `IsTerminal`
+/// itself, so the whole table can be tested — under a test harness stdout
+/// is never a terminal, which would make half of it unreachable.
+fn ui_enabled(flags: &RunFlags, stdout_is_tty: bool) -> UiDecision {
+    if flags.no_ui || flags.log_format == LogFormat::Json || flags.output.is_some() {
+        return UiDecision::Headless;
+    }
+    match (flags.ui, stdout_is_tty) {
+        (_, true) => UiDecision::Tui,
+        (true, false) => UiDecision::RefusedNoTty,
+        (false, false) => UiDecision::Headless,
     }
 }
 
@@ -244,6 +310,165 @@ async fn watch_execute(
         WatchExit::WatcherClosed => {
             err.line("the file watcher stopped; ending the session");
             EXIT_ALBA_ERROR
+        }
+    }
+}
+
+/// The interactive counterpart of [`watch_execute`]: the same session loop,
+/// driven by [`alba_tui`] instead of a renderer.
+///
+/// The startup rules are [`watch_execute`]'s, on purpose. A target this
+/// project does not declare is still exit [`EXIT_ALBA_ERROR`] before
+/// anything opens — mid-session the session parks on an unknown target,
+/// but at startup it means the command line was wrong — and the watcher is
+/// built whatever `--watch` says, because `w` can turn watching on at any
+/// point in the session and a watcher cannot be added to a running one.
+///
+/// The one piece of [`execute`]'s shape that is deliberately absent is
+/// [`watch_interrupts`]: raw mode delivers Ctrl-C to the interface as an
+/// ordinary key event, which it answers itself (cancel a run, or quit),
+/// and a signal handler racing it would cancel runs the user never asked
+/// to cancel.
+async fn tui_execute(
+    project: &Project,
+    sources: &SourceMap,
+    beamfile: &Path,
+    target: &BeamId,
+    params: Vec<String>,
+    flags: &RunFlags,
+) -> i32 {
+    let mut err = LineSink::stderr();
+
+    // The exit-2-at-startup rule. The subgraph itself is not wanted here:
+    // `no_inputs_warning`'s advice belongs to a session that can only
+    // watch, and this one shows its watch state in the header and lets `w`
+    // change it.
+    if let Err(error) = alba_core::execution_subgraph(project, target) {
+        err.line(crate::render_core_error(&error, sources).trim_end());
+        return EXIT_ALBA_ERROR;
+    }
+
+    let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources)) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            err.line(&format!("cannot start the file watcher: {error}"));
+            return EXIT_ALBA_ERROR;
+        }
+    };
+
+    let options = RunOptions {
+        jobs: jobs(flags.jobs),
+        keep_going: flags.keep_going,
+        params,
+        cache: Some(CacheOptions {
+            dir: cache_dir(beamfile),
+            force: flags.force,
+        }),
+    };
+
+    let (events, incoming) = unbounded_channel();
+    let (commands, command_receiver) = unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let session = tokio::spawn({
+        // The session outlives this frame's borrows, so everything it
+        // needs is cloned in — all of it cheap next to a single run.
+        let beamfile = beamfile.to_path_buf();
+        let project = project.clone();
+        let sources = sources.clone();
+        let target = target.clone();
+        let watch = flags.watch;
+        async move {
+            alba_engine::session(
+                &beamfile,
+                project,
+                sources,
+                target,
+                options,
+                Executors {
+                    embedded: Arc::new(EmbeddedShellExecutor),
+                    system: Arc::new(SystemShellExecutor),
+                },
+                events,
+                Some(command_receiver),
+                watch,
+                cancel,
+                Box::new(watcher),
+                // Same contract as [`watch_execute`]'s: render against the
+                // sources the error carries, never a startup copy, and let
+                // the session turn the answer into an event.
+                &mut |error| match error {
+                    SessionError::Load(load) => crate::render_load_error(load),
+                    SessionError::Run { error, sources } => render_engine_error(error, sources),
+                },
+            )
+            .await
+        }
+    });
+
+    let outcome = alba_tui::run(
+        incoming,
+        commands,
+        alba_tui::TuiOptions {
+            target: target.0.clone(),
+            watch: flags.watch,
+        },
+    )
+    .await;
+
+    // The interface owns the last word either way: on its own exit it sent
+    // `Shutdown`, and on a failure it dropped the command sender, which the
+    // session reads as the same thing. So this joins on a session that is
+    // already stopping, and cannot hang. Its `WatchExit` says nothing the
+    // interface has not already reported on screen.
+    let _ = session.await;
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            err.line(&format!("the interface failed: {error}"));
+            return EXIT_ALBA_ERROR;
+        }
+    };
+
+    // Only now: the terminal guard dropped when `alba_tui::run` returned,
+    // so the alternate screen is gone and stderr reaches the shell the user
+    // is left looking at.
+    replay(&mut err, &outcome);
+
+    // No run that ran to completion means nothing here vouches for the
+    // sources: an abandoned run, a parked session, or a session the user
+    // quit before anything finished all report an interruption.
+    outcome.last_run_code.unwrap_or(EXIT_INTERRUPTED)
+}
+
+/// What quitting the interface leaves behind on stderr: the last run's
+/// summary, then each failed beam's output under its own header.
+///
+/// The alternate screen takes the whole session with it when it closes, so
+/// without this a failing run would end on an empty prompt. The summary is
+/// [`crate::render::print_summary`]'s, the very line the text renderers
+/// print, so the two front ends cannot describe the same run differently.
+///
+/// The logs come from the interface's per-beam ring buffers, which are
+/// capped: a beam that produced more than [`alba_tui::logs::MAX_LINES`]
+/// lines is replayed from wherever the buffer starts, and says so rather
+/// than passing a partial log off as the whole one.
+fn replay(err: &mut LineSink<std::io::Stderr>, outcome: &alba_tui::TuiOutcome) {
+    if let Some(summary) = &outcome.last_summary {
+        crate::render::print_summary(err, summary);
+    }
+
+    for (beam, lines) in &outcome.failed_logs {
+        err.line(&format!("\u{2500}\u{2500} {beam} \u{2500}\u{2500}"));
+        if lines.len() >= alba_tui::logs::MAX_LINES {
+            err.line(&format!(
+                "(the interface keeps at most {} lines per beam; anything earlier is not replayed)",
+                alba_tui::logs::MAX_LINES
+            ));
+        }
+        for line in lines {
+            err.line(line);
         }
     }
 }
@@ -632,6 +857,67 @@ mod tests {
     #[test]
     fn an_unknown_platform_parallelism_falls_back_to_one() {
         assert_eq!(resolve_jobs(None, None), 1);
+    }
+
+    /// The default: a terminal gets the interface, anything else — a pipe,
+    /// a CI log — stays on the headless renderers.
+    #[test]
+    fn the_tui_is_the_default_on_a_terminal_only() {
+        let flags = RunFlags::default();
+
+        assert_eq!(ui_enabled(&flags, true), UiDecision::Tui);
+        assert_eq!(ui_enabled(&flags, false), UiDecision::Headless);
+    }
+
+    /// Asking for a machine stream or for a named text layout is asking for
+    /// text, and `--no-ui` says it outright — all three win over the
+    /// terminal the user happens to be sitting at.
+    #[test]
+    fn asking_for_a_text_layout_or_json_means_headless() {
+        let json = RunFlags {
+            log_format: LogFormat::Json,
+            ..RunFlags::default()
+        };
+        let text = RunFlags {
+            output: Some(OutputStyle::Grouped),
+            ..RunFlags::default()
+        };
+        let off = RunFlags {
+            no_ui: true,
+            ..RunFlags::default()
+        };
+
+        for flags in [json, text, off] {
+            assert_eq!(ui_enabled(&flags, true), UiDecision::Headless);
+        }
+    }
+
+    /// `--ui` forces the interface, but it cannot draw one down a pipe:
+    /// refused outright rather than filling the reader's stream with
+    /// escape codes.
+    #[test]
+    fn forcing_the_ui_off_a_terminal_is_refused_not_garbled() {
+        let flags = RunFlags {
+            ui: true,
+            ..RunFlags::default()
+        };
+
+        assert_eq!(ui_enabled(&flags, false), UiDecision::RefusedNoTty);
+        assert_eq!(ui_enabled(&flags, true), UiDecision::Tui);
+    }
+
+    /// `--no-ui` wins even when `--ui` is somehow also set: the flags
+    /// conflict at parse time, so this only pins the rule's own order.
+    #[test]
+    fn turning_the_ui_off_wins_over_forcing_it_on() {
+        let flags = RunFlags {
+            ui: true,
+            no_ui: true,
+            ..RunFlags::default()
+        };
+
+        assert_eq!(ui_enabled(&flags, true), UiDecision::Headless);
+        assert_eq!(ui_enabled(&flags, false), UiDecision::Headless);
     }
 
     /// A run nobody interrupted reports what its beams earned.
