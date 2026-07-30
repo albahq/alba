@@ -117,8 +117,15 @@ fn a_file_change_triggers_a_second_run() {
 
     std::fs::write(dir.path().join("src/input.txt"), "two").unwrap();
 
+    // The opening quote is the whole point: a path that came back absolute
+    // reads `"/private/var/.../src/input.txt"` and satisfies a substring
+    // check on `src/input.txt` while breaking the root-relative promise the
+    // event and the status line both make. Only this path is asserted, not
+    // the whole array — a debounced batch coalesces whatever the operating
+    // system reported in its window, and macOS routinely folds in the
+    // Beamfile alongside.
     let triggered = alba.wait_for(r#""event":"watch_triggered""#);
-    assert!(triggered.contains("src/input.txt"), "got: {triggered}");
+    assert!(triggered.contains(r#""src/input.txt""#), "got: {triggered}");
     alba.wait_for(r#""event":"run_finished""#);
     alba.wait_for(r#""event":"watch_waiting""#);
 }

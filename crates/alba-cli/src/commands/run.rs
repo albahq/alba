@@ -287,31 +287,21 @@ fn watch_roots(beamfile: &Path, sources: &SourceMap) -> Vec<PathBuf> {
 
 /// [`watch_roots`] over the loaded paths themselves, so the rules can be
 /// tested — a [`SourceMap`] can only be produced by loading a real project.
+/// Both the roots and the paths a session displays are rooted by
+/// [`alba_engine::beamfile_dir`], never by a rule spelled again here:
+/// keeping two notions of "the directory this Beamfile is rooted at" is
+/// exactly how a watcher that started correctly ends up reporting paths
+/// the status line cannot shorten.
 fn roots_of<'a>(beamfile: &Path, loaded: impl Iterator<Item = &'a Path>) -> Vec<PathBuf> {
-    let root = containing_dir(beamfile);
+    let root = alba_engine::beamfile_dir(beamfile);
     let mut roots = vec![root.clone()];
     for path in loaded {
-        let dir = containing_dir(path);
+        let dir = alba_engine::beamfile_dir(path);
         if !dir.starts_with(&root) && !roots.contains(&dir) {
             roots.push(dir);
         }
     }
     roots
-}
-
-/// The absolute directory holding `file`.
-///
-/// An empty parent means the current directory, and must be spelled that
-/// way rather than passed on: a bare `Beamfile` (what `alba run` resolves
-/// to without `--file`) has one, and the watcher rejects an empty path
-/// outright. Lexical like `main.rs`'s own path handling — `std::path::absolute`
-/// never requires the directory to exist.
-fn containing_dir(file: &Path) -> PathBuf {
-    let dir = file
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// The watch session's renderer: the same selection [`renderer`] makes, but

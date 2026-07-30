@@ -131,7 +131,7 @@ pub async fn watch(
     mut watcher: Box<dyn Watcher>,
     on_error: &mut (dyn FnMut(&SessionError) + Send),
 ) -> WatchExit {
-    let root = beamfile.parent().map(Path::to_path_buf).unwrap_or_default();
+    let root = beamfile_dir(beamfile);
     // `--force` empties the cache's read side for the initial run only:
     // applying it to every triggered run would re-run the whole subgraph
     // on every keystroke, which is exactly what the cache is here to
@@ -345,6 +345,28 @@ fn merge(pending: &mut Option<Trigger>, fresh: Trigger) {
     }
 }
 
+/// The absolute directory holding `beamfile`: the project root for the
+/// root Beamfile, and its own directory for an imported one.
+///
+/// An empty parent means the current directory, and must be spelled that
+/// way rather than passed on: a bare `Beamfile` (what `alba run` resolves
+/// to without `--file`) has one, `notify` rejects an empty path outright,
+/// and `strip_prefix("")` succeeds on any path at all — so an empty root
+/// would leave every displayed path absolute with nothing to signal it.
+/// The one rule, applied both to the roots put under watch and to the root
+/// that paths are displayed against, so the two cannot drift apart.
+///
+/// Lexical: `std::path::absolute` never requires the directory to exist,
+/// and never resolves symlinks — settling those is [`relative_to`]'s job,
+/// on the paths a watcher actually reports.
+pub fn beamfile_dir(beamfile: &Path) -> PathBuf {
+    let dir = beamfile
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 /// Root-relative display strings with `/` separators, deduplicated,
 /// sorted for stable output. A path outside the root (an import's input
 /// in a sibling directory) displays as-is.
@@ -467,5 +489,113 @@ async fn park_until_the_project_changes(
                 None => return Reloaded::Exit(WatchExit::WatcherClosed),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The nominal invocation: `alba run --watch` without `--file` resolves
+    /// to a bare `Beamfile`, and the paths a watcher reports are absolute.
+    /// Rooting the session anywhere else — the empty path, most of all —
+    /// leaves those paths absolute in the status line and in the
+    /// `watch_triggered` event, which both promise root-relative ones.
+    #[test]
+    fn a_bare_beamfile_roots_the_session_at_the_current_directory() {
+        let reported = std::env::current_dir().unwrap().join("src/input.txt");
+
+        let root = beamfile_dir(Path::new("Beamfile"));
+
+        assert_eq!(display_paths(&root, &[reported]), vec!["src/input.txt"]);
+    }
+
+    /// A Beamfile named through a directory roots the session there, not in
+    /// the directory Alba happens to have been started from.
+    #[test]
+    fn a_named_beamfile_roots_the_session_at_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let reported = dir.path().join("src/input.txt");
+
+        let root = beamfile_dir(&dir.path().join("Beamfile"));
+
+        assert_eq!(display_paths(&root, &[reported]), vec!["src/input.txt"]);
+    }
+
+    /// The rule the root computation exists to satisfy: an empty root
+    /// shortens nothing, because `strip_prefix("")` succeeds and hands back
+    /// the whole path. Every branch below it is unreachable once the first
+    /// one matches, so a session rooted at the empty path displays absolute
+    /// paths with no error anywhere to say so.
+    #[test]
+    fn an_empty_root_shortens_nothing() {
+        let path = Path::new("/project/src/input.txt");
+
+        assert_eq!(relative_to(Path::new(""), None, path), path);
+    }
+
+    /// A relative root works lexically against a path spelled the same way
+    /// — no filesystem access, nothing to resolve.
+    #[test]
+    fn a_relative_root_shortens_a_path_spelled_from_it() {
+        assert_eq!(
+            relative_to(
+                Path::new("project"),
+                None,
+                Path::new("project/src/input.txt")
+            ),
+            Path::new("src/input.txt")
+        );
+    }
+
+    /// An input reached through an import in a sibling tree is not under
+    /// the root, and is shown as it came rather than as a `../..` chain.
+    #[test]
+    fn a_path_outside_the_root_is_left_as_it_came() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let path = elsewhere.path().join("shared/input.txt");
+
+        assert_eq!(
+            relative_to(
+                root.path(),
+                root.path().canonicalize().ok().as_deref(),
+                &path
+            ),
+            path
+        );
+    }
+
+    /// A deletion is an ordinary watch event, and `canonicalize` fails on a
+    /// path that no longer exists — so shortening must not depend on it.
+    #[test]
+    fn a_path_that_no_longer_exists_is_still_shortened() {
+        let root = tempfile::tempdir().unwrap();
+        let deleted = root.path().join("src/deleted.txt");
+        assert!(!deleted.exists(), "precondition");
+
+        assert_eq!(
+            relative_to(
+                root.path(),
+                root.path().canonicalize().ok().as_deref(),
+                &deleted
+            ),
+            Path::new("src/deleted.txt")
+        );
+    }
+
+    /// The root's canonical form settles a disagreement about symlinks
+    /// between how the root was spelled and what the watcher reports
+    /// (macOS reports `/private/var/...` for `/var/...`).
+    #[test]
+    fn a_root_spelled_through_a_symlink_still_shortens_what_the_watcher_reports() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let reported = canonical.join("src/input.txt");
+
+        assert_eq!(
+            relative_to(root.path(), Some(&canonical), &reported),
+            Path::new("src/input.txt")
+        );
     }
 }
