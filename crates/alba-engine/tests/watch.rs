@@ -95,11 +95,11 @@ enum ObservedError {
 }
 
 fn start(beamfile: &str, target: &str, executor: FakeExecutor, force: bool) -> Session {
-    start_reporting_to(beamfile, target, executor, force, |_| {})
+    start_reporting_to(beamfile, target, executor, force, |_| String::new())
 }
 
-/// A session whose `on_error` reports are recorded, so a test can assert
-/// what the caller was told and in which order.
+/// A session whose `render_error` reports are recorded, so a test can
+/// assert what the caller was told and in which order.
 fn start_with_error_log(
     beamfile: &str,
     target: &str,
@@ -112,6 +112,7 @@ fn start_with_error_log(
             SessionError::Load(_) => ObservedError::Load,
             SessionError::Run { .. } => ObservedError::Run,
         });
+        String::new()
     });
     (session, log)
 }
@@ -121,7 +122,7 @@ fn start_reporting_to(
     target: &str,
     executor: FakeExecutor,
     force: bool,
-    mut on_error: impl FnMut(&SessionError) + Send + 'static,
+    mut render_error: impl FnMut(&SessionError) -> String + Send + 'static,
 ) -> Session {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -166,7 +167,7 @@ fn start_reporting_to(
                 Box::new(ScriptedWatcher {
                     batches: batches_rx,
                 }),
-                &mut on_error,
+                &mut render_error,
             )
             .await
         }
@@ -498,6 +499,33 @@ async fn a_broken_beamfile_reports_waits_and_recovers() {
     session.finish().await;
 }
 
+/// A broken reload is not only rendered to the caller: it travels the
+/// event stream, so a consumer that never sees stderr (the TUI) still
+/// learns the session parked and why. The `render_error` callback returns
+/// a fixed, recognisable string, so the assertion proves the emitted
+/// diagnostic is the callback's answer, not something the engine invented.
+#[tokio::test]
+async fn a_failed_reload_emits_project_broken() {
+    let mut session = start_reporting_to(ONE_BEAM, "build", FakeExecutor::new(), false, |_| {
+        "rendered by the callback".to_string()
+    });
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch("Beamfile", "beam build { this does not parse");
+    session.send(vec![beamfile]);
+    session.event_matching(is_triggered).await;
+
+    let event = session
+        .event_matching(|event| matches!(event, RunEvent::ProjectBroken { .. }))
+        .await;
+    let RunEvent::ProjectBroken { diagnostic } = event else {
+        unreachable!()
+    };
+    assert_eq!(diagnostic, "rendered by the callback");
+
+    session.finish().await;
+}
+
 /// A parked session says so on the event channel. Until it does, the last
 /// event on the stream is the trigger that means "running", and a consumer
 /// — a JSON reader, a TUI — believes a session that is in fact stopped is
@@ -671,6 +699,7 @@ async fn a_run_error_after_a_reload_carries_the_reloaded_sources() {
                     .map_or_else(String::new, |(_, source)| source.to_string());
                 sink.lock().unwrap().push(text);
             }
+            String::new()
         },
     );
     session.event_matching(is_waiting).await;

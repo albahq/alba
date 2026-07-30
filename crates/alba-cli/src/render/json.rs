@@ -32,18 +32,27 @@ use super::LineSink;
 
 pub struct JsonRenderer {
     out: LineSink<io::Stdout>,
+    /// Only ever written to for `ProjectBroken`: the diagnostic still goes
+    /// to stderr in JSON mode too, exactly as it did before this event
+    /// existed, for whoever is reading the process the old way rather than
+    /// parsing the stream.
+    err: LineSink<io::Stderr>,
 }
 
 impl JsonRenderer {
     pub fn new() -> Self {
         Self {
             out: LineSink::stdout(),
+            err: LineSink::stderr(),
         }
     }
 }
 
 impl super::Renderer for JsonRenderer {
     fn handle(&mut self, event: &RunEvent) {
+        if let RunEvent::ProjectBroken { diagnostic } = event {
+            self.err.line(diagnostic.trim_end());
+        }
         let wire = WireEvent::from(event);
         // Serializing these types cannot fail: every field is a string, a
         // number, or a sequence of them. The `Result` is still handled
@@ -105,6 +114,9 @@ enum WireEvent<'a> {
     WatchTriggered {
         paths: &'a [String],
     },
+    ProjectBroken {
+        diagnostic: &'a str,
+    },
 }
 
 #[derive(Serialize)]
@@ -153,6 +165,7 @@ impl<'a> From<&'a RunEvent> for WireEvent<'a> {
             RunEvent::RunFinished { summary } => WireEvent::from_summary(summary),
             RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
             RunEvent::WatchTriggered { paths } => WireEvent::WatchTriggered { paths },
+            RunEvent::ProjectBroken { diagnostic } => WireEvent::ProjectBroken { diagnostic },
         }
     }
 }
@@ -345,6 +358,23 @@ mod tests {
         assert_eq!(
             triggered,
             r#"{"event":"watch_triggered","paths":["src/lib.rs"]}"#
+        );
+    }
+
+    /// `project_broken` is part of the public JSON contract: a consumer
+    /// that never reads stderr still needs to learn the session parked and
+    /// why.
+    #[test]
+    fn project_broken_is_emitted_on_the_wire() {
+        let event = RunEvent::ProjectBroken {
+            diagnostic: "error: oh no\n".to_string(),
+        };
+
+        let line = serde_json::to_string(&WireEvent::from(&event)).unwrap();
+
+        assert_eq!(
+            line,
+            r#"{"event":"project_broken","diagnostic":"error: oh no\n"}"#
         );
     }
 }

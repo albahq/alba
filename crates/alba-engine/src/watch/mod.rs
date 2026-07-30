@@ -19,14 +19,19 @@
 //! [`park_until_the_project_changes`]: reported, announced as a wait,
 //! executing nothing, until a save makes it loadable again.
 //!
-//! ## Why the loop reports errors through a callback
+//! ## Why the loop renders errors through a callback
 //!
 //! A mid-session failure (a run that cannot be scheduled, a broken
 //! Beamfile) must be *rendered* — spans, carets, suggestions — and
-//! rendering lives in the CLI, above this crate. Embedding these errors
-//! in [`crate::RunEvent`] would force `Clone` and a wire format on types
-//! that exist to be pretty-printed once; a callback keeps the event
-//! channel's contract clean and the session alive after reporting.
+//! rendering lives in the CLI, above this crate, which is the only place
+//! that knows how. The callback renders and hands back the string; the
+//! loop is what wraps that answer in a [`crate::RunEvent::ProjectBroken`]
+//! and sends it down the same channel every other event travels on, so a
+//! stream consumer sees it too. Embedding the raw [`SessionError`] itself
+//! in the event would still be wrong — it would force `Clone` and a wire
+//! format on types ([`SourceMap`], [`alba_core::LoadError`]) that exist to
+//! be pretty-printed once — but the rendered text has no such cost, which
+//! is why it, and not the error, is what crosses into the stream.
 
 mod notify;
 mod set;
@@ -129,7 +134,7 @@ pub async fn watch(
     events: UnboundedSender<RunEvent>,
     cancel: CancellationToken,
     mut watcher: Box<dyn Watcher>,
-    on_error: &mut (dyn FnMut(&SessionError) + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
 ) -> WatchExit {
     let root = beamfile_dir(beamfile);
     // `--force` empties the cache's read side for the initial run only:
@@ -149,9 +154,12 @@ pub async fn watch(
                 // the save that got us here, most often. Nothing but a
                 // different Beamfile can change that answer, so park on
                 // one instead of re-running the same failure.
-                on_error(&SessionError::Run {
+                let session_error = SessionError::Run {
                     error: EngineError::Core(error),
                     sources: sources.clone(),
+                };
+                let _ = events.send(RunEvent::ProjectBroken {
+                    diagnostic: render_error(&session_error),
                 });
                 match park_until_the_project_changes(
                     beamfile,
@@ -159,7 +167,7 @@ pub async fn watch(
                     &events,
                     &mut *watcher,
                     &cancel,
-                    on_error,
+                    render_error,
                 )
                 .await
                 {
@@ -217,9 +225,12 @@ pub async fn watch(
             }
         };
         if let Err(error) = result {
-            on_error(&SessionError::Run {
+            let session_error = SessionError::Run {
                 error,
                 sources: sources.clone(),
+            };
+            let _ = events.send(RunEvent::ProjectBroken {
+                diagnostic: render_error(&session_error),
             });
         }
         if cancel.is_cancelled() {
@@ -264,14 +275,17 @@ pub async fn watch(
                 }
                 Err(error) => {
                     let rejected = error.sources.clone();
-                    on_error(&SessionError::Load(error));
+                    let session_error = SessionError::Load(error);
+                    let _ = events.send(RunEvent::ProjectBroken {
+                        diagnostic: render_error(&session_error),
+                    });
                     match park_until_the_project_changes(
                         beamfile,
                         rejected,
                         &events,
                         &mut *watcher,
                         &cancel,
-                        on_error,
+                        render_error,
                     )
                     .await
                     {
@@ -461,7 +475,7 @@ async fn park_until_the_project_changes(
     events: &UnboundedSender<RunEvent>,
     watcher: &mut dyn Watcher,
     cancel: &CancellationToken,
-    on_error: &mut (dyn FnMut(&SessionError) + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
 ) -> Reloaded {
     // Without this the stream's last word is the trigger that means
     // "running", and a consumer would read a stopped session as a busy
@@ -482,7 +496,10 @@ async fn park_until_the_project_changes(
                     Err(error) => {
                         if error.sources != rejected {
                             rejected = error.sources.clone();
-                            on_error(&SessionError::Load(error));
+                            let session_error = SessionError::Load(error);
+                            let _ = events.send(RunEvent::ProjectBroken {
+                                diagnostic: render_error(&session_error),
+                            });
                         }
                     }
                 },

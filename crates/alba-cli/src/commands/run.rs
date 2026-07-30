@@ -213,22 +213,20 @@ async fn watch_execute(
         events,
         cancel,
         Box::new(watcher),
-        // Mid-session trouble is reported and survived, so this renders to
-        // stderr and returns; only the session's own end decides the exit
-        // code.
+        // Mid-session trouble is reported and survived, so this renders
+        // and returns the diagnostic; only the session's own end decides
+        // the exit code. The session turns the answer into a
+        // `RunEvent::ProjectBroken` and sends it down the same channel as
+        // every other event, so the renderer — not this closure — decides
+        // where it goes.
         //
         // Both arms render against the sources the error itself carries,
         // never the map captured above: a session outlives the project it
         // started on, and a reload renumbers spans and source ids out from
         // under the startup map.
-        &mut |error| {
-            let mut err = LineSink::stderr();
-            match error {
-                SessionError::Load(load) => err.line(crate::render_load_error(load).trim_end()),
-                SessionError::Run { error, sources } => {
-                    err.line(render_engine_error(error, sources).trim_end());
-                }
-            }
+        &mut |error| match error {
+            SessionError::Load(load) => crate::render_load_error(load),
+            SessionError::Run { error, sources } => render_engine_error(error, sources),
         },
     )
     .await;

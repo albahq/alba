@@ -87,6 +87,15 @@ pub enum RunEvent {
     WatchTriggered {
         paths: Vec<String>,
     },
+    /// The session cannot work from its project: the Beamfile stopped
+    /// loading, or a run could not be carried out (unknown target after a
+    /// rename, an unschedulable beam). Carries the *rendered* diagnostic —
+    /// caret, spans, help — because rendering lives above this crate and is
+    /// done by the session's `render_error` callback; the event exists so a
+    /// stream consumer that never sees stderr still learns why nothing runs.
+    ProjectBroken {
+        diagnostic: String,
+    },
 }
 
 /// How a beam ended.

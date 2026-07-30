@@ -91,6 +91,11 @@ impl Renderer for InterleavedRenderer {
             RunEvent::RunFinished { summary } => print_summary(&mut self.err, summary),
             RunEvent::RunStarted { .. } => {}
             RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
+            // Alba commentary, not the run's output — stderr, like every
+            // other diagnostic this module prints (see the module doc).
+            RunEvent::ProjectBroken { diagnostic } => {
+                self.err.line(diagnostic.trim_end());
+            }
         }
     }
 }
