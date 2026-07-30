@@ -42,24 +42,24 @@ impl LogBuffer {
         }
     }
 
-    /// While paused, an append must not move the pinned view: growing the
-    /// tail by one pushes the pin's offset out by one to compensate. When
-    /// the append also drops the oldest line (past the cap), that drop
-    /// shrinks the reachable top by one, cancelling the compensation —
-    /// which is exactly the clamp a paused-at-the-top reader needs: the
-    /// offset tracks whatever is currently oldest instead of dangling
-    /// past it.
+    /// While paused, an append must not move the pinned view: the tail
+    /// moves on by one line regardless of whether this push also drops
+    /// the oldest surviving line, so pinning the same *content* always
+    /// needs the offset to grow by one to compensate. Truncation does
+    /// not add a separate decrement of its own — it only clamps: once
+    /// the offset would reach past the current top, it is capped there,
+    /// so a reader paused anywhere (not only at the very top) stays
+    /// pinned on the same lines across any number of incoming pushes,
+    /// until truncation itself finally erases what they were looking at.
     pub fn push(&mut self, text: String, replayed: bool) {
         self.lines.push_back(LogLine { text, replayed });
-        if let Scroll::Paused { offset } = &mut self.scroll {
-            *offset += 1;
-        }
         if self.lines.len() > MAX_LINES {
             self.lines.pop_front();
             self.truncated += 1;
-            if let Scroll::Paused { offset } = &mut self.scroll {
-                *offset = offset.saturating_sub(1);
-            }
+        }
+        if let Scroll::Paused { offset } = &mut self.scroll {
+            let max_offset = self.lines.len().saturating_sub(1);
+            *offset = (*offset + 1).min(max_offset);
         }
     }
 
@@ -249,5 +249,58 @@ mod tests {
         }
         let view = buffer.view(2);
         assert_eq!(view[0], "… 10 older lines truncated");
+    }
+
+    /// A pause well below the very top — the realistic case in a
+    /// day-long over-cap session — must stay pinned across incoming
+    /// lines exactly like a pause at the top does. Truncation only ever
+    /// clamps the reachable top; it must not silently drift the window
+    /// toward the tail on every incoming, truncating push.
+    #[test]
+    fn a_mid_buffer_pause_stays_pinned_across_truncating_pushes() {
+        let mut buffer = filled(MAX_LINES); // already at the cap
+        buffer.scroll_up(MAX_LINES / 2); // paused halfway up, nowhere near the top
+        let pinned = buffer.view(5);
+        for index in 0..20 {
+            buffer.push(format!("extra {index}"), false); // every push truncates
+        }
+        assert_eq!(
+            buffer.view(5),
+            pinned,
+            "a mid-buffer pause must not drift toward the tail"
+        );
+    }
+
+    #[test]
+    fn a_zero_height_view_shows_nothing() {
+        let buffer = filled(10);
+        assert_eq!(buffer.view(0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_view_taller_than_the_buffer_shows_only_what_exists() {
+        let buffer = filled(3);
+        assert_eq!(buffer.view(10), vec!["line 0", "line 1", "line 2"]);
+    }
+
+    #[test]
+    fn an_empty_buffer_has_an_empty_view() {
+        let buffer = LogBuffer::new();
+        assert!(buffer.view(5).is_empty());
+    }
+
+    #[test]
+    fn a_single_line_buffer_shows_that_line() {
+        let buffer = filled(1);
+        assert_eq!(buffer.view(3), vec!["line 0"]);
+    }
+
+    /// `scroll_up` itself clamps the offset to the top, but `view` must
+    /// also clamp a window whose start would otherwise fall below zero.
+    #[test]
+    fn a_window_wider_than_the_reachable_history_clamps_to_the_top() {
+        let mut buffer = filled(100);
+        buffer.scroll_up(1_000); // asks for more than exists above the tail
+        assert_eq!(buffer.view(200), vec!["line 0"]);
     }
 }
