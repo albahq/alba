@@ -257,9 +257,21 @@ impl AppState {
                 self.outcome = (!self.user_cancelled).then(|| summary.exit_code());
             }
             RunEvent::WatchWaiting { files } => {
-                // A parked session watches too, and resolves no file: its
-                // header must keep saying why nothing runs.
-                if !matches!(self.phase, Phase::Parked) || *files > 0 {
+                // A parked session watches too: its header must keep
+                // saying why nothing runs, and the diagnostic must stay
+                // the buffer the log pane shows (`displayed_log_key`) —
+                // no tree row can select it, so a phase that leaves
+                // `Parked` here strands it unread.
+                //
+                // The count is no help in telling the two apart. Parking
+                // through `park_until_the_project_changes` announces
+                // `files: 0`, but a run that failed to schedule mid
+                // session parks without it and falls through to the
+                // ordinary wait, which announces the watched set's real
+                // count. Only a run starting again means the project
+                // loads — and recovery always goes through `RunStarted`,
+                // which is where `Parked` is cleared.
+                if !matches!(self.phase, Phase::Parked) {
                     self.phase = Phase::Waiting { files: *files };
                 }
                 self.waiting_seen = true;
@@ -1108,6 +1120,55 @@ mod tests {
         );
         state.apply(&RunEvent::WatchWaiting { files: 0 }, now);
         assert!(matches!(state.phase, Phase::Parked));
+    }
+
+    /// The other `ProjectBroken` emitter: a run that cannot be scheduled
+    /// mid-session reports and then falls through to the *ordinary* wait,
+    /// which announces the watched set's real file count. A non-zero
+    /// count must not talk the header out of being parked — the
+    /// diagnostic lives under a pseudo-beam no tree row can select, so
+    /// leaving `Parked` would leave it unreadable while the header
+    /// claimed an ordinary wait.
+    #[test]
+    fn a_parked_session_stays_parked_through_a_non_zero_wait() {
+        let mut state = AppState::new("build", true);
+        let now = Instant::now();
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: no executor for `wasm`\n".to_string(),
+            },
+            now,
+        );
+        state.apply(&RunEvent::WatchWaiting { files: 42 }, now);
+
+        assert!(matches!(state.phase, Phase::Parked));
+        assert_eq!(
+            state.displayed_log_key(),
+            DIAGNOSTIC_LOG,
+            "the log pane must keep showing the diagnostic"
+        );
+    }
+
+    /// Recovery is what leaves the park, and it always arrives as a
+    /// `RunStarted` — the loop reloads, goes back to the top and runs.
+    #[test]
+    fn a_run_starting_leaves_the_park() {
+        let mut state = AppState::new("build", true);
+        let now = Instant::now();
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: nope\n".to_string(),
+            },
+            now,
+        );
+        state.apply(&RunEvent::WatchWaiting { files: 42 }, now);
+
+        state.apply(&run_started("build", &["build"], &[]), now);
+
+        assert!(state.running());
+        state.apply(&summary_event(&[]), now);
+        state.apply(&RunEvent::WatchWaiting { files: 42 }, now);
+        assert!(matches!(state.phase, Phase::Waiting { files: 42 }));
     }
 
     /// A run starting is the project loading again: the diagnostic that
