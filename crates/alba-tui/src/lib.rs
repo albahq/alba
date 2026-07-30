@@ -3,6 +3,7 @@
 //! [`alba_engine::SessionCommand`]s — the interactive mirror of the CLI's
 //! headless renderers. Knows nothing about how a beam executes.
 
+pub mod input;
 pub mod logs;
 pub mod state;
 pub mod terminal;
