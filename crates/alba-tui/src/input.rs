@@ -152,6 +152,7 @@ fn action_in_modal_mode(event: &Event) -> Action {
 mod tests {
     use super::*;
     use crate::copy::CopyState;
+    use crate::graph::GraphState;
     use crate::search::SearchState;
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
@@ -255,7 +256,7 @@ mod tests {
             Mode::Normal,
             Mode::Search(SearchState::new()),
             Mode::Copy(CopyState::new_at(0)),
-            Mode::Graph,
+            Mode::Graph(GraphState::new(0)),
             Mode::Help,
         ] {
             assert_eq!(action_for(&ctrl('c'), &mode), Action::CancelOrQuit);
@@ -414,7 +415,7 @@ mod tests {
         for mode in [
             Mode::Search(SearchState::new()),
             Mode::Copy(CopyState::new_at(0)),
-            Mode::Graph,
+            Mode::Graph(GraphState::new(0)),
             Mode::Help,
         ] {
             let evt = mouse_event(MouseEventKind::ScrollUp);
@@ -452,7 +453,7 @@ mod tests {
         for mode in [
             Mode::Search(SearchState::new()),
             Mode::Copy(CopyState::new_at(0)),
-            Mode::Graph,
+            Mode::Graph(GraphState::new(0)),
             Mode::Help,
         ] {
             let evt = mouse_event(MouseEventKind::Down(crossterm::event::MouseButton::Right));
@@ -485,7 +486,7 @@ mod tests {
             Mode::Normal,
             Mode::Search(SearchState::new()),
             Mode::Copy(CopyState::new_at(0)),
-            Mode::Graph,
+            Mode::Graph(GraphState::new(0)),
             Mode::Help,
         ] {
             assert_eq!(
@@ -510,7 +511,7 @@ mod tests {
             Mode::Normal,
             Mode::Search(SearchState::new()),
             Mode::Copy(CopyState::new_at(0)),
-            Mode::Graph,
+            Mode::Graph(GraphState::new(0)),
             Mode::Help,
         ] {
             assert_eq!(

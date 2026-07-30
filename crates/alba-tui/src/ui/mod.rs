@@ -20,6 +20,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::{AppState, Mode};
 
+mod graphpane;
 mod header;
 mod logpane;
 mod tree;
@@ -59,6 +60,14 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
+    // Graph mode replaces the body entirely — no tree, no log pane, no
+    // divider between them — rather than squeezing into either half:
+    // the graph is the one thing on screen while it is active.
+    if let Mode::Graph(graph) = &state.mode {
+        graphpane::draw(frame, inner, state, graph);
+        return;
+    }
+
     // The tree pane's region includes its own right border, which is
     // the divider between it and the log pane — one column wider than
     // the tree's actual content width.
@@ -72,11 +81,10 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     logpane::draw(frame, panes[1], state);
 }
 
-/// The always-available actions for the current mode. Only `Mode::Normal`,
-/// `Mode::Search`, and `Mode::Copy` have a keymap here: Graph and Help
-/// belong to the tasks that give those modes behaviour, so they fall
-/// back to the one action that always applies rather than this task
-/// guessing at their eventual keymaps.
+/// The always-available actions for the current mode. `Mode::Help` alone
+/// has no keymap here yet: it belongs to the task that gives it
+/// behaviour, so it falls back to the one action that always applies
+/// rather than this task guessing at its eventual keymap.
 ///
 /// A copy just made (`AppState::last_copy_result`) takes over the bar
 /// entirely, regardless of mode, for as long as `CopyResult::is_visible`
@@ -111,7 +119,8 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
             )
         }
         Mode::Copy(_) => "hjkl/arrows move · v anchor · y copy · Esc cancel".to_string(),
-        Mode::Graph | Mode::Help => "q quit".to_string(),
+        Mode::Graph(_) => "↑↓←→ move · Enter select · Esc back".to_string(),
+        Mode::Help => "q quit".to_string(),
     }
 }
 

@@ -79,7 +79,10 @@ fn glyph_width(glyph: &str) -> usize {
     }
 }
 
-fn glyph_for(state: &BeamState) -> &'static str {
+/// Shared with `ui/graphpane.rs`: the graph view's nodes use the exact
+/// same status glyphs as the tree's rows (spec constraint), so this is
+/// the one place that decides what each `BeamState` draws as.
+pub(crate) fn glyph_for(state: &BeamState) -> &'static str {
     match state {
         BeamState::Pending => "○",
         BeamState::Running { .. } => "▶",

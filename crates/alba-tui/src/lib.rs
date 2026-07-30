@@ -10,6 +10,7 @@
 //! it does not do itself lives one layer down and is tested there.
 
 pub mod copy;
+pub mod graph;
 pub mod input;
 pub mod logs;
 pub mod search;
@@ -271,12 +272,13 @@ fn dispatch(
         Action::SearchNext => state.search_next(),
         Action::SearchPrevious => state.search_previous(),
         Action::EnterCopy => state.enter_copy(),
-        // Graph and Help have no renderer yet. Entering a mode nothing
-        // draws leaves the user facing an unchanged screen whose bottom
-        // bar advertises `q quit` while, modal, `q` is swallowed as a
-        // plain character — a false affordance. Until each mode's own
-        // task lands, its key does nothing at all.
-        Action::EnterGraph | Action::EnterHelp => {}
+        Action::EnterGraph => state.enter_graph(),
+        // Help has no renderer yet. Entering a mode nothing draws leaves
+        // the user facing an unchanged screen whose bottom bar advertises
+        // `q quit` while, modal, `q` is swallowed as a plain character —
+        // a false affordance. Until its own task lands, its key does
+        // nothing at all.
+        Action::EnterHelp => {}
         Action::LeaveMode => state.leave_mode(),
         Action::Key(key) => state.handle_modal_key(key),
         Action::Mouse(mouse_event) => dispatch_mouse(state, mouse_event, terminal_size),
@@ -549,17 +551,32 @@ mod tests {
 
     /// A mode with no renderer must not be enterable: the screen would
     /// not change, but the keymap would go modal behind a bottom bar
-    /// still advertising the Normal-mode keys. Copy is no longer among
-    /// them — this task gives it a renderer, so `EnterCopy` now has its
-    /// own test below instead.
+    /// still advertising the Normal-mode keys. Copy and Graph are no
+    /// longer among them — each has its own test elsewhere (`EnterCopy`
+    /// above the copy-mode tests, `EnterGraph` just below) now that both
+    /// have a renderer.
     #[test]
     fn modes_with_no_renderer_are_not_enterable_yet() {
         let (commands, _receiver) = commands();
         let mut state = AppState::new("build", false);
 
-        for action in [Action::EnterGraph, Action::EnterHelp] {
-            dispatch(&mut state, &commands, action, size());
-            assert_eq!(state.mode, state::Mode::Normal, "{action:?} entered a mode");
+        dispatch(&mut state, &commands, Action::EnterHelp, size());
+        assert_eq!(state.mode, state::Mode::Normal, "EnterHelp entered a mode");
+    }
+
+    /// `g`: now that graph mode has a renderer, entering it actually
+    /// flips the mode, focused on whatever beam was already selected.
+    #[test]
+    fn entering_graph_mode_focuses_the_selected_beam() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["codegen", "build"]);
+        state.select(1);
+
+        dispatch(&mut state, &commands, Action::EnterGraph, size());
+
+        match &state.mode {
+            state::Mode::Graph(graph) => assert_eq!(graph.focused, 1),
+            other => panic!("expected Mode::Graph, got {other:?}"),
         }
     }
 

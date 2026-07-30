@@ -23,6 +23,7 @@ use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 
 use crate::copy::CopyState;
+use crate::graph::GraphState;
 use crate::logs::LogBuffer;
 use crate::search::SearchState;
 
@@ -70,7 +71,7 @@ pub enum Mode {
     Normal,
     Search(SearchState),
     Copy(CopyState),
-    Graph,
+    Graph(GraphState),
     Help,
 }
 
@@ -397,6 +398,13 @@ impl AppState {
         self.mode = Mode::Copy(CopyState::new_at(top_line));
     }
 
+    /// `g`: opens the graph view focused on whichever beam is already
+    /// selected, so the reader lands on the node they were just looking
+    /// at rather than always starting at layer 0.
+    pub fn enter_graph(&mut self) {
+        self.mode = Mode::Graph(GraphState::new(self.selected));
+    }
+
     /// `Esc`: leaves whatever modal mode is active. Search stashes its
     /// state into `last_search` first, tagged with the beam it ran
     /// against — the only modal mode whose payload is worth keeping
@@ -412,12 +420,12 @@ impl AppState {
     }
 
     /// The modal keymap's entry point: routes a key event to whichever
-    /// mode is active. Graph and Help belong to the tasks that give
-    /// those modes behaviour.
+    /// mode is active. Help belongs to the task that gives it behaviour.
     pub fn handle_modal_key(&mut self, key: KeyEvent) {
         match self.mode {
             Mode::Search(_) => self.handle_search_key(key),
             Mode::Copy(_) => self.handle_copy_key(key),
+            Mode::Graph(_) => self.handle_graph_key(key),
             _ => {}
         }
     }
@@ -485,6 +493,34 @@ impl AppState {
         }
         self.sync_copy_scroll(copy.cursor.0);
         self.mode = Mode::Copy(copy);
+    }
+
+    /// Graph mode's own keymap: arrows move the focus (`GraphState::navigate`),
+    /// and `Enter` commits the focused beam as the selection and returns
+    /// to Normal. The layering is recomputed fresh from `self.beams`/
+    /// `self.edges` on every keystroke rather than cached alongside the
+    /// mode — the DAG is fixed for the run in flight, so this costs
+    /// nothing worth avoiding, and it rules out the layering and the beam
+    /// table it describes ever drifting apart. `Esc` leaving without
+    /// changing the selection is `leave_mode`'s job, same as every other
+    /// modal mode: it already does the right thing here (the mode is
+    /// simply dropped, `self.selected` untouched) without a special case.
+    fn handle_graph_key(&mut self, key: KeyEvent) {
+        let Mode::Graph(mut graph) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            unreachable!("handle_modal_key only calls this while Mode::Graph is active")
+        };
+        match key.code {
+            KeyCode::Enter => {
+                self.select(graph.focused);
+                return; // stays Mode::Normal, already replaced above
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
+                let layers = crate::graph::layers(self.beams.len(), &self.edges);
+                graph.navigate(key.code, &layers);
+            }
+            _ => {}
+        }
+        self.mode = Mode::Graph(graph);
     }
 
     fn move_copy_cursor(&self, copy: &mut CopyState, dl: isize, dc: isize) {
@@ -1751,6 +1787,93 @@ mod tests {
             Some("er"),
             "copied from the diagnostic buffer, not an empty selected-beam one"
         );
+    }
+
+    /// `g`: opens the graph view already focused on the selected beam,
+    /// rather than always starting at layer 0.
+    #[test]
+    fn entering_graph_mode_focuses_the_selected_beam() {
+        let mut state = AppState::new("build", false);
+        state.apply(
+            &run_started("build", &["codegen", "build"], &[("build", "codegen")]),
+            Instant::now(),
+        );
+        state.select(1);
+
+        state.enter_graph();
+
+        match &state.mode {
+            Mode::Graph(graph) => assert_eq!(graph.focused, 1),
+            other => panic!("expected Mode::Graph, got {other:?}"),
+        }
+    }
+
+    /// `Enter` in graph mode commits the focused beam as the selection
+    /// and returns to Normal — `Esc` (via `leave_mode`, exercised
+    /// separately) must leave the selection untouched instead.
+    #[test]
+    fn enter_in_graph_mode_selects_the_focused_beam_and_leaves() {
+        let mut state = AppState::new("build", false);
+        state.apply(
+            &run_started("build", &["codegen", "build"], &[("build", "codegen")]),
+            Instant::now(),
+        );
+        state.select(0); // "codegen"
+
+        state.enter_graph();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(state.mode, Mode::Normal);
+        assert_eq!(
+            state.selected_beam().map(|row| row.id.as_str()),
+            Some("build"),
+            "the focus arrows moved to before Enter committed it"
+        );
+    }
+
+    /// `Esc` leaves graph mode the same generic way every other modal
+    /// mode does (`leave_mode`): the selection stays exactly what it was
+    /// before the graph view was ever opened.
+    #[test]
+    fn esc_leaves_graph_mode_without_changing_the_selection() {
+        let mut state = AppState::new("build", false);
+        state.apply(
+            &run_started("build", &["codegen", "build"], &[("build", "codegen")]),
+            Instant::now(),
+        );
+        state.select(0);
+
+        state.enter_graph();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        state.leave_mode();
+
+        assert_eq!(state.mode, Mode::Normal);
+        assert_eq!(
+            state.selected_beam().map(|row| row.id.as_str()),
+            Some("codegen"),
+            "Esc must not carry the arrow-moved focus into the selection"
+        );
+    }
+
+    /// Arrow keys in graph mode move the focus via `GraphState::navigate`,
+    /// fed the layering freshly computed from the current beams/edges.
+    #[test]
+    fn arrow_keys_in_graph_mode_move_the_focus() {
+        let mut state = AppState::new("build", false);
+        state.apply(
+            &run_started("build", &["codegen", "build"], &[("build", "codegen")]),
+            Instant::now(),
+        );
+        state.select(0); // "codegen", layer 0
+
+        state.enter_graph();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        match &state.mode {
+            Mode::Graph(graph) => assert_eq!(graph.focused, 1, "crossed down to \"build\""),
+            other => panic!("expected Mode::Graph, got {other:?}"),
+        }
     }
 
     /// `finish_copy` is a no-op outside `Mode::Copy` — the mouse

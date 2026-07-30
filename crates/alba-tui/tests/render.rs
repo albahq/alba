@@ -256,3 +256,74 @@ fn a_copy_selection_highlights_the_span() {
 
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
+
+/// The layering tests' own three-beam chain (`build` depends on
+/// `codegen`, `test` depends on `build`), with a different status at
+/// each layer so the glyphs are worth reading in the snapshot.
+fn three_beam_chain() -> AppState {
+    let mut state = AppState::new("test", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            target: id("test"),
+            beams: vec![id("codegen"), id("build"), id("test")],
+            edges: vec![(id("build"), id("codegen")), (id("test"), id("build"))],
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+    state.apply(
+        &RunEvent::BeamFinished {
+            id: id("codegen"),
+            status: BeamStatus::Succeeded,
+            duration: Duration::from_millis(900),
+        },
+        now,
+    );
+    // "build" stays running and "test" stays pending: three different
+    // glyphs (✔, ▶, ○), one per layer.
+    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state
+}
+
+/// Graph mode replaces the whole body with the run's DAG: `codegen` at
+/// the top (no dependencies), `build` beneath it, `test` at the bottom —
+/// each linked to the layer above by a straight connector, since every
+/// layer here holds exactly one node and so lines up in the same column.
+#[test]
+fn the_graph_view_draws_layers_and_edges() {
+    let mut state = three_beam_chain();
+    state.select(1); // "build"
+    state.enter_graph();
+
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}
+
+/// Arrow keys move the graph's focus (`GraphState::navigate`, reached
+/// through the same modal-key path every other mode uses); two `Down`
+/// presses from `codegen` (layer 0) cross to `build` and then to `test`.
+/// The focused node's reversed style is invisible to
+/// `TestBackend::to_string()` (see `ui/graphpane.rs`'s own
+/// `node_style_reverses_only_the_focused_beam` unit test for that), so
+/// this asserts directly on `GraphState::focused` to confirm navigation
+/// actually landed where it should, and snapshots the resulting screen to
+/// pin that the layout survives a real key-driven navigation, not just a
+/// direct `GraphState::navigate` call.
+#[test]
+fn the_graph_view_focus_follows_navigation() {
+    let mut state = three_beam_chain();
+    state.select(0); // "codegen"
+    state.enter_graph();
+
+    state.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    state.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+    match &state.mode {
+        Mode::Graph(graph) => assert_eq!(
+            graph.focused, 2,
+            "two Downs from codegen (layer 0) land on test (layer 2)"
+        ),
+        other => panic!("expected Mode::Graph, got {other:?}"),
+    }
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}
