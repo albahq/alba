@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::copy;
-use crate::logs::Scroll;
+use crate::logs::{LogBuffer, Scroll};
 use crate::state::{AppState, Mode, Phase};
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -53,24 +53,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         .unwrap_or_default()
         .into_iter()
         .enumerate()
-        .map(|(row, text)| {
-            // Copy mode's selection takes priority over the search
-            // highlight on whichever rows it covers — the two are not
-            // meant to be shown blended, and a row is never in both a
-            // committed search's matches and mid-selection in a way a
-            // reader needs both marked on the same line.
-            if let (Mode::Copy(selection), Some(buffer)) = (&state.mode, buffer) {
-                let covered = copy::line_for_pane_row(buffer, body_height, row)
-                    .and_then(|index| selection.covers_line(index, text.chars().count()));
-                if let Some((from, to)) = covered {
-                    return copy_selected_line(&text, from, to);
-                }
-            }
-            match query {
-                Some(query) if !query.is_empty() => highlighted_line(&text, query),
-                _ => Line::from(text),
-            }
-        })
+        .map(|(row, text)| styled_line(row, text, buffer, &state.mode, body_height, query))
         .collect();
     frame.render_widget(Paragraph::new(lines), rows[1]);
 
@@ -86,6 +69,42 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         "↑ paused"
     };
     frame.render_widget(Paragraph::new(footer), rows[2]);
+}
+
+/// The style a single rendered row gets: copy mode's selection
+/// highlight when the row's buffer-absolute line — found via
+/// `copy::line_for_pane_row`, the same translation the mouse hit test
+/// uses — falls inside the selection's covered span (`covers_line`),
+/// the committed search's highlight otherwise. Copy mode takes priority
+/// on whichever rows it covers: the two are not meant to be shown
+/// blended.
+///
+/// Pulled out of `draw` so this composition — "which row is which
+/// buffer line" feeding "does the selection cover that line" — can be
+/// tested directly over the styled spans it produces. `draw` itself is
+/// only ever exercised through `TestBackend::to_string()` in the
+/// snapshot tests, which drops styles entirely and so cannot tell a
+/// covered row from an uncovered one; an off-by-one in this wiring
+/// would pass every existing snapshot silently.
+fn styled_line(
+    row: usize,
+    text: String,
+    buffer: Option<&LogBuffer>,
+    mode: &Mode,
+    body_height: usize,
+    query: Option<&str>,
+) -> Line<'static> {
+    if let (Mode::Copy(selection), Some(buffer)) = (mode, buffer) {
+        let covered = copy::line_for_pane_row(buffer, body_height, row)
+            .and_then(|index| selection.covers_line(index, text.chars().count()));
+        if let Some((from, to)) = covered {
+            return copy_selected_line(&text, from, to);
+        }
+    }
+    match query {
+        Some(query) if !query.is_empty() => highlighted_line(&text, query),
+        _ => Line::from(text),
+    }
 }
 
 /// Marks every case-insensitive occurrence of `query` in `text` with a
@@ -144,6 +163,73 @@ fn copy_selected_line(text: &str, from: usize, to: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::copy::CopyState;
+
+    /// The composition `draw` actually relies on: `line_for_pane_row`
+    /// translates a rendered row into a buffer-absolute line, and
+    /// `covers_line` decides whether the selection covers it. An
+    /// off-by-one in either step would not fail `TestBackend`'s
+    /// snapshot at all (styles are dropped), so this asserts on the
+    /// styled spans row by row instead.
+    #[test]
+    fn draw_marks_only_the_rows_the_selection_actually_covers() {
+        let mut buffer = LogBuffer::new();
+        for text in ["alpha", "bravo", "charlie", "delta"] {
+            buffer.push(text.to_string(), false);
+        }
+        // A span from bravo's own start to charlie's third character,
+        // inclusive — the same shape `CopyState::selected_text` uses.
+        let mut copy = CopyState::new_at(1);
+        copy.cursor = (2, 2);
+        let mode = Mode::Copy(copy);
+        let body_height = 4; // all four lines fit: row index == line index
+
+        let rows: Vec<Line> = buffer
+            .view(body_height)
+            .into_iter()
+            .enumerate()
+            .map(|(row, text)| styled_line(row, text, Some(&buffer), &mode, body_height, None))
+            .collect();
+
+        assert_eq!(rows[0], Line::from("alpha"), "before the span: unstyled");
+        assert_eq!(
+            rows[1],
+            Line::from(vec![Span::styled("bravo", Style::new().reversed())]),
+            "the span's first row, covered whole"
+        );
+        assert_eq!(
+            rows[2],
+            Line::from(vec![
+                Span::styled("cha", Style::new().reversed()),
+                Span::raw("rlie"),
+            ]),
+            "the span's last row, up to its own end column"
+        );
+        assert_eq!(rows[3], Line::from("delta"), "after the span: unstyled");
+    }
+
+    /// Outside copy mode, the same composition falls through to the
+    /// search highlight — checked here so `styled_line`'s two paths
+    /// (copy vs. query) are both exercised through the one function
+    /// `draw` actually calls.
+    #[test]
+    fn styled_line_falls_back_to_the_query_highlight_outside_copy_mode() {
+        let line = styled_line(
+            0,
+            "Compiling api".to_string(),
+            None,
+            &Mode::Normal,
+            4,
+            Some("api"),
+        );
+        assert_eq!(
+            line,
+            Line::from(vec![
+                Span::raw("Compiling "),
+                Span::styled("api", Style::new().reversed()),
+            ])
+        );
+    }
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
     /// cannot pin this — a unit test over the span-building function is

@@ -32,9 +32,11 @@ use crate::logs::LogBuffer;
 use crate::state::AppState;
 
 /// The heartbeat between events. Redrawing is event-driven, but elapsed
-/// times and the progress bar have to keep moving while nothing arrives,
-/// so the loop wakes on its own this often and redraws only while a run
-/// is in flight — an idle screen shows nothing that a clock changes.
+/// times and the progress bar have to keep moving while nothing else
+/// arrives, and a copy confirmation has its own deadline to reach — so
+/// the loop wakes on its own this often and redraws whenever
+/// `tick_should_redraw` says one of those is still ticking on its own;
+/// otherwise an idle screen shows nothing that a clock changes.
 const TICK: Duration = Duration::from_millis(80);
 
 /// How many queued events one frame may absorb. Coalescing a burst into
@@ -83,6 +85,10 @@ pub async fn run(
                 .terminal()
                 .draw(|frame| ui::draw(frame, &state, now))?;
             dirty = false;
+            // Once a draw has actually shown a copy confirmation past
+            // its own window, there is nothing left for the tick to
+            // force further redraws for — see `tick_should_redraw`.
+            clear_expired_copy_result(&mut state, now);
         }
 
         tokio::select! {
@@ -139,8 +145,7 @@ pub async fn run(
                 Some(Err(_)) | None => state.quit_via_interrupt(),
             },
             _ = tick.tick() => {
-                // Only a run in flight has something a clock changes.
-                dirty = state.running();
+                dirty = tick_should_redraw(&state);
             },
         }
     }
@@ -152,6 +157,32 @@ pub async fn run(
         state.apply(&event, Instant::now());
     }
     Ok(outcome(&state))
+}
+
+/// Whether the tick alone — no event, no keystroke — should force a
+/// redraw. A run in flight has the progress bar and elapsed time
+/// ticking on their own; a copy confirmation has its own two-second
+/// deadline to reach (`CopyResult::is_visible`), and copy mode's most
+/// common use is reviewing a *finished* run's output or copying the
+/// diagnostic while parked — `Finished`, `Waiting`, and `Parked` are
+/// all `running() == false`. Without this, an idle session would leave
+/// the confirmation on screen until an unrelated keypress or event
+/// happened to redraw it away instead of on its own schedule.
+fn tick_should_redraw(state: &AppState) -> bool {
+    state.running() || state.last_copy_result.is_some()
+}
+
+/// Once a draw has actually shown a copy confirmation past its own
+/// window, `tick_should_redraw` has nothing left to force further
+/// redraws for — clearing it here (right after the draw that painted
+/// the now-expired state) is what lets the tick stop waking the loop up
+/// for it.
+fn clear_expired_copy_result(state: &mut AppState, now: Instant) {
+    if let Some(result) = &state.last_copy_result
+        && !result.is_visible(now)
+    {
+        state.last_copy_result = None;
+    }
 }
 
 /// The one place a user intent meets the state and the session.
@@ -395,6 +426,63 @@ mod tests {
     /// the too-small floor, and the same 80x24 the render snapshots use.
     fn size() -> Size {
         Size::new(80, 24)
+    }
+
+    /// A run in flight forces the tick to keep redrawing on its own,
+    /// same as before this task; an idle session with nothing to show
+    /// does not.
+    #[test]
+    fn tick_should_redraw_while_a_run_is_in_flight() {
+        let state = running(&["build"]);
+        assert!(tick_should_redraw(&state));
+    }
+
+    #[test]
+    fn tick_should_not_redraw_an_idle_session_with_no_copy_result() {
+        let state = AppState::new("build", false);
+        assert!(!tick_should_redraw(&state));
+    }
+
+    /// The regression this fixes: copy mode's most common use (reviewing
+    /// a finished run, or the diagnostic while parked) has `running() ==
+    /// false`, so without this the confirmation would sit on screen
+    /// forever in an idle session — nothing would ever schedule the
+    /// redraw that lets its two-second window expire.
+    #[test]
+    fn tick_should_redraw_an_idle_session_with_a_pending_copy_result() {
+        let mut state = AppState::new("build", false);
+        assert!(!state.running(), "precondition: idle session");
+        state.record_copy_result("copied (OSC 52)", Instant::now());
+
+        assert!(tick_should_redraw(&state));
+    }
+
+    #[test]
+    fn clear_expired_copy_result_leaves_a_still_visible_one_alone() {
+        let now = Instant::now();
+        let mut state = AppState::new("build", false);
+        state.record_copy_result("copied (OSC 52)", now);
+
+        clear_expired_copy_result(&mut state, now + Duration::from_secs(1));
+
+        assert!(
+            state.last_copy_result.is_some(),
+            "still within the two-second window"
+        );
+    }
+
+    #[test]
+    fn clear_expired_copy_result_drops_one_past_its_window() {
+        let now = Instant::now();
+        let mut state = AppState::new("build", false);
+        state.record_copy_result("copied (OSC 52)", now);
+
+        clear_expired_copy_result(&mut state, now + Duration::from_secs(3));
+
+        assert!(
+            state.last_copy_result.is_none(),
+            "past the two-second window"
+        );
     }
 
     /// The exit replay's raw material: each failed beam of the last

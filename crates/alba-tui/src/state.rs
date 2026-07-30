@@ -521,12 +521,27 @@ impl AppState {
             // Bring the cursor to the top of the view.
             let target_offset = len.saturating_sub(cursor_line + pane_height);
             buffer.follow_tail();
-            buffer.scroll_up(target_offset);
+            // `scroll_up` unconditionally switches to `Paused` even for
+            // `by: 0` (`LogBuffer::scroll_up`), so calling it with an
+            // offset of exactly 0 would leave the buffer `Paused {
+            // offset: 0 }` — indistinguishable from `Following` right
+            // now, but *not* auto-following: `push` only increments a
+            // `Paused` offset, so a beam that keeps producing output
+            // after the cursor reaches the tail would drift one line
+            // behind it per pushed line. `follow_tail` alone already is
+            // the offset-0 case; skip the redundant (and harmful) call.
+            if target_offset > 0 {
+                buffer.scroll_up(target_offset);
+            }
         } else if cursor_line >= end {
-            // Bring the cursor to the bottom of the view.
+            // Bring the cursor to the bottom of the view — same
+            // reasoning as above: an offset of 0 here means the cursor
+            // reached the true tail, which must stay `Following`.
             let target_offset = len.saturating_sub(cursor_line + 1);
             buffer.follow_tail();
-            buffer.scroll_up(target_offset);
+            if target_offset > 0 {
+                buffer.scroll_up(target_offset);
+            }
         }
     }
 
@@ -1680,11 +1695,31 @@ mod tests {
             state.handle_modal_key(char_key('j'));
         }
         assert_eq!(cursor(&state), (29, 0), "clamped to the last line");
-        let view = state.logs.get("build").unwrap().view(5);
+        let buffer = state.logs.get("build").unwrap();
+        let view = buffer.view(5);
         assert_eq!(
             view.last().map(String::as_str),
             Some("line 29"),
             "the view follows the cursor back down to the tail"
+        );
+        // Reaching the tail must resume true `Following`, not `Paused {
+        // offset: 0 }` — the two render the same view right now, but
+        // only `Following` keeps auto-following further output (see
+        // `sync_copy_scroll`'s doc comment on why this matters).
+        assert!(
+            matches!(buffer.scroll(), crate::logs::Scroll::Following),
+            "the tail must be true Following, not Paused {{ offset: 0 }}"
+        );
+
+        // Regression check: a beam that keeps producing output after
+        // the cursor reaches the tail must have the pane keep following
+        // it, not silently drift one line behind per pushed line.
+        state.apply(&output("build", "line 30"), Instant::now());
+        let view_after_push = state.logs.get("build").unwrap().view(5);
+        assert_eq!(
+            view_after_push.last().map(String::as_str),
+            Some("line 30"),
+            "the view keeps following the tail after the cursor reached it"
         );
     }
 
