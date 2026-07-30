@@ -273,12 +273,7 @@ fn dispatch(
         Action::SearchPrevious => state.search_previous(),
         Action::EnterCopy => state.enter_copy(),
         Action::EnterGraph => state.enter_graph(),
-        // Help has no renderer yet. Entering a mode nothing draws leaves
-        // the user facing an unchanged screen whose bottom bar advertises
-        // `q quit` while, modal, `q` is swallowed as a plain character —
-        // a false affordance. Until its own task lands, its key does
-        // nothing at all.
-        Action::EnterHelp => {}
+        Action::EnterHelp => state.enter_help(),
         Action::LeaveMode => state.leave_mode(),
         Action::Key(key) => state.handle_modal_key(key),
         Action::Mouse(mouse_event) => dispatch_mouse(state, mouse_event, terminal_size),
@@ -549,19 +544,41 @@ mod tests {
         assert_eq!(outcome.failed_logs, vec![("bad".to_string(), Vec::new())]);
     }
 
-    /// A mode with no renderer must not be enterable: the screen would
-    /// not change, but the keymap would go modal behind a bottom bar
-    /// still advertising the Normal-mode keys. Copy and Graph are no
-    /// longer among them — each has its own test elsewhere (`EnterCopy`
-    /// above the copy-mode tests, `EnterGraph` just below) now that both
-    /// have a renderer.
+    /// `?`: now that help has a renderer too, entering it actually flips
+    /// the mode — the last of the three (`EnterCopy`, `EnterGraph`
+    /// above) `EnterHelp` used to be held inert alongside.
     #[test]
-    fn modes_with_no_renderer_are_not_enterable_yet() {
+    fn entering_help_mode_flips_the_mode() {
         let (commands, _receiver) = commands();
         let mut state = AppState::new("build", false);
 
         dispatch(&mut state, &commands, Action::EnterHelp, size());
-        assert_eq!(state.mode, state::Mode::Normal, "EnterHelp entered a mode");
+
+        assert_eq!(state.mode, state::Mode::Help);
+    }
+
+    /// The lie the bottom bar used to tell: `Mode::Help`'s bar read `q
+    /// quit` from the day `EnterHelp` was neutralized (Task 10) right up
+    /// to this task, even though `q` while help is showing was already
+    /// swallowed as an ordinary character (`handle_modal_key`'s wildcard
+    /// arm for `Mode::Help`). Routed through the real `input::action_for`
+    /// rather than `Action::Key` built by hand, so this exercises the
+    /// same path a keypress actually takes.
+    #[test]
+    fn q_does_nothing_while_help_is_showing() {
+        let (commands, _receiver) = commands();
+        let mut state = AppState::new("build", false);
+        state.enter_help();
+
+        let event = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let action = input::action_for(&event, &state.mode);
+        dispatch(&mut state, &commands, action, size());
+
+        assert_eq!(state.mode, state::Mode::Help, "q must not leave help mode");
+        assert!(!state.should_quit, "q must not quit while help is showing");
     }
 
     /// `g`: now that graph mode has a renderer, entering it actually

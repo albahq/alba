@@ -299,6 +299,27 @@ fn the_graph_view_draws_layers_and_edges() {
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
 
+/// The help overlay: a centred bordered box over the dimmed body,
+/// listing every binding the interactive modes actually implement (see
+/// `ui/help.rs`'s own `KEYMAP` for the source of truth this is checked
+/// against). `TestBackend` drops styles, so this pins the overlay's
+/// text and its placement, not the dimming itself.
+#[test]
+fn the_help_overlay_lists_the_full_keymap() {
+    let mut state = AppState::new("build", false);
+    state.apply(
+        &RunEvent::RunStarted {
+            target: id("build"),
+            beams: vec![id("build")],
+            edges: vec![],
+        },
+        Instant::now(),
+    );
+    state.enter_help();
+
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}
+
 /// Arrow keys move the graph's focus (`GraphState::navigate`, reached
 /// through the same modal-key path every other mode uses); two `Down`
 /// presses from `codegen` (layer 0) cross to `build` and then to `test`.

@@ -405,6 +405,14 @@ impl AppState {
         self.mode = Mode::Graph(GraphState::new(self.selected));
     }
 
+    /// `?`: opens the help overlay. Unlike Search/Copy/Graph it carries
+    /// no payload of its own — the keymap it lists is fixed, not a
+    /// function of anything in `AppState` — so there is nothing to
+    /// compute here beyond the mode switch itself.
+    pub fn enter_help(&mut self) {
+        self.mode = Mode::Help;
+    }
+
     /// `Esc`: leaves whatever modal mode is active. Search stashes its
     /// state into `last_search` first, tagged with the beam it ran
     /// against — the only modal mode whose payload is worth keeping
@@ -420,7 +428,11 @@ impl AppState {
     }
 
     /// The modal keymap's entry point: routes a key event to whichever
-    /// mode is active. Help belongs to the task that gives it behaviour.
+    /// mode is active. Help has no arm here: its only two live keys
+    /// (`Esc`, `?`) both resolve to `Action::LeaveMode` in `input.rs`
+    /// itself and never reach this method — every other key while help
+    /// is showing is inert, which is exactly what the wildcard arm gives
+    /// it for free.
     pub fn handle_modal_key(&mut self, key: KeyEvent) {
         match self.mode {
             Mode::Search(_) => self.handle_search_key(key),
@@ -1874,6 +1886,21 @@ mod tests {
             Mode::Graph(graph) => assert_eq!(graph.focused, 1, "crossed down to \"build\""),
             other => panic!("expected Mode::Graph, got {other:?}"),
         }
+    }
+
+    /// `?`: opens help. `Esc` (via `leave_mode`, exercised everywhere
+    /// else already) closes it the same generic way it closes every
+    /// other modal mode — help carries no payload for `leave_mode` to
+    /// have to stash anywhere.
+    #[test]
+    fn entering_help_opens_it_and_esc_closes_it() {
+        let mut state = AppState::new("build", false);
+
+        state.enter_help();
+        assert_eq!(state.mode, Mode::Help);
+
+        state.leave_mode();
+        assert_eq!(state.mode, Mode::Normal);
     }
 
     /// `finish_copy` is a no-op outside `Mode::Copy` — the mouse

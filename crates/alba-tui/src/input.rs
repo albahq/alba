@@ -65,6 +65,7 @@ pub fn action_for(event: &Event, mode: &Mode) -> Action {
 
     match mode {
         Mode::Normal => action_in_normal_mode(event),
+        Mode::Help => action_in_help_mode(event),
         _ => action_in_modal_mode(event),
     }
 }
@@ -123,6 +124,21 @@ fn action_in_normal_mode(event: &Event) -> Action {
         },
         _ => Action::None,
     }
+}
+
+/// Help is otherwise an ordinary modal mode (see `action_in_modal_mode`),
+/// except `?` closes it too — it is the same key that opened it, and
+/// help mode has no query or selection for `?` to otherwise feed into,
+/// unlike Search's own composing keys.
+fn action_in_help_mode(event: &Event) -> Action {
+    if let Event::Key(key_event) = event
+        && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key_event.code == KeyCode::Char('?')
+        && !has_disallowed_modifiers(key_event.modifiers)
+    {
+        return Action::LeaveMode;
+    }
+    action_in_modal_mode(event)
 }
 
 /// In modal modes (Search, Copy, Graph, Help), only Esc and Ctrl-C are special;
@@ -386,6 +402,16 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// `?` closes help the same way `Esc` does — it is the key that
+    /// opened the overlay in the first place.
+    #[test]
+    fn question_mark_closes_help_mode() {
+        assert_eq!(
+            action_for(&key(KeyCode::Char('?')), &Mode::Help),
+            Action::LeaveMode
+        );
     }
 
     /// Mouse wheel up in Normal mode maps to ScrollUp(3).

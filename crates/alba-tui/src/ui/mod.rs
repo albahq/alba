@@ -22,6 +22,7 @@ use crate::state::{AppState, Mode};
 
 mod graphpane;
 mod header;
+mod help;
 mod logpane;
 mod tree;
 
@@ -79,12 +80,16 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 
     tree::draw(frame, tree_area, state, now);
     logpane::draw(frame, panes[1], state);
+
+    // Help is an overlay, not a replacement: the tree and log panes stay
+    // drawn underneath it (dimmed), unlike graph mode's own early return
+    // above, which takes over the body entirely instead.
+    if matches!(state.mode, Mode::Help) {
+        help::draw(frame, inner);
+    }
 }
 
-/// The always-available actions for the current mode. `Mode::Help` alone
-/// has no keymap here yet: it belongs to the task that gives it
-/// behaviour, so it falls back to the one action that always applies
-/// rather than this task guessing at its eventual keymap.
+/// The always-available actions for the current mode.
 ///
 /// A copy just made (`AppState::last_copy_result`) takes over the bar
 /// entirely, regardless of mode, for as long as `CopyResult::is_visible`
@@ -120,7 +125,11 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
         }
         Mode::Copy(_) => "hjkl/arrows move · v anchor · y copy · Esc cancel".to_string(),
         Mode::Graph(_) => "↑↓←→ move · Enter select · Esc back".to_string(),
-        Mode::Help => "q quit".to_string(),
+        // While help is showing, only `Esc`/`?` (both close it) and
+        // Ctrl-C do anything at all — `q` is swallowed as a plain
+        // character the same as every other key `handle_modal_key`
+        // doesn't recognize for this mode (see its own doc comment).
+        Mode::Help => "Esc or ? close".to_string(),
     }
 }
 

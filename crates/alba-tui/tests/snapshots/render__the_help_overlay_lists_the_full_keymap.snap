@@ -1,0 +1,28 @@
+---
+source: crates/alba-tui/tests/render.rs
+expression: "drawn(&state, 80, 24)"
+---
+"┌─ alba · run build ── ▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 0/1 · 0.0s ──────────────────────────────┐"
+"│BEAMS                         │logs · build                                   │"
+"│ ○ build                      │                                               │"
+"│                              │                                               │"
+"│  ┌ help ──────────────────────────────────────────────────────────────────┐  │"
+"│  │Normal                                                                  │  │"
+"│  │  q quit · r rerun · f force (bypass cache) · c cancel · w watch        │  │"
+"│  │  j/k, ↑/↓ move · n next match · N previous match · G tail              │  │"
+"│  │  / search · v copy · g graph · ? help · Ctrl-C cancel/quit (any mode)  │  │"
+"│  │                                                                        │  │"
+"│  │Search (composing a query)                                              │  │"
+"│  │  typing edits the query · Backspace erase · Enter commit · Esc cancel  │  │"
+"│  │                                                                        │  │"
+"│  │Copy                                                                    │  │"
+"│  │  hjkl/arrows move · v anchor · y copy · Esc cancel                     │  │"
+"│  │                                                                        │  │"
+"│  │Graph                                                                   │  │"
+"│  │  ↑↓←→ move · Enter select · Esc back                                   │  │"
+"│  └────────────────────────────────────────────────────────────────────────┘  │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│✔ 0  ⚡ 0  ✖ 0  ○ 1           │● following                                    │" Hidden by multi-width symbols: [(7, " ")]
+"└─ Esc or ? close ─────────────────────────────────────────────────────────────┘"
