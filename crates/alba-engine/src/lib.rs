@@ -13,11 +13,12 @@
 //! to, a channel to receive [`RunEvent`]s on, and a cancellation token, and
 //! it reports back a [`RunSummary`]. [`watch`] wraps that same call in a
 //! session that re-runs the target whenever the files its `inputs` declare
-//! change; see the `watch` module for the loop's shape.
+//! change; see the `session` module for the loop's shape.
 
 mod cache;
 mod event;
 mod scheduler;
+mod session;
 mod watch;
 
 pub use cache::CacheOptions;
