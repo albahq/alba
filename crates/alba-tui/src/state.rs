@@ -779,6 +779,14 @@ impl AppState {
     /// The table is rebuilt from every `RunStarted` rather than patched:
     /// a watch session reloads the Beamfile, so the beams and the edges
     /// of the next run are not necessarily those of the last.
+    ///
+    /// The selection is carried across by *id*, not by position. A
+    /// reload that adds, removes or reorders a beam would otherwise
+    /// leave the cursor on whatever row happens to land at the same
+    /// index — a different beam than the one the reader was reading, on
+    /// every save that touches the Beamfile's shape. An id the new table
+    /// no longer holds falls back to the old index, clamped, which is
+    /// the closest thing to "where they were" left to offer.
     fn start_run(
         &mut self,
         target: String,
@@ -786,6 +794,7 @@ impl AppState {
         edges: &[(BeamId, BeamId)],
         now: Instant,
     ) {
+        let selected_id = self.selected_beam().map(|row| row.id.clone());
         self.target = target;
         self.beams = beams
             .iter()
@@ -800,7 +809,8 @@ impl AppState {
                 Some((self.index_of(&beam.0)?, self.index_of(&dependency.0)?))
             })
             .collect();
-        self.select(self.selected);
+        let restored = selected_id.and_then(|id| self.index_of(&id));
+        self.select(restored.unwrap_or(self.selected));
         self.phase = Phase::Running {
             done: 0,
             total: self.beams.len(),
@@ -1091,6 +1101,51 @@ mod tests {
         state.apply(&run_started("build", &["codegen", "build"], &[]), now);
         state.select(1);
         state.apply(&run_started("build", &["build"], &[]), now);
+        assert_eq!(state.selected, 0);
+        assert_eq!(
+            state.selected_beam().map(|row| row.id.as_str()),
+            Some("build")
+        );
+    }
+
+    /// A reload that reorders the table must keep the reader on the beam
+    /// they were reading, not on whatever now sits at the same row.
+    #[test]
+    fn the_selection_follows_its_beam_across_a_reload() {
+        let mut state = AppState::new("build", true);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["codegen", "build"], &[]), now);
+        state.select(1);
+        assert_eq!(
+            state.selected_beam().map(|row| row.id.as_str()),
+            Some("build"),
+            "precondition"
+        );
+
+        // A save adds a beam ahead of it: positionally, row 1 is now
+        // "codegen" — by id, the reader is still on "build".
+        state.apply(
+            &run_started("build", &["assets", "codegen", "build"], &[]),
+            now,
+        );
+
+        assert_eq!(
+            state.selected_beam().map(|row| row.id.as_str()),
+            Some("build")
+        );
+    }
+
+    /// A beam the reload removed has no row left to restore: the old
+    /// index, clamped to the shorter table, is the closest place left.
+    #[test]
+    fn a_selection_whose_beam_is_gone_falls_back_to_its_index() {
+        let mut state = AppState::new("build", true);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["codegen", "build"], &[]), now);
+        state.select(1);
+
+        state.apply(&run_started("build", &["build"], &[]), now);
+
         assert_eq!(state.selected, 0);
         assert_eq!(
             state.selected_beam().map(|row| row.id.as_str()),
