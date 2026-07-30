@@ -1,8 +1,9 @@
-//! Behaviour tests for the watch session loop, driven through
-//! [`alba_engine::watch`] with a scripted watcher and the `FakeExecutor` —
-//! no real file watcher, no real process, so restart and trigger
-//! semantics are asserted deterministically. Real files and directories
-//! *are* used: the watched set resolves `inputs` on disk.
+//! Behaviour tests for the session loop, driven through
+//! [`alba_engine::watch`] and [`alba_engine::session`] with a scripted
+//! watcher and the `FakeExecutor` — no real file watcher, no real process,
+//! so restart, trigger and command semantics are asserted
+//! deterministically. Real files and directories *are* used: the watched
+//! set resolves `inputs` on disk.
 //!
 //! Timing: every wait on an event is bounded at five seconds, so a hung
 //! loop fails the test rather than the CI job's timeout, and the latency
@@ -16,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, SessionError, WatchBatch,
-    WatchExit, Watcher, watch,
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, SessionCommand, SessionError,
+    WatchBatch, WatchExit, Watcher, session, watch,
 };
 use alba_executors::{FakeBehavior, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -77,11 +78,37 @@ impl Session {
         self.batches.send(WatchBatch::Paths(paths)).unwrap();
     }
 
+    /// Whether an event satisfying `matches` arrives within `window`.
+    /// Bounded on both answers: the negative one is a real assertion here
+    /// ("nothing happened"), and waiting for it must not be able to hang.
+    async fn saw_within(&mut self, window: Duration, matches: impl Fn(&RunEvent) -> bool) -> bool {
+        let deadline = Instant::now() + window;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(left, self.events.recv()).await {
+                Ok(Some(event)) if matches(&event) => return true,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return false,
+            }
+        }
+    }
+
     async fn finish(self) -> WatchExit {
         self.cancel.cancel();
         tokio::time::timeout(Duration::from_secs(5), self.handle)
             .await
             .expect("the session must end after cancellation")
+            .expect("the session task must not panic")
+    }
+
+    /// Waits for a session that ends on its own — a command, a driver that
+    /// left — with the caller's token never fired. The other handles stay
+    /// alive until the wait is over, so nothing the session watches or
+    /// reads closes under it.
+    async fn ended(self) -> WatchExit {
+        tokio::time::timeout(Duration::from_secs(5), self.handle)
+            .await
+            .expect("the session must end on its own")
             .expect("the session task must not panic")
     }
 }
@@ -122,6 +149,39 @@ fn start_reporting_to(
     target: &str,
     executor: FakeExecutor,
     force: bool,
+    render_error: impl FnMut(&SessionError) -> String + Send + 'static,
+) -> Session {
+    spawn(beamfile, target, executor, force, true, None, render_error)
+}
+
+/// A session a driver can talk to: the same scripted project, plus the
+/// command channel it reads and the watch state it starts in.
+fn start_commandable(
+    beamfile: &str,
+    target: &str,
+    executor: FakeExecutor,
+    watch_enabled: bool,
+) -> (Session, UnboundedSender<SessionCommand>) {
+    let (commands, receiver) = unbounded_channel();
+    let session = spawn(
+        beamfile,
+        target,
+        executor,
+        false,
+        watch_enabled,
+        Some(receiver),
+        |_| String::new(),
+    );
+    (session, commands)
+}
+
+fn spawn(
+    beamfile: &str,
+    target: &str,
+    executor: FakeExecutor,
+    force: bool,
+    watch_enabled: bool,
+    commands: Option<UnboundedReceiver<SessionCommand>>,
     mut render_error: impl FnMut(&SessionError) -> String + Send + 'static,
 ) -> Session {
     let dir = tempfile::tempdir().unwrap();
@@ -155,21 +215,46 @@ fn start_reporting_to(
         let cancel = cancel.clone();
         let target = BeamId(target.to_string());
         async move {
-            watch(
-                &beamfile_path,
-                project,
-                sources,
-                target,
-                options,
-                Executors::uniform(executor),
-                events_tx,
-                cancel,
-                Box::new(ScriptedWatcher {
-                    batches: batches_rx,
-                }),
-                &mut render_error,
-            )
-            .await
+            let watcher = Box::new(ScriptedWatcher {
+                batches: batches_rx,
+            });
+            match commands {
+                // A session nobody drives is started through `watch`
+                // itself, so the wrapper the CLI calls is what the whole
+                // watch half of this suite exercises.
+                None if watch_enabled => {
+                    watch(
+                        &beamfile_path,
+                        project,
+                        sources,
+                        target,
+                        options,
+                        Executors::uniform(executor),
+                        events_tx,
+                        cancel,
+                        watcher,
+                        &mut render_error,
+                    )
+                    .await
+                }
+                commands => {
+                    session(
+                        &beamfile_path,
+                        project,
+                        sources,
+                        target,
+                        options,
+                        Executors::uniform(executor),
+                        events_tx,
+                        commands,
+                        watch_enabled,
+                        cancel,
+                        watcher,
+                        &mut render_error,
+                    )
+                    .await
+                }
+            }
         }
     });
 
@@ -202,6 +287,37 @@ fn is_run_finished(event: &RunEvent) -> bool {
 
 fn is_beam_started(event: &RunEvent) -> bool {
     matches!(event, RunEvent::BeamStarted { .. })
+}
+
+fn is_run_started(event: &RunEvent) -> bool {
+    matches!(event, RunEvent::RunStarted { .. })
+}
+
+fn is_broken(event: &RunEvent) -> bool {
+    matches!(event, RunEvent::ProjectBroken { .. })
+}
+
+fn run_beam(id: &str, force: bool) -> SessionCommand {
+    SessionCommand::RunBeam {
+        id: BeamId(id.to_string()),
+        force,
+    }
+}
+
+/// The beam a run was started for.
+fn started_target(event: RunEvent) -> String {
+    let RunEvent::RunStarted { target, .. } = event else {
+        unreachable!("not a RunStarted event")
+    };
+    target.0
+}
+
+/// The summary a run ended on.
+fn finished_summary(event: RunEvent) -> alba_engine::RunSummary {
+    let RunEvent::RunFinished { summary } = event else {
+        unreachable!("not a RunFinished event")
+    };
+    summary
 }
 
 /// The session's first act is a plain run, and only then does it wait.
@@ -754,4 +870,204 @@ async fn notify_watcher_reports_a_real_write() {
         ),
         WatchBatch::Rescan => {} // an overflow still reports a change; acceptable
     }
+}
+
+// ---- commands ------------------------------------------------------------
+
+/// The commandable session's whole point: a `RunBeam` triggers a run
+/// exactly like a file change does, of the beam the driver named.
+#[tokio::test]
+async fn a_run_beam_command_runs_that_beam() {
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "build", FakeExecutor::new(), false);
+    session.event_matching(is_run_finished).await;
+
+    commands.send(run_beam("docs", false)).unwrap();
+
+    let started = session.event_matching(is_run_started).await;
+    assert_eq!(started_target(started), "docs");
+
+    session.finish().await;
+}
+
+/// `RunBeam` retargets the session, so what a later watch trigger re-runs
+/// is the beam the driver asked for and not the one the session started
+/// on. `build` alone watches `src/**`; only a session retargeted at `docs`
+/// watches `docs/**` as well.
+#[tokio::test]
+async fn a_run_beam_command_retargets_the_watch() {
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "build", FakeExecutor::new(), true);
+    session.event_matching(is_waiting).await;
+
+    commands.send(run_beam("docs", false)).unwrap();
+    session.event_matching(is_waiting).await;
+
+    let changed = session.touch("docs/index.md", "# docs, edited");
+    session.send(vec![changed]);
+
+    session.event_matching(is_triggered).await;
+    let started = session.event_matching(is_run_started).await;
+    assert_eq!(started_target(started), "docs");
+
+    session.finish().await;
+}
+
+/// Cancelling ends the run, not the session: the next command still works.
+#[tokio::test]
+async fn a_cancel_run_command_leaves_the_session_alive() {
+    let executor = FakeExecutor::new().on(
+        "compile",
+        FakeBehavior {
+            exit_code: 0,
+            delay: Duration::from_secs(30),
+            output_lines: Vec::new(),
+        },
+    );
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "docs", executor, false);
+    session.event_matching(is_beam_started).await;
+
+    commands.send(SessionCommand::CancelRun).unwrap();
+
+    let started = Instant::now();
+    let summary = finished_summary(session.event_matching(is_run_finished).await);
+    assert!(!summary.cancelled.is_empty(), "the slow beam was cancelled");
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    commands.send(run_beam("docs", false)).unwrap();
+    session.event_matching(is_run_started).await;
+
+    session.finish().await;
+}
+
+/// With watching off a relevant batch triggers nothing; turning it on
+/// mid-session makes the next batch trigger, and says so on the stream.
+#[tokio::test]
+async fn a_set_watch_command_gates_the_watchers_batches() {
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "docs", FakeExecutor::new(), false);
+    session.event_matching(is_run_finished).await;
+
+    let changed = session.touch("src/main.rs", "fn main() { changed(); }");
+    session.send(vec![changed.clone()]);
+    assert!(
+        !session
+            .saw_within(Duration::from_millis(200), is_triggered)
+            .await,
+        "a batch must trigger nothing while watching is off"
+    );
+
+    commands.send(SessionCommand::SetWatch(true)).unwrap();
+    // Turning watching on re-announces the wait, so a consumer sees the
+    // toggle take effect rather than having to infer it.
+    session.event_matching(is_waiting).await;
+
+    session.send(vec![changed]);
+    session.event_matching(is_triggered).await;
+    session.event_matching(is_run_started).await;
+
+    session.finish().await;
+}
+
+/// `Shutdown` ends the session promptly even with a run in flight, without
+/// the caller's token ever firing.
+#[tokio::test]
+async fn a_shutdown_command_ends_a_running_session() {
+    let executor = FakeExecutor::new().on(
+        "compile",
+        FakeBehavior {
+            exit_code: 0,
+            delay: Duration::from_secs(30),
+            output_lines: Vec::new(),
+        },
+    );
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "docs", executor, true);
+    session.event_matching(is_beam_started).await;
+
+    commands.send(SessionCommand::Shutdown).unwrap();
+
+    assert!(matches!(session.ended().await, WatchExit::Interrupted));
+}
+
+/// A parked session answers commands too: a driver must be able to quit a
+/// session that is executing nothing while the Beamfile will not load.
+#[tokio::test]
+async fn a_shutdown_command_ends_a_parked_session() {
+    let (mut session, commands) = start_commandable(ONE_BEAM, "build", FakeExecutor::new(), true);
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch("Beamfile", "beam build { this does not parse");
+    session.send(vec![beamfile]);
+    session.event_matching(is_broken).await;
+
+    commands.send(SessionCommand::Shutdown).unwrap();
+
+    assert!(matches!(session.ended().await, WatchExit::Interrupted));
+}
+
+/// A dropped sender means the driver is gone; the session must not hang on
+/// a channel no one will ever write to again.
+#[tokio::test]
+async fn a_dropped_command_channel_ends_the_session() {
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "docs", FakeExecutor::new(), false);
+    session.event_matching(is_run_finished).await;
+
+    drop(commands);
+
+    assert!(matches!(session.ended().await, WatchExit::Interrupted));
+}
+
+/// `force` is the CLI's `--force` scoped to one command: it empties the
+/// cache's read side for that run and for no other.
+#[tokio::test]
+async fn a_forced_run_beam_command_ignores_the_cache() {
+    let build = vec![BeamId("build".to_string())];
+    let (mut session, commands) = start_commandable(ONE_BEAM, "build", FakeExecutor::new(), false);
+    let summary = finished_summary(session.event_matching(is_run_finished).await);
+    assert_eq!(summary.succeeded, build);
+
+    commands.send(run_beam("build", false)).unwrap();
+    let summary = finished_summary(session.event_matching(is_run_finished).await);
+    assert_eq!(summary.cached, build, "nothing changed: the rerun is a hit");
+
+    commands.send(run_beam("build", true)).unwrap();
+    let summary = finished_summary(session.event_matching(is_run_finished).await);
+    assert_eq!(summary.succeeded, build, "force empties the read side");
+
+    commands.send(run_beam("build", false)).unwrap();
+    let summary = finished_summary(session.event_matching(is_run_finished).await);
+    assert_eq!(summary.cached, build, "and only for that one run");
+
+    session.finish().await;
+}
+
+/// A `RunBeam` naming a beam the parked project *does* declare unparks the
+/// session: the load is retried on the spot, with no file change to wait
+/// for. The path out of a park that a renamed beam caused, for a driver
+/// that can see the new name.
+#[tokio::test]
+async fn a_run_beam_command_unparks_a_session_onto_the_renamed_beam() {
+    let (mut session, commands) = start_commandable(ONE_BEAM, "build", FakeExecutor::new(), true);
+    session.event_matching(is_waiting).await;
+
+    // The project still loads; it is the watched set that cannot be built,
+    // because the target beam is gone.
+    let beamfile = session.touch(
+        "Beamfile",
+        "beam renamed { inputs [\"src/**/*.rs\"] run \"echo compile-renamed\" }\n",
+    );
+    session.send(vec![beamfile]);
+    session.event_matching(is_broken).await;
+
+    commands.send(run_beam("renamed", false)).unwrap();
+
+    let started = session.event_matching(is_run_started).await;
+    assert_eq!(started_target(started), "renamed");
+    session.event_matching(is_run_finished).await;
+    assert!(
+        session
+            .executor
+            .calls()
+            .iter()
+            .any(|call| call.command.contains("compile-renamed"))
+    );
+
+    session.finish().await;
 }

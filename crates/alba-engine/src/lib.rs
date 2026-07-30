@@ -24,6 +24,7 @@ mod watch;
 pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
 pub use scheduler::{Executors, RunOptions, run};
+pub use session::{SessionCommand, session};
 pub use watch::{NotifyWatcher, SessionError, WatchBatch, WatchExit, Watcher, beamfile_dir, watch};
 
 use alba_core::{BeamId, CoreError};

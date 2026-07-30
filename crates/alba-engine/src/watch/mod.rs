@@ -109,6 +109,8 @@ pub async fn watch(
         options,
         executors,
         events,
+        None,
+        true,
         cancel,
         watcher,
         render_error,
