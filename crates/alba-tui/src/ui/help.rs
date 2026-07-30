@@ -50,6 +50,8 @@ pub(super) const HELP_KEYS: &str = "Esc or ? close";
 ///   something typed while composing one — while a query is being typed
 ///   every character, `n`/`N` included, just edits it.
 /// - `f` reruns the same as `r`, but bypassing the cache.
+/// - `t` is the way back from either: `r`/`f` retarget the session for
+///   good, so without `t` a rerun of one beam would be a one-way door.
 /// - Graph mode only answers the four arrow keys, not `hjkl` — copy mode
 ///   is the one that answers both.
 /// - `Ctrl-C` fires the same in every mode (cancel if a run is in
@@ -59,6 +61,7 @@ fn keymap_lines() -> Vec<String> {
     vec![
         "Normal".to_string(),
         "  q quit · r rerun · f force (bypass cache) · c cancel · w watch".to_string(),
+        "  t run the target the session was started for".to_string(),
         "  j/k, ↑/↓ move · n next match · N previous match · G tail".to_string(),
         "  / search · v copy · g graph · ? help · Ctrl-C cancel/quit (any mode)".to_string(),
         String::new(),

@@ -378,6 +378,7 @@ quits if nothing is running.
 | `c` | Cancel the run in flight. |
 | `w` | Toggle watch on or off. |
 | `j`/`k`, `↓`/`↑` | Move the selection. |
+| `t` | Run the target the session was started for. `r` and `f` retarget the session onto the beam they rerun, so this is the way back to the whole graph. |
 | `G` | Jump the log pane to the tail and resume following. |
 | Mouse wheel | Scroll the log pane. |
 | `n` / `N` | Step the committed search forward or backward, wrapping; re-runs the query against the newly selected beam if the selection moved since it was committed. |

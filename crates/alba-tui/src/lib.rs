@@ -269,6 +269,18 @@ fn dispatch(
                 let _ = commands.send(SessionCommand::RunBeam { id, force });
             }
         }
+        Action::RunSessionTarget => {
+            // The way back from a `RunBeam` that retargeted the session
+            // (`alba_engine::SessionCommand::RunBeam` retargets for
+            // good): re-running the target the session was started for
+            // puts its whole graph back in the tree, and makes it what
+            // later watch triggers re-run again. Same abandonment rule
+            // as `r`, and never forced — the way back is not a request
+            // to rebuild everything from scratch.
+            let id = BeamId(state.session_target.clone());
+            state.mark_user_cancelled();
+            let _ = commands.send(SessionCommand::RunBeam { id, force: false });
+        }
         Action::CancelRun => {
             if state.running() {
                 state.mark_user_cancelled();
@@ -1013,6 +1025,56 @@ mod tests {
         );
 
         assert!(sent(&mut receiver).is_empty());
+    }
+
+    /// `t` asks for the target the session was started for, whatever the
+    /// run on screen has since been retargeted to. Without it, the first
+    /// `r` on a single beam is a one-way door: `SessionCommand::RunBeam`
+    /// retargets the session for good, and the original target survives
+    /// nowhere else — not in `state.target`, which the incoming
+    /// `RunStarted` overwrites, and not in the tree, which it rebuilds.
+    #[test]
+    fn t_asks_the_session_for_the_target_it_was_started_for() {
+        let (commands, mut receiver) = commands();
+        let mut state = AppState::new("build", true);
+        // `r` on "codegen" retargets the session; the run that answers it
+        // leaves "build" nowhere in the state.
+        state.apply(
+            &RunEvent::RunStarted {
+                target: id("codegen"),
+                beams: vec![id("codegen")],
+                edges: Vec::new(),
+            },
+            Instant::now(),
+        );
+        assert_eq!(state.target, "codegen", "precondition");
+        assert!(
+            !state.beams.iter().any(|row| row.id == "build"),
+            "precondition: no row offers the way back"
+        );
+
+        dispatch(&mut state, &commands, Action::RunSessionTarget, size());
+
+        match &sent(&mut receiver)[..] {
+            [SessionCommand::RunBeam { id: asked, force }] => {
+                assert_eq!(asked, &id("build"));
+                assert!(!force, "the way back is not a request to force");
+            }
+            other => panic!("expected one RunBeam for the session's target, got {other:?}"),
+        }
+    }
+
+    /// And it abandons a run in flight the same way `r` does — the
+    /// session cancels that run for us, so its summary may not vouch.
+    #[test]
+    fn t_over_a_run_in_flight_abandons_it() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["build"]);
+
+        dispatch(&mut state, &commands, Action::RunSessionTarget, size());
+
+        state.apply(&summary_event(&[], &[]), Instant::now());
+        assert_eq!(state.exit_outcome(), None);
     }
 
     /// `w` flips the header *and* tells the session: a watch toggle the

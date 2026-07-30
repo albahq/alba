@@ -105,6 +105,12 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 /// binding (`input.rs`) the same way `j`/`k` are — advertising them
 /// while still composing a query would claim a key that, at that point,
 /// only ever types a character into it.
+///
+/// The Normal bar is the keymap condensed to what an 80-column frame
+/// can hold, not the whole of it: `t` earns a place because it is the
+/// only way back from an `r` that retargeted the session, while the log
+/// pane's own scrolling keys are left to the help overlay, which lists
+/// every binding there is.
 fn bottom_bar(state: &AppState, now: Instant) -> String {
     if let Some(result) = &state.last_copy_result
         && result.is_visible(now)
@@ -113,7 +119,7 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
     }
     match &state.mode {
         Mode::Normal => {
-            "q quit · r rerun · f force · c cancel · w watch · n next · N prev".to_string()
+            "q quit · r rerun · f force · t target · c cancel · w watch · n/N step".to_string()
         }
         Mode::Search(search) => {
             let total = search.matches.len();
@@ -208,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             bottom_bar(&state, now + Duration::from_secs(3)),
-            "q quit · r rerun · f force · c cancel · w watch · n next · N prev",
+            "q quit · r rerun · f force · t target · c cancel · w watch · n/N step",
             "falls back to the mode's own bar once the result has expired"
         );
     }

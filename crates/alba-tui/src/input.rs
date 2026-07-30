@@ -21,6 +21,7 @@ pub enum Action {
     SelectNext,
     SelectPrevious,
     Rerun { force: bool }, // r / f on the selected beam
+    RunSessionTarget,      // t: back to what the session was started for
     CancelRun,             // c
     ToggleWatch,           // w
     ScrollUp(usize),
@@ -92,6 +93,7 @@ fn action_in_normal_mode(event: &Event) -> Action {
                     KeyCode::Char('r') => return Action::Rerun { force: false },
                     KeyCode::Char('f') => return Action::Rerun { force: true },
                     KeyCode::Char('c') => return Action::CancelRun,
+                    KeyCode::Char('t') => return Action::RunSessionTarget,
                     KeyCode::Char('w') => return Action::ToggleWatch,
                     KeyCode::Char('/') => return Action::EnterSearch,
                     KeyCode::Char('v') => return Action::EnterCopy,
@@ -408,6 +410,16 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// `t` asks for the target the session was started for — the way
+    /// back from an `r` that retargeted it onto a single beam.
+    #[test]
+    fn t_asks_for_the_sessions_own_target() {
+        assert_eq!(
+            action_for(&key(KeyCode::Char('t')), &Mode::Normal),
+            Action::RunSessionTarget
+        );
     }
 
     /// The non-character bindings answer to the same modifier gate the

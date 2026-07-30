@@ -95,7 +95,17 @@ pub struct CommittedSearch {
 }
 
 pub struct AppState {
+    /// What the run currently on screen is for. Every `RunStarted`
+    /// overwrites it, so `r` on a single beam leaves it naming that beam.
     pub target: String,
+    /// What the *session* was started for, on the command line — never
+    /// overwritten by a run. `SessionCommand::RunBeam` retargets the
+    /// session for good (see `alba_engine::SessionCommand`), so without
+    /// this the first `r` on a single beam would strand the user: the
+    /// original target would exist nowhere in the state, no tree row
+    /// would offer it, and every later save would re-run that one beam.
+    /// `t` (`input::Action::RunSessionTarget`) is what reads it back.
+    pub session_target: String,
     pub beams: Vec<BeamRow>,
     /// (beam index, dependency index) into `beams`.
     pub edges: Vec<(usize, usize)>,
@@ -175,6 +185,7 @@ impl AppState {
     pub fn new(target: &str, watch_enabled: bool) -> Self {
         Self {
             target: target.to_string(),
+            session_target: target.to_string(),
             beams: Vec::new(),
             edges: Vec::new(),
             selected: 0,
@@ -1173,6 +1184,22 @@ mod tests {
         assert_eq!(
             state.selected_beam().map(|row| row.id.as_str()),
             Some("build")
+        );
+    }
+
+    /// The session's own target survives a run that retargets the
+    /// session — it is what `t` (`Action::RunSessionTarget`) offers as
+    /// the way back.
+    #[test]
+    fn the_session_target_survives_a_run_on_a_single_beam() {
+        let mut state = AppState::new("build", true);
+        let now = Instant::now();
+        state.apply(&run_started("codegen", &["codegen"], &[]), now);
+
+        assert_eq!(state.target, "codegen", "the run on screen is codegen's");
+        assert_eq!(
+            state.session_target, "build",
+            "the session is still what it was started for"
         );
     }
 
