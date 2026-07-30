@@ -87,7 +87,9 @@ fn allow_failure_exits_0() {
 }
 
 /// `--log-format json` makes stdout a machine-readable stream: every line
-/// is one JSON object, and the four event kinds are all present.
+/// is one JSON object, and every event kind an ordinary run emits is
+/// present — `run_started`, which opens the stream with the run's target,
+/// its beams and their edges, included.
 #[test]
 fn json_log_format_emits_one_json_object_per_line() {
     let dir = project("beam a { run \"echo hi\" }\n");
@@ -110,6 +112,7 @@ fn json_log_format_emits_one_json_object_per_line() {
     }
 
     for expected in [
+        "run_started",
         "beam_started",
         "beam_output",
         "beam_finished",
@@ -120,6 +123,18 @@ fn json_log_format_emits_one_json_object_per_line() {
             "missing `{expected}` among {kinds:?}"
         );
     }
+    assert_eq!(
+        kinds.first().map(String::as_str),
+        Some("run_started"),
+        "the stream opens on the run's shape, before any beam's own events"
+    );
+
+    // The payload a consumer builds a graph from, asserted on the wire
+    // rather than only in the renderer's own unit tests.
+    let opening: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(opening["target"], "a");
+    assert_eq!(opening["beams"], serde_json::json!(["a"]));
+    assert_eq!(opening["edges"], serde_json::json!([]));
 }
 
 /// The whole cache loop through the real binary: a first run executes and

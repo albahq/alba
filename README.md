@@ -130,10 +130,30 @@ Common to every subcommand:
 | `--jobs <N>` | How many beams may run at once. At least 1; defaults to the machine's available parallelism. |
 | `--keep-going` | Keep going after a beam fails, instead of cancelling the beams that have not started. |
 | `--output <STYLE>` | How text output is laid out: `interleaved` (every line as it happens, prefixed with the beam it came from) or `grouped` (each beam's output held back and printed as one block when it ends). Defaults to `interleaved` on a terminal and `grouped` otherwise. Ignored with `--log-format json`. |
-| `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line, opening with a `run_started` event that carries the run's target, its beams, and the dependency edges between them, before any beam's own events). Defaults to `text`. |
+| `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line). Defaults to `text`. See [The JSON stream](#the-json-stream). |
 | `--watch` | Keep running: re-run the beam whenever the files its subgraph declares as `inputs` change, or a loaded Beamfile changes. Ctrl-C ends the session. See [Watch mode](#watch-mode). |
 | `--ui` | Ask for the interactive interface even though stdout is not a terminal. Since it cannot actually draw there, the run is refused with an error instead of falling back to headless. Has no effect otherwise: on a terminal the interface is already the default, and `--log-format json`, `--output`, or `--no-ui` still choose the text renderers over it. See [Interactive interface](#interactive-interface). |
 | `--no-ui` | Force the plain text renderers on, even on a terminal. |
+
+### The JSON stream
+
+`--log-format json` puts one JSON object per line on stdout. Every line
+carries an `event` field naming its kind, so a consumer dispatches on that
+before reading anything else. An ordinary run emits six kinds:
+
+| `event` | Fields |
+| --- | --- |
+| `run_started` | `target` (the beam that was asked for), `beams` (every beam in its subgraph, the target included), `edges` (one `[beam, dependency]` pair per edge between them). Always the first line of the stream, before any beam's own events, so a consumer knows the shape of the run before watching it happen. |
+| `beam_started` | `beam`. |
+| `beam_cached` | `beam`, for a beam the cache answered instead of running. |
+| `beam_output` | `beam`, `stream` (`stdout` or `stderr`), `text`, `replayed` (`true` for a line replayed from the cache rather than produced now). |
+| `beam_finished` | `beam`, `status`, `exit_code` (`null` unless the beam ran and exited non-zero), `duration_ms`. |
+| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned. |
+
+A watch session's stream carries three more kinds; see
+[Watch mode](#watch-mode). No run summary is printed to stderr in this
+format: `run_finished` already carries every count the text renderers
+would have restated there.
 
 ### Exit codes
 
@@ -273,7 +293,7 @@ parsing the stream, and off a terminal the output accumulates as a record
 that clearing would destroy.
 
 Piped through `--log-format json`, a session's stream carries three event
-kinds beyond an ordinary run's: `project_broken` (`diagnostic`, the same
+kinds beyond [an ordinary run's](#the-json-stream): `project_broken` (`diagnostic`, the same
 rendered text also printed to stderr) whenever the project fails to load,
 or a run cannot be scheduled once it has, `watch_waiting` (`files`, how many
 resolved input files the session is watching) while it sits idle between
