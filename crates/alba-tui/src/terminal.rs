@@ -5,6 +5,10 @@
 //! screen and raw mode are held by an RAII guard, doubled by a panic
 //! hook that restores *before* the panic message prints — the message
 //! must land on a terminal that can display it.
+//!
+//! **Invariant:** no exit path from [`TerminalGuard::enter`] leaves the
+//! terminal altered. Any error before the guard is returned must restore
+//! the terminal to its original state.
 
 use std::io::{self, Stdout};
 
@@ -24,7 +28,7 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if let Err(error) = crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
-            let _ = disable_raw_mode();
+            restore();
             return Err(error);
         }
 
@@ -36,7 +40,9 @@ impl TerminalGuard {
             default_hook(info);
         }));
 
-        let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+        let terminal = Terminal::new(CrosstermBackend::new(io::stdout())).inspect_err(|_| {
+            restore();
+        })?;
         Ok(Self { terminal })
     }
 
