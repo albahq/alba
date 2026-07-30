@@ -7,7 +7,9 @@
 //! engine.
 
 use crate::state::Mode;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 
 /// What a terminal event asks the app to do. The event loop translates
 /// Action -> state mutation and/or SessionCommand; this function only
@@ -34,8 +36,28 @@ pub enum Action {
     None,
 }
 
+/// Checks if a modifier set contains keys that should gate a binding.
+/// SHIFT is allowed (it's just the character's case), but CONTROL, ALT,
+/// and SUPER prevent the binding from firing.
+fn has_disallowed_modifiers(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL)
+        || modifiers.contains(KeyModifiers::ALT)
+        || modifiers.contains(KeyModifiers::SUPER)
+}
+
 /// Maps a terminal event and current mode to a user intent.
 pub fn action_for(event: &Event, mode: &Mode) -> Action {
+    // Ctrl-C is handled uniformly across all modes before mode dispatch.
+    match event {
+        Event::Key(key_event)
+            if key_event.modifiers.contains(KeyModifiers::CONTROL)
+                && key_event.code == KeyCode::Char('c') =>
+        {
+            return Action::CancelOrQuit;
+        }
+        _ => {}
+    }
+
     match mode {
         Mode::Normal => action_in_normal_mode(event),
         _ => action_in_modal_mode(event),
@@ -46,32 +68,46 @@ pub fn action_for(event: &Event, mode: &Mode) -> Action {
 fn action_in_normal_mode(event: &Event) -> Action {
     match event {
         Event::Key(key_event) => {
-            // Ctrl-C always means cancel or quit
-            if key_event.modifiers.contains(KeyModifiers::CONTROL)
-                && key_event.code == KeyCode::Char('c')
-            {
-                return Action::CancelOrQuit;
+            // Only Press and Repeat trigger actions; Release is ignored.
+            // This prevents double-firing on Windows where both are reported.
+            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                return Action::None;
             }
 
-            // Single character keys
-            match key_event.code {
-                KeyCode::Char('q') => Action::Quit,
-                KeyCode::Char('r') => Action::Rerun { force: false },
-                KeyCode::Char('f') => Action::Rerun { force: true },
-                KeyCode::Char('c') => Action::CancelRun,
-                KeyCode::Char('w') => Action::ToggleWatch,
-                KeyCode::Char('/') => Action::EnterSearch,
-                KeyCode::Char('v') => Action::EnterCopy,
-                KeyCode::Char('g') => Action::EnterGraph,
-                KeyCode::Char('?') => Action::EnterHelp,
-                KeyCode::Char('G') => Action::FollowTail,
-                KeyCode::Char('j') => Action::SelectNext,
-                KeyCode::Char('k') => Action::SelectPrevious,
-                KeyCode::Down => Action::SelectNext,
-                KeyCode::Up => Action::SelectPrevious,
-                KeyCode::Esc => Action::LeaveMode,
-                _ => Action::Key(*key_event),
+            // Ctrl-C is already handled in action_for; this point is unreachable
+            // for Ctrl-C but we need to gate character bindings against other
+            // modifiers (Alt, Super, and for non-char codes, Control).
+
+            // Single character keys: gate out CONTROL, ALT, SUPER.
+            // SHIFT is allowed and irrelevant (the character already carries case).
+            if !has_disallowed_modifiers(key_event.modifiers) {
+                match key_event.code {
+                    KeyCode::Char('q') => return Action::Quit,
+                    KeyCode::Char('r') => return Action::Rerun { force: false },
+                    KeyCode::Char('f') => return Action::Rerun { force: true },
+                    KeyCode::Char('c') => return Action::CancelRun,
+                    KeyCode::Char('w') => return Action::ToggleWatch,
+                    KeyCode::Char('/') => return Action::EnterSearch,
+                    KeyCode::Char('v') => return Action::EnterCopy,
+                    KeyCode::Char('g') => return Action::EnterGraph,
+                    KeyCode::Char('?') => return Action::EnterHelp,
+                    KeyCode::Char('G') => return Action::FollowTail,
+                    KeyCode::Char('j') => return Action::SelectNext,
+                    KeyCode::Char('k') => return Action::SelectPrevious,
+                    _ => {}
+                }
             }
+
+            // Arrow keys and Esc don't need modifier gating; they're unambiguous.
+            match key_event.code {
+                KeyCode::Down => return Action::SelectNext,
+                KeyCode::Up => return Action::SelectPrevious,
+                KeyCode::Esc => return Action::LeaveMode,
+                _ => {}
+            }
+
+            // Everything else passes through for potential interpretation.
+            Action::Key(*key_event)
         }
         Event::Mouse(mouse_event) => match mouse_event.kind {
             MouseEventKind::ScrollUp => Action::ScrollUp(3),
@@ -87,14 +123,12 @@ fn action_in_normal_mode(event: &Event) -> Action {
 fn action_in_modal_mode(event: &Event) -> Action {
     match event {
         Event::Key(key_event) => {
-            // Ctrl-C always means cancel or quit
-            if key_event.modifiers.contains(KeyModifiers::CONTROL)
-                && key_event.code == KeyCode::Char('c')
-            {
-                return Action::CancelOrQuit;
+            // Only Press and Repeat trigger actions; Release is ignored.
+            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                return Action::None;
             }
 
-            // Esc always leaves the mode
+            // Ctrl-C is already handled in action_for; Esc leaves any mode.
             if key_event.code == KeyCode::Esc {
                 return Action::LeaveMode;
             }
@@ -110,13 +144,36 @@ fn action_in_modal_mode(event: &Event) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
+
+    fn key_with_kind(code: KeyCode, kind: KeyEventKind) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind,
+            state: unsafe { std::mem::zeroed() },
+        })
+    }
+
+    fn key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
     fn ctrl(letter: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::CONTROL))
+    }
+
+    fn mouse_event(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     #[test]
@@ -198,5 +255,138 @@ mod tests {
             action_for(&key(KeyCode::Esc), &Mode::Search),
             Action::LeaveMode
         );
+    }
+
+    /// Release events must not fire actions (Windows reports both Press
+    /// and Release for every key; ignoring Release prevents double-firing).
+    #[test]
+    fn release_events_do_not_fire_actions() {
+        let mode = Mode::Normal;
+        let event = key_with_kind(KeyCode::Char('q'), KeyEventKind::Release);
+        assert_eq!(action_for(&event, &mode), Action::None);
+    }
+
+    /// Repeat events (key held down) must fire actions, not just Press.
+    /// Scrolling up/down with j/k requires Repeat to keep working.
+    #[test]
+    fn repeat_events_fire_actions() {
+        let mode = Mode::Normal;
+        let event = key_with_kind(KeyCode::Char('j'), KeyEventKind::Repeat);
+        assert_eq!(action_for(&event, &mode), Action::SelectNext);
+    }
+
+    /// Modified keys (Ctrl, Alt, Super) must not fire unmodified bindings.
+    /// Ctrl-q passes through as a key, not as Quit.
+    #[test]
+    fn ctrl_modifies_keys_prevent_unmodified_bindings() {
+        let mode = Mode::Normal;
+        let event = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        // Ctrl-q should pass through as Key, not fire Quit.
+        // (Ctrl-C is special-cased; it fires CancelOrQuit before mode dispatch.)
+        match action_for(&event, &mode) {
+            Action::Key(ke) => {
+                assert_eq!(ke.code, KeyCode::Char('q'));
+                assert!(ke.modifiers.contains(KeyModifiers::CONTROL));
+            }
+            other => panic!("Expected Action::Key, got {:?}", other),
+        }
+    }
+
+    /// Alt modifies keys prevent unmodified bindings.
+    #[test]
+    fn alt_modifies_keys_prevent_unmodified_bindings() {
+        let mode = Mode::Normal;
+        let event = key_with_modifiers(KeyCode::Char('r'), KeyModifiers::ALT);
+        match action_for(&event, &mode) {
+            Action::Key(ke) => {
+                assert_eq!(ke.code, KeyCode::Char('r'));
+                assert!(ke.modifiers.contains(KeyModifiers::ALT));
+            }
+            other => panic!("Expected Action::Key, got {:?}", other),
+        }
+    }
+
+    /// SHIFT is allowed for character bindings (the character already
+    /// carries case). G with SHIFT must still map to FollowTail.
+    #[test]
+    fn shift_does_not_prevent_character_bindings() {
+        let mode = Mode::Normal;
+        // G naturally arrives with SHIFT from terminals, since it's uppercase.
+        let event = key_with_modifiers(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(action_for(&event, &mode), Action::FollowTail);
+    }
+
+    /// Mouse wheel up in Normal mode maps to ScrollUp(3).
+    #[test]
+    fn mouse_wheel_up_scrolls_in_normal_mode() {
+        let mode = Mode::Normal;
+        assert_eq!(
+            action_for(&mouse_event(MouseEventKind::ScrollUp), &mode),
+            Action::ScrollUp(3)
+        );
+    }
+
+    /// Mouse wheel down in Normal mode maps to ScrollDown(3).
+    #[test]
+    fn mouse_wheel_down_scrolls_in_normal_mode() {
+        let mode = Mode::Normal;
+        assert_eq!(
+            action_for(&mouse_event(MouseEventKind::ScrollDown), &mode),
+            Action::ScrollDown(3)
+        );
+    }
+
+    /// Mouse wheel events in modal modes pass through as Mouse actions
+    /// (for potential interpretation by the mode's handler).
+    #[test]
+    fn mouse_wheel_passes_through_in_modal_modes() {
+        for mode in [Mode::Search, Mode::Copy, Mode::Graph, Mode::Help] {
+            let evt = mouse_event(MouseEventKind::ScrollUp);
+            match action_for(&evt, &mode) {
+                Action::Mouse(me) => {
+                    assert_eq!(me.kind, MouseEventKind::ScrollUp);
+                }
+                other => panic!(
+                    "Expected Action::Mouse for mode {:?}, got {:?}",
+                    mode, other
+                ),
+            }
+        }
+    }
+
+    /// Mouse clicks (e.g., Left) in Normal mode pass through to the UI.
+    #[test]
+    fn mouse_click_passes_through_in_normal_mode() {
+        let mode = Mode::Normal;
+        let evt = mouse_event(MouseEventKind::Down(crossterm::event::MouseButton::Left));
+        match action_for(&evt, &mode) {
+            Action::Mouse(me) => {
+                assert_eq!(
+                    me.kind,
+                    MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                );
+            }
+            other => panic!("Expected Action::Mouse, got {:?}", other),
+        }
+    }
+
+    /// Mouse clicks in modal modes pass through too.
+    #[test]
+    fn mouse_click_passes_through_in_modal_modes() {
+        for mode in [Mode::Search, Mode::Copy, Mode::Graph, Mode::Help] {
+            let evt = mouse_event(MouseEventKind::Down(crossterm::event::MouseButton::Right));
+            match action_for(&evt, &mode) {
+                Action::Mouse(me) => {
+                    assert_eq!(
+                        me.kind,
+                        MouseEventKind::Down(crossterm::event::MouseButton::Right)
+                    );
+                }
+                other => panic!(
+                    "Expected Action::Mouse for mode {:?}, got {:?}",
+                    mode, other
+                ),
+            }
+        }
     }
 }
