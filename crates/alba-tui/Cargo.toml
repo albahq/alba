@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 alba-core = { path = "../alba-core" }
 alba-engine = { path = "../alba-engine" }
-alba-executors = { path = "../alba-executors" }
 arboard.workspace = true
 crossterm.workspace = true
 futures.workspace = true
@@ -16,4 +15,5 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+alba-executors = { path = "../alba-executors" }
 insta.workspace = true

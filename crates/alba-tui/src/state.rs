@@ -387,6 +387,11 @@ mod tests {
         state.apply(&output("build", "old line"), now);
         state.apply(&finished(BeamStatus::Succeeded, "build"), now);
         state.apply(&summary_event(&[]), now);
+        assert_eq!(
+            lines(&state, "build"),
+            vec![("old line".to_string(), false)],
+            "the first run's output is on screen until the rerun"
+        );
         // second run
         state.apply(&run_started("build", &["build"], &[]), now);
         state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
@@ -496,6 +501,41 @@ mod tests {
         );
     }
 
+    /// Each beam's output goes to its own buffer, and a replayed line
+    /// stays marked as replayed — the log pane styles the two apart.
+    #[test]
+    fn output_lands_in_its_own_beams_buffer() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["codegen", "build"], &[]), now);
+        state.apply(&RunEvent::BeamCached { id: id("codegen") }, now);
+        state.apply(&replayed_output("codegen", "cached line"), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "first"), now);
+        state.apply(&output("build", "second"), now);
+        assert_eq!(
+            lines(&state, "codegen"),
+            vec![("cached line".to_string(), true)]
+        );
+        assert_eq!(
+            lines(&state, "build"),
+            vec![("first".to_string(), false), ("second".to_string(), false)]
+        );
+    }
+
+    /// A `RunFinished` still draining behind the interrupt must not put
+    /// an outcome back: Ctrl-C ended the session, it did not conclude it.
+    #[test]
+    fn an_event_draining_behind_an_interrupt_does_not_vouch() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.quit_via_interrupt();
+        state.apply(&summary_event(&[]), now);
+        assert_eq!(state.exit_outcome(), None);
+        assert!(state.should_quit);
+    }
+
     /// A cancellation outside a run has nothing to abandon: the last run
     /// still vouches.
     #[test]
@@ -581,5 +621,27 @@ mod tests {
             },
             replayed: false,
         }
+    }
+
+    fn replayed_output(beam: &str, text: &str) -> RunEvent {
+        match output(beam, text) {
+            RunEvent::BeamOutput { id, line, .. } => RunEvent::BeamOutput {
+                id,
+                line,
+                replayed: true,
+            },
+            other => other,
+        }
+    }
+
+    /// What a beam's buffer holds, as `(text, replayed)` pairs.
+    fn lines(state: &AppState, beam: &str) -> Vec<(String, bool)> {
+        state
+            .logs
+            .get(beam)
+            .expect("the beam has a buffer")
+            .lines()
+            .map(|line| (line.text.clone(), line.replayed))
+            .collect()
     }
 }
