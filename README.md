@@ -80,6 +80,11 @@ alba check        # loads and validates the Beamfile without running anything
 alba run <beam>   # runs a beam and everything it needs
 ```
 
+On a terminal, running any of these opens the interactive interface
+described in [Interactive interface](#interactive-interface) instead of
+printing lines like the ones below; what follows is what stdout carries
+when it is not a terminal (redirected, piped, or under `--no-ui`).
+
 Running the example above:
 
 ```sh
@@ -125,8 +130,10 @@ Common to every subcommand:
 | `--jobs <N>` | How many beams may run at once. At least 1; defaults to the machine's available parallelism. |
 | `--keep-going` | Keep going after a beam fails, instead of cancelling the beams that have not started. |
 | `--output <STYLE>` | How text output is laid out: `interleaved` (every line as it happens, prefixed with the beam it came from) or `grouped` (each beam's output held back and printed as one block when it ends). Defaults to `interleaved` on a terminal and `grouped` otherwise. Ignored with `--log-format json`. |
-| `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line). Defaults to `text`. |
+| `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line, opening with a `run_started` event that carries the run's target, its beams, and the dependency edges between them, before any beam's own events). Defaults to `text`. |
 | `--watch` | Keep running: re-run the beam whenever the files its subgraph declares as `inputs` change, or a loaded Beamfile changes. Ctrl-C ends the session. See [Watch mode](#watch-mode). |
+| `--ui` | Ask for the interactive interface even though stdout is not a terminal. Since it cannot actually draw there, the run is refused with an error instead of falling back to headless. Has no effect otherwise: on a terminal the interface is already the default, and `--log-format json`, `--output`, or `--no-ui` still choose the text renderers over it. See [Interactive interface](#interactive-interface). |
+| `--no-ui` | Force the plain text renderers on, even on a terminal. |
 
 ### Exit codes
 
@@ -144,6 +151,19 @@ An orderly Ctrl-C ends the session with `0`. `2` covers whatever keeps the
 session from being a session at all: a Beamfile that fails to load at
 startup, a file watcher that cannot start, or one that dies partway through
 and leaves nothing left to watch.
+
+On a terminal, where the interactive interface is the front end by default
+(see [Interactive interface](#interactive-interface)), `q` exits with the
+last run's own code, but only when that run reached its own end without
+being abandoned; quitting mid-run, or before any run has finished, reports
+`130` instead, since neither one vouches for the sources. Ctrl-C cancels a
+run in flight without ending the session; with nothing running, it quits
+the same way, `130`, even overriding a run that had just finished green.
+Whatever keeps the interface from working at all, an unschedulable run or a
+file watcher that fails to start, one that dies partway through, or the
+session ending some other way than the user closing it, reports `2`, the
+same as a headless session's own startup failures; so does `--ui` refused
+because stdout is not a terminal.
 
 ### Executors
 
@@ -193,6 +213,16 @@ re-runs it whenever a relevant file changes. Like a plain `alba run`, an
 omitted beam falls back to the declared `default`, so a bare
 `alba run --watch` works too.
 
+On a terminal, this session starts inside the interactive interface (see
+[Interactive interface](#interactive-interface)) rather than printing the
+text this section describes: the interface already lets `w` turn watching
+on or off mid-session, so `--watch` there only chooses the state it starts
+in. Everything below still describes the session itself: what counts as a
+change, what a broken Beamfile does to it, how `--force` and debouncing
+behave. It holds regardless of which front end is showing it; only the
+paragraphs about clearing the screen and the JSON stream are specific to
+the plain text renderers.
+
 What counts as relevant is exactly what the cache already tracks: the
 files the target's subgraph declares as `inputs`, the same declarations
 the cache fingerprints, so watch mode and the cache can never disagree
@@ -233,22 +263,27 @@ Ctrl-C ends the session in an orderly way: every run inside it already
 reported its own outcome, so the process exits `0` rather than the `130`
 a single interrupted `alba run` reports. See [Exit codes](#exit-codes).
 
-On a terminal, the text renderers clear the screen before printing a
-triggered run, so each run starts on a clean page. This never happens with
-`--log-format json`, and never happens when stdout is not a terminal (a log
-file, a pipe): there is no screen to clear for a reader parsing the stream,
-and off a terminal the output accumulates as a record that clearing would
-destroy.
+When the plain text renderers are the ones showing the session (off a
+terminal, or forced on one by `--no-ui` or another flag that falls back to
+them), they clear the screen before printing a triggered run whenever
+stdout is a terminal, so each run starts on a clean page. This never
+happens with `--log-format json`, and never happens when stdout is not a
+terminal (a log file, a pipe): there is no screen to clear for a reader
+parsing the stream, and off a terminal the output accumulates as a record
+that clearing would destroy.
 
-Piped through `--log-format json`, a session's stream carries two event
-kinds beyond an ordinary run's: `watch_waiting` (`files`, how many resolved
-input files the session is watching) while it sits idle between runs, and
-`watch_triggered` (`paths`, the changed paths that caused the next run) the
-moment one starts. `paths` are relative to the project root, and the array
-is empty when the trigger cannot be pinned to specific files, such as a
-Beamfile that was broken and has just started parsing again. A session
-parked on a project that will not load reports `watch_waiting` with `files`
-at `0`: it is stopped, not running, and nothing is resolved while nothing
+Piped through `--log-format json`, a session's stream carries three event
+kinds beyond an ordinary run's: `project_broken` (`diagnostic`, the same
+rendered text also printed to stderr) whenever the project fails to load,
+or a run cannot be scheduled once it has, `watch_waiting` (`files`, how many
+resolved input files the session is watching) while it sits idle between
+runs, and `watch_triggered` (`paths`, the changed paths that caused the next
+run) the moment one starts. `paths` are relative to the project root, and
+the array is empty when the trigger cannot be pinned to specific files,
+such as a Beamfile that was broken and has just started parsing again. A
+session parked on a project that will not load reports `project_broken`
+once, then `watch_waiting` with `files` at `0` for as long as it stays
+parked: it is stopped, not running, and nothing is resolved while nothing
 loads.
 
 Two things are worth knowing before leaning on watch mode. A beam that
@@ -258,6 +293,145 @@ watch roots are computed once at startup, from the project root and the
 directory of any Beamfile loaded from outside it: an import added
 mid-session whose directory lies outside those roots is not watched until
 the session is restarted.
+
+## Interactive interface
+
+On a terminal, `alba run` opens an interactive interface instead of
+printing text: a live view of the run that takes over the whole screen for
+as long as it lasts, and hands the terminal back exactly as it found it
+once you quit (`q`).
+
+Which front end a given invocation gets depends on stdout, not on typing
+anything extra:
+
+- It is the default whenever stdout is a terminal, unless `--log-format
+  json`, an explicit `--output`, or `--no-ui` chooses the plain text
+  renderers instead; all three win even together with `--ui`, since each
+  already asks for a specific, script-readable shape of output the
+  interface has nothing to add to.
+- Off a terminal (piped, redirected, or under a test harness), with none
+  of those three set, the text renderers run by default too, with no flag
+  needed.
+- `--ui` changes only that last case: instead of falling back quietly, it
+  refuses with an error, since the interface still needs a real terminal
+  to draw on, and drawing it down a pipe would just fill the reader's
+  stream with escape codes.
+
+The interface subsumes [watch mode](#watch-mode): `--watch` only chooses
+the state the session starts in, and `w` toggles watching at any point
+afterward. A Beamfile edit still reloads the project, a broken one still
+parks the session until a later save fixes it, and a change still cancels
+a run in flight and starts a fresh one, exactly as that section describes.
+
+### Layout
+
+```text
+┌─ alba · run build ── ▰▰▰▰▰▰▱▱▱▱▱▱▱▱ 2/5 · 4.2s ─────────────────────────────┐
+│ BEAMS                    │ logs · api:build                                 │
+│                          │                                                  │
+│ ✔ codegen          1.2s  │ Compiling proc-macro2 v1.0.86                    │
+│ ⚡ api:codegen      0.8s  │ Compiling serde v1.0.210                         │
+│ ▶ api:build        3.4s… │ Compiling api v0.1.0 (/repo/api)                 │
+│ ○ build                  │ warning: unused import: `std::fmt`               │
+│ ○ test                   │   --> src/lib.rs:4:5                             │
+│                          │                                                  │
+│ ✔ 1  ⚡ 1  ✖ 0  ○ 2      │ [/] search   [g] graph   [↑↓] scroll             │
+└─ q quit · r rerun · c cancel · w watch ─────────────────────────────────────┘
+```
+
+The header and the bottom bar are not panes of their own: they sit inside
+the top and bottom edge of a single outer frame, and one vertical divider,
+part of that same frame, is what separates the tree from the log pane.
+
+- **Header**: while a run is going, its progress bar, done/total, and
+  elapsed time, ticking live; once it ends, the outcome by status (zero
+  buckets omitted); between runs in a watch session, how many files it is
+  watching; parked, instead, when the project cannot load.
+- **Tree** (left, 30 columns): one row per beam, `✔` succeeded, `⚡`
+  cached, `▶` running (its own duration ticking), `✖` failed (an allowed
+  failure included), `○` pending or cancelled, plus a footer counting
+  beams by status, with `▶` left out of the tally since it has not settled
+  yet.
+- **Logs** (right): the selected beam's output, following the tail by
+  default. Scrolling up (the wheel, or the keys below) pauses following,
+  so you can read in peace while the run continues; `G`, or scrolling back
+  down to the bottom, resumes it.
+- **Bottom bar**: the actions available in whatever mode is active, the
+  keymap below condensed to what fits.
+
+Below roughly 40 columns by 10 rows, the interface shows "terminal too
+small" rather than a layout with nothing left to draw.
+
+### Keymap
+
+`Ctrl-C` behaves the same in every mode: it cancels a run in flight, or
+quits if nothing is running.
+
+**Normal**
+
+| Key | Action |
+| --- | --- |
+| `q` | Quit. |
+| `Ctrl-C` | Cancel the run in flight, or quit if idle. |
+| `r` | Rerun the selected beam. |
+| `f` | Rerun the selected beam, bypassing the cache. |
+| `c` | Cancel the run in flight. |
+| `w` | Toggle watch on or off. |
+| `j`/`k`, `↓`/`↑` | Move the selection. |
+| `G` | Jump the log pane to the tail and resume following. |
+| Mouse wheel | Scroll the log pane. |
+| `n` / `N` | Step the committed search forward or backward, wrapping; re-runs the query against the newly selected beam if the selection moved since it was committed. |
+| `/` | Enter search. |
+| `v` | Enter copy. |
+| `g` | Enter graph. |
+| `?` | Open help. |
+
+**Search** (`/`)
+
+| Key | Action |
+| --- | --- |
+| Any printable character | Add to the query (composing only, `n`/`N` included; stepping is the Normal-mode binding above). |
+| `Backspace` | Erase the last character. |
+| `Enter` | Commit the query, return to Normal, and keep the highlights. |
+| `Esc` | Cancel and return to Normal. |
+
+**Copy** (`v`)
+
+| Key | Action |
+| --- | --- |
+| `hjkl` / arrows | Move the cursor. |
+| `v` | Re-anchor the selection at the cursor. |
+| `y` | Copy the selection (OSC 52, falling back to the system clipboard when the terminal does not support it) and return to Normal; the bottom bar confirms for about two seconds. |
+| `Esc` | Leave without copying. |
+| Click and drag, then release | Select by dragging in the log pane; releasing copies. |
+
+Copy is entered with `v`; a click-drag alone, without `v` first, does
+nothing. Once inside, the selection addresses only the log pane's own
+text; the tree beside it is never part of it.
+
+**Graph** (`g`)
+
+| Key | Action |
+| --- | --- |
+| `↑↓←→` | Move focus between nodes. |
+| `Enter` | Select the focused beam and return to Normal. |
+| `Esc` | Return to Normal without changing the selection. |
+
+Graph mode draws the run's dependency graph in topological layers, colored
+by status, and replaces the whole body while it is open: there is no tree
+or log pane behind it.
+
+**Help** (`?`)
+
+| Key | Action |
+| --- | --- |
+| `?` or `Esc` | Close the overlay. |
+
+Help draws the same keymap as this section, over the tree and log panes
+dimmed rather than hidden.
+
+What exit code the process reports once you quit is not a keymap
+question; see [Exit codes](#exit-codes).
 
 ## Embedded shell
 
