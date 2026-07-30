@@ -16,8 +16,8 @@
 //! the next run schedules the beams as they are now written. A project
 //! the session cannot work from — one that no longer parses, one whose
 //! target beam is gone — parks the loop in
-//! [`reload_when_beamfile_changes`]: reported, executing nothing, until a
-//! save makes it loadable again.
+//! [`park_until_the_project_changes`]: reported, announced as a wait,
+//! executing nothing, until a save makes it loadable again.
 //!
 //! ## Why the loop reports errors through a callback
 //!
@@ -108,6 +108,16 @@ pub enum SessionError {
 ///
 /// `project` and `sources` are taken owned: the session outlives the
 /// caller's own copy, and both are cheap to clone.
+///
+/// A `target` this project does not declare is *not* an error here: it
+/// parks the session like any other project it cannot work from, because
+/// mid-session the fix is one Beamfile save away and a session that quit
+/// on a renamed beam would be a session that quits while the user is
+/// typing. A caller that wants the other answer — the exit code 2 an
+/// unknown target earns on the command line — asks
+/// [`alba_core::execution_subgraph`] before starting the session, which is
+/// exactly what the CLI does: it is only at startup that "no such beam"
+/// means the invocation was wrong rather than the edit unfinished.
 #[allow(clippy::too_many_arguments)]
 pub async fn watch(
     beamfile: &Path,
@@ -143,7 +153,15 @@ pub async fn watch(
                     error: EngineError::Core(error),
                     sources: sources.clone(),
                 });
-                match reload_when_beamfile_changes(beamfile, &mut *watcher, &cancel, on_error).await
+                match park_until_the_project_changes(
+                    beamfile,
+                    sources.clone(),
+                    &events,
+                    &mut *watcher,
+                    &cancel,
+                    on_error,
+                )
+                .await
                 {
                     Reloaded::Project(fresh_project, fresh_sources) => {
                         (project, sources) = (fresh_project, fresh_sources);
@@ -245,9 +263,17 @@ pub async fn watch(
                     (project, sources) = (fresh_project, fresh_sources);
                 }
                 Err(error) => {
+                    let rejected = error.sources.clone();
                     on_error(&SessionError::Load(error));
-                    match reload_when_beamfile_changes(beamfile, &mut *watcher, &cancel, on_error)
-                        .await
+                    match park_until_the_project_changes(
+                        beamfile,
+                        rejected,
+                        &events,
+                        &mut *watcher,
+                        &cancel,
+                        on_error,
+                    )
+                    .await
                     {
                         Reloaded::Project(fresh_project, fresh_sources) => {
                             (project, sources) = (fresh_project, fresh_sources);
@@ -391,29 +417,52 @@ enum Reloaded {
     Exit(WatchExit),
 }
 
-/// The broken-project idle state: the last load — or the watched set
-/// built from it — failed and was reported; nothing may execute until a
-/// Beamfile the session can work from exists again.
+/// The broken-project idle state: the last load — or the watched set built
+/// from it — failed and was reported; nothing may execute until a project
+/// the session can work from exists again. `rejected` is the project text
+/// that report was about.
 ///
-/// Every subsequent batch retries the reload rather than being classified
+/// Every subsequent batch retries the load rather than being classified
 /// first: the stale `WatchSet` could still name the Beamfiles it knew
 /// about, but not one that a fixed `import` line has only just added, and
-/// a retry is one file read plus a parse. Repeated failures are reported
-/// each time: the user just saved the file and is looking at the terminal
-/// for an answer.
-async fn reload_when_beamfile_changes(
+/// a retry is one file read plus a parse. What is *not* repeated is the
+/// answer: a load whose sources come back byte-for-byte what was already
+/// reported on says nothing new, and reprinting it would bury the
+/// diagnostic under one copy per write anywhere in the watched tree — an
+/// editor's temporary files, an LSP, a build writing its own artifacts.
+/// Loading is deterministic, so equal sources mean the same outcome and
+/// the same rendering; anything that could change the answer, including
+/// the appearance of a file no load ever managed to read, changes them.
+async fn park_until_the_project_changes(
     beamfile: &Path,
+    mut rejected: SourceMap,
+    events: &UnboundedSender<RunEvent>,
     watcher: &mut dyn Watcher,
     cancel: &CancellationToken,
     on_error: &mut (dyn FnMut(&SessionError) + Send),
 ) -> Reloaded {
+    // Without this the stream's last word is the trigger that means
+    // "running", and a consumer would read a stopped session as a busy
+    // one for as long as the project stays broken. Zero files is the
+    // honest count: nothing is resolved while nothing loads.
+    let _ = events.send(RunEvent::WatchWaiting { files: 0 });
+
     loop {
         tokio::select! {
             () = cancel.cancelled() => return Reloaded::Exit(WatchExit::Interrupted),
             batch = watcher.next_batch() => match batch {
                 Some(_) => match alba_core::load_project(beamfile) {
-                    Ok((project, sources)) => return Reloaded::Project(project, sources),
-                    Err(error) => on_error(&SessionError::Load(error)),
+                    Ok((project, sources)) => {
+                        if sources != rejected {
+                            return Reloaded::Project(project, sources);
+                        }
+                    }
+                    Err(error) => {
+                        if error.sources != rejected {
+                            rejected = error.sources.clone();
+                            on_error(&SessionError::Load(error));
+                        }
+                    }
                 },
                 None => return Reloaded::Exit(WatchExit::WatcherClosed),
             },

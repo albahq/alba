@@ -54,10 +54,12 @@ pub enum RunEvent {
     RunFinished {
         summary: RunSummary,
     },
-    /// Watch mode only: the session finished a run and is now waiting.
-    /// `files` is how many files the watched `inputs` currently resolve
-    /// to — the status line's number. The first one a session emits also
-    /// announces the session itself.
+    /// Watch mode only: the session is waiting, having finished a run or
+    /// given up on starting one. `files` is how many files the watched
+    /// `inputs` currently resolve to — the status line's number, and `0`
+    /// for a session parked on a project that will not load, which
+    /// resolves nothing. The first one a session emits also announces the
+    /// session itself.
     WatchWaiting {
         files: usize,
     },

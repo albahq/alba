@@ -185,6 +185,8 @@ fn start_reporting_to(
 const TWO_BEAMS: &str = "beam build { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n\
      beam docs { inputs [\"docs/**\"] needs [build] run \"echo docs\" }\n";
 
+const ONE_BEAM: &str = "beam build { inputs [\"src/**/*.rs\"] run \"echo compile\" }\n";
+
 fn is_waiting(event: &RunEvent) -> bool {
     matches!(event, RunEvent::WatchWaiting { .. })
 }
@@ -491,6 +493,114 @@ async fn a_broken_beamfile_reports_waits_and_recovers() {
             .calls()
             .iter()
             .any(|call| call.command.contains("compile-fixed"))
+    );
+
+    session.finish().await;
+}
+
+/// A parked session says so on the event channel. Until it does, the last
+/// event on the stream is the trigger that means "running", and a consumer
+/// — a JSON reader, a TUI — believes a session that is in fact stopped is
+/// executing, for as long as the Beamfile stays broken.
+#[tokio::test]
+async fn a_parked_session_announces_that_it_is_waiting() {
+    let (mut session, _errors) = start_with_error_log(ONE_BEAM, "build", FakeExecutor::new());
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch("Beamfile", "beam build { this does not parse");
+    session.send(vec![beamfile]);
+    session.event_matching(is_triggered).await;
+
+    let RunEvent::WatchWaiting { files } = session.event_matching(is_waiting).await else {
+        unreachable!()
+    };
+    // Nothing is resolved while the project will not load.
+    assert_eq!(files, 0);
+
+    session.finish().await;
+}
+
+/// A parked session reports once per change, not once per batch. Anything
+/// writing inside the watched tree — an editor's temporary file, an LSP, a
+/// build writing `target/` — would otherwise reprint the whole rendered
+/// diagnostic, scrolling away the message the user is trying to read.
+#[tokio::test]
+async fn a_parked_session_does_not_repeat_an_unchanged_diagnostic() {
+    let (mut session, errors) = start_with_error_log(ONE_BEAM, "build", FakeExecutor::new());
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch("Beamfile", "beam build { this does not parse");
+    session.send(vec![beamfile]);
+    session.event_matching(is_triggered).await;
+    session.event_matching(is_waiting).await;
+
+    for index in 0..5 {
+        let noise = session.touch(&format!("notes{index}.txt"), "not an input");
+        session.send(vec![noise]);
+    }
+    // Long enough for five reports to have landed if they were coming.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(*errors.lock().unwrap(), vec![ObservedError::Load]);
+
+    session.finish().await;
+}
+
+/// An edit that leaves the project broken *differently* is a new answer to
+/// a new question, and is reported.
+#[tokio::test]
+async fn a_parked_session_reports_a_diagnostic_that_changed() {
+    let (mut session, errors) = start_with_error_log(ONE_BEAM, "build", FakeExecutor::new());
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch("Beamfile", "beam build { this does not parse");
+    session.send(vec![beamfile.clone()]);
+    session.event_matching(is_waiting).await;
+
+    session.touch("Beamfile", "beam build { neither does this");
+    session.send(vec![beamfile]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        *errors.lock().unwrap(),
+        vec![ObservedError::Load, ObservedError::Load]
+    );
+
+    session.finish().await;
+}
+
+/// The property no flood-suppression may cost: the fix can arrive through
+/// a file the session never loaded — an `import` added while the project
+/// was broken, whose target is only created afterwards — and the session
+/// must still notice it.
+#[tokio::test]
+async fn a_parked_session_recovers_through_a_file_it_never_knew() {
+    let (mut session, _errors) = start_with_error_log(ONE_BEAM, "build", FakeExecutor::new());
+    session.event_matching(is_waiting).await;
+
+    // The import names a file that does not exist yet: the project stops
+    // loading, and the session parks.
+    let beamfile = session.touch(
+        "Beamfile",
+        "import \"extra/Extra.beam\" as extra\n\
+         beam build { inputs [\"src/**/*.rs\"] needs [extra:more] run \"echo compile\" }\n",
+    );
+    session.send(vec![beamfile]);
+    session.event_matching(is_waiting).await;
+
+    // Only the missing file is created, and only its path is reported.
+    std::fs::create_dir_all(session.dir.path().join("extra")).unwrap();
+    let created = session.touch("extra/Extra.beam", "beam more { run \"echo more\" }\n");
+    session.send(vec![created]);
+
+    session.event_matching(is_triggered).await;
+    session.event_matching(is_run_finished).await;
+    assert!(
+        session
+            .executor
+            .calls()
+            .iter()
+            .any(|call| call.command.contains("more"))
     );
 
     session.finish().await;
