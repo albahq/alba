@@ -58,14 +58,13 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
 fn row_text(row: &BeamRow, now: Instant, width: usize) -> String {
     let glyph = glyph_for(&row.state);
     let duration = duration_text(&row.state, now);
-    let dur_width = DURATION_WIDTH;
     // The name column's char budget accounts for the glyph's *rendered*
     // width, not its char count: `⚡` paints two terminal cells, and
     // sizing every row as if every glyph painted one would push that
     // row's duration a column further right than the others.
-    let name_width = width.saturating_sub(2 + glyph_width(glyph) + dur_width);
+    let name_width = width.saturating_sub(2 + glyph_width(glyph) + DURATION_WIDTH);
     let name = &row.id;
-    format!(" {glyph} {name:<name_width$}{duration:>dur_width$}")
+    format!(" {glyph} {name:<name_width$}{duration:>DURATION_WIDTH$}")
 }
 
 /// The glyph's width in terminal cells. Hardcoded rather than pulled

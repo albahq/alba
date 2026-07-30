@@ -1,12 +1,12 @@
 //! The header line: the run's live progress while `Phase::Running`, or a
 //! one-line account of whatever else the session is doing — waiting on
 //! watch, parked on a broken Beamfile, or the last run's outcome.
+//!
+//! This text is not rendered into its own pane: it sits inside the
+//! outer frame's top border (see `ui/mod.rs`), the way the spec's
+//! mockup draws it (`┌─ alba · run build ── ... ─┐`).
 
 use std::time::Instant;
-
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::Paragraph;
 
 use alba_engine::RunSummary;
 
@@ -20,8 +20,8 @@ use super::format_duration;
 /// was drawn with.
 const BAR_WIDTH: usize = 14;
 
-pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
-    let text = match &state.phase {
+pub fn text(state: &AppState, now: Instant) -> String {
+    match &state.phase {
         Phase::Running { done, total, since } => {
             let elapsed = now.saturating_duration_since(*since);
             format!(
@@ -40,8 +40,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
             Some(summary) => finished_line(&state.target, summary),
             None => format!("alba · {} · idle", state.target),
         },
-    };
-    frame.render_widget(Paragraph::new(text), area);
+    }
 }
 
 /// Deterministic on purpose: `done`/`total` are the whole story, so the

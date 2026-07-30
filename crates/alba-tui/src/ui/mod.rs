@@ -1,18 +1,22 @@
-//! The whole-frame layout: header, tree pane, log pane, and the bottom
-//! bar — the interactive mirror of the CLI's headless renderers (see
+//! The whole-frame layout: an outer border carrying the header and
+//! bottom bar, a vertical divider between the tree and log panes — the
+//! interactive mirror of the CLI's headless renderers (see
 //! `alba-cli/src/render/`), but a pure function of [`AppState`] rather
 //! than a stream consumer.
 //!
 //! Nothing here samples a clock or touches the terminal: `now` arrives
 //! as an argument, so a redraw is a deterministic function of its
 //! inputs and a snapshot test owns the clock. See the spec's Layout
-//! section for the mockup this module renders.
+//! section for the mockup this module renders — the outer frame, the
+//! divider, and the header/bottom-bar text sitting in the border are
+//! all drawn exactly as that mockup shows them.
 
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::widgets::Paragraph;
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::{AppState, Mode};
 
@@ -26,9 +30,12 @@ mod tree;
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 10;
 
-/// The tree pane's fixed width. The spec's mockup and prose both call
-/// for 30 columns; an earlier sketch of this layout used 28, which this
-/// implementation does not follow, so the mockup and the snapshots agree.
+/// The tree pane's fixed content width, measured inside the frame's
+/// outer border and the divider that separates it from the log pane.
+/// The task brief's Interfaces line calls for "left tree pane (30
+/// columns)" — that line, not a character count taken from the spec's
+/// hand-drawn ASCII mockup (which comes out to 28 by literal count), is
+/// the authority for this number.
 const TREE_WIDTH: u16 = 30;
 
 pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
@@ -41,21 +48,28 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
         return;
     }
 
-    let rows = Layout::vertical([
-        Constraint::Length(1), // header
-        Constraint::Min(1),    // body
-        Constraint::Length(1), // bottom bar
-    ])
-    .split(area);
+    // The outer frame carries the header and the bottom bar inside its
+    // own border, exactly as the spec's mockup draws them
+    // (`┌─ alba · run build ── ... ─┐` / `└─ q quit · ... ─┘`): a
+    // leading `─ ` and trailing ` ` are baked into the title text itself
+    // so the block's own border fill supplies the rest of the dashes.
+    let outer = Block::bordered()
+        .title_top(Line::from(format!("─ {} ", header::text(state, now))))
+        .title_bottom(Line::from(format!("─ {} ", bottom_bar(&state.mode))));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
-    header::draw(frame, rows[0], state, now);
-
+    // The tree pane's region includes its own right border, which is
+    // the divider between it and the log pane — one column wider than
+    // the tree's actual content width.
     let panes =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH), Constraint::Min(1)]).split(rows[1]);
-    tree::draw(frame, panes[0], state, now);
-    logpane::draw(frame, panes[1], state);
+        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(inner);
+    let divider = Block::new().borders(Borders::RIGHT);
+    let tree_area = divider.inner(panes[0]);
+    frame.render_widget(divider, panes[0]);
 
-    frame.render_widget(Paragraph::new(bottom_bar(&state.mode)), rows[2]);
+    tree::draw(frame, tree_area, state, now);
+    logpane::draw(frame, panes[1], state);
 }
 
 /// The always-available actions for the current mode. Only `Mode::Normal`
