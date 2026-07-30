@@ -9,6 +9,7 @@
 //! into a state mutation, a command to the session, or both. Everything
 //! it does not do itself lives one layer down and is tested there.
 
+pub mod copy;
 pub mod input;
 pub mod logs;
 pub mod search;
@@ -21,7 +22,9 @@ use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
 use alba_engine::{RunEvent, RunSummary, SessionCommand};
+use crossterm::event::MouseEvent;
 use futures::StreamExt;
+use ratatui::layout::Size;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::input::Action;
@@ -80,6 +83,10 @@ pub async fn run(
                 .terminal()
                 .draw(|frame| ui::draw(frame, &state, now))?;
             dirty = false;
+            // A copy result is shown for exactly the one draw that just
+            // happened — clearing it here rather than leaving it to
+            // linger past the frame it was meant for.
+            state.last_copy_result = None;
         }
 
         tokio::select! {
@@ -108,7 +115,12 @@ pub async fn run(
             input_event = input.next() => match input_event {
                 Some(Ok(event)) => {
                     let action = input::action_for(&event, &state.mode);
-                    dispatch(&mut state, &commands, action);
+                    // Best effort: an error querying the terminal's own
+                    // size falls back to zero, which reads as "too small"
+                    // to `ui::log_pane_content_area` and simply makes a
+                    // click or `v` land nowhere, rather than panicking.
+                    let terminal_size = guard.terminal().size().unwrap_or_default();
+                    dispatch(&mut state, &commands, action, terminal_size);
                     dirty = true;
                 }
                 // A terminal that can no longer be read cannot be driven
@@ -139,8 +151,16 @@ pub async fn run(
 ///
 /// Kept apart from the loop — and free of any terminal of its own — so
 /// the rules the exit code depends on can be tested by handing it an
-/// action and reading back what it did.
-fn dispatch(state: &mut AppState, commands: &UnboundedSender<SessionCommand>, action: Action) {
+/// action and reading back what it did. `terminal_size` is the one bit
+/// of screen geometry two actions need (`EnterCopy`'s anchor, `Mouse`'s
+/// hit test): a plain size value rather than a live terminal, so this
+/// stays just as testable as everything else here.
+fn dispatch(
+    state: &mut AppState,
+    commands: &UnboundedSender<SessionCommand>,
+    action: Action,
+    terminal_size: Size,
+) {
     match action {
         Action::Quit => {
             // Quitting on a run in flight abandons it: its summary,
@@ -200,19 +220,49 @@ fn dispatch(state: &mut AppState, commands: &UnboundedSender<SessionCommand>, ac
         Action::EnterSearch => state.enter_search(),
         Action::SearchNext => state.search_next(),
         Action::SearchPrevious => state.search_previous(),
-        // Copy, Graph, and Help have no renderer yet. Entering a mode
-        // nothing draws leaves the user facing an unchanged screen whose
-        // bottom bar advertises `q quit` while, modal, `q` is swallowed
-        // as a plain character — a false affordance. Until each mode's
-        // own task lands, its key does nothing at all.
-        Action::EnterCopy | Action::EnterGraph | Action::EnterHelp => {}
+        Action::EnterCopy => {
+            let pane_height = log_pane_height(terminal_size);
+            state.enter_copy(pane_height);
+        }
+        // Graph and Help have no renderer yet. Entering a mode nothing
+        // draws leaves the user facing an unchanged screen whose bottom
+        // bar advertises `q quit` while, modal, `q` is swallowed as a
+        // plain character — a false affordance. Until each mode's own
+        // task lands, its key does nothing at all.
+        Action::EnterGraph | Action::EnterHelp => {}
         Action::LeaveMode => state.leave_mode(),
         Action::Key(key) => state.handle_modal_key(key),
-        // Click-to-select and drag-to-copy arrive with the copy mode that
-        // owns the hit testing they need.
-        Action::Mouse(_) => {}
+        Action::Mouse(mouse_event) => dispatch_mouse(state, mouse_event, terminal_size),
         Action::None => {}
     }
+}
+
+/// Copy mode's own hit testing: a click, drag, or release only means
+/// something once it lands inside the log pane's own content area — the
+/// tree pane, the borders, and the title/footer rows are not part of the
+/// buffer copy mode addresses. Every other mode leaves a mouse event
+/// exactly as inert as before this task; their own hit testing (e.g.
+/// click-to-select in the tree) is a later task's to add.
+fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) {
+    let Some(area) = ui::log_pane_content_area(terminal_size.width, terminal_size.height) else {
+        return;
+    };
+    if mouse.row < area.y
+        || mouse.row >= area.y + area.height
+        || mouse.column < area.x
+        || mouse.column >= area.x + area.width
+    {
+        return;
+    }
+    let pane_row = (mouse.row - area.y) as usize;
+    let pane_col = (mouse.column - area.x) as usize;
+    state.handle_mouse(mouse.kind, area.height as usize, pane_row, pane_col);
+}
+
+fn log_pane_height(terminal_size: Size) -> usize {
+    ui::log_pane_content_area(terminal_size.width, terminal_size.height)
+        .map(|area| area.height as usize)
+        .unwrap_or(0)
 }
 
 /// The selected beam's buffer, created on demand — scrolling a beam that
@@ -316,6 +366,12 @@ mod tests {
         commands
     }
 
+    /// The terminal size these tests dispatch against — comfortably past
+    /// the too-small floor, and the same 80x24 the render snapshots use.
+    fn size() -> Size {
+        Size::new(80, 24)
+    }
+
     /// The exit replay's raw material: each failed beam of the last
     /// summary, with what it printed.
     #[test]
@@ -380,15 +436,116 @@ mod tests {
 
     /// A mode with no renderer must not be enterable: the screen would
     /// not change, but the keymap would go modal behind a bottom bar
-    /// still advertising the Normal-mode keys.
+    /// still advertising the Normal-mode keys. Copy is no longer among
+    /// them — this task gives it a renderer, so `EnterCopy` now has its
+    /// own test below instead.
     #[test]
     fn modes_with_no_renderer_are_not_enterable_yet() {
         let (commands, _receiver) = commands();
         let mut state = AppState::new("build", false);
 
-        for action in [Action::EnterCopy, Action::EnterGraph, Action::EnterHelp] {
-            dispatch(&mut state, &commands, action);
+        for action in [Action::EnterGraph, Action::EnterHelp] {
+            dispatch(&mut state, &commands, action, size());
             assert_eq!(state.mode, state::Mode::Normal, "{action:?} entered a mode");
+        }
+    }
+
+    /// `v`: now that copy mode has a renderer, entering it actually
+    /// flips the mode, anchored at the log pane's own top visible line.
+    #[test]
+    fn entering_copy_mode_anchors_at_the_panes_top_line() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["build"]);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, Instant::now());
+        for index in 0..30 {
+            state.apply(&output("build", &format!("line {index}")), Instant::now());
+        }
+
+        dispatch(&mut state, &commands, Action::EnterCopy, size());
+
+        match &state.mode {
+            state::Mode::Copy(copy) => {
+                // 80x24 gives the log pane a content height of 20 rows
+                // (see `ui::log_pane_content_area`); following a 30-line
+                // buffer, the top visible line is 30 - 20 = 10.
+                assert_eq!(copy.anchor, (10, 0));
+                assert_eq!(copy.cursor, (10, 0));
+            }
+            other => panic!("expected Mode::Copy, got {other:?}"),
+        }
+    }
+
+    /// A drag inside the log pane's content area anchors on `Down` and
+    /// extends the cursor on `Drag`, hit-tested through the same layout
+    /// `ui::log_pane_content_area` computes. `Up` (release) is not
+    /// exercised here: it copies to the clipboard, which is the pseudo
+    /// terminal smoke test's job, not a unit test's.
+    #[test]
+    fn a_mouse_drag_in_copy_mode_selects_by_pane_row() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["build"]);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, Instant::now());
+        for index in 0..5 {
+            state.apply(&output("build", &format!("line {index}")), Instant::now());
+        }
+        dispatch(&mut state, &commands, Action::EnterCopy, size());
+
+        // The log pane's content area starts at (32, 2) for an 80x24
+        // terminal (see `ui::log_pane_content_area`); its 5 lines all
+        // fit inside the 20-row content height and follow the tail, so
+        // row 0 of the pane is buffer line 0 ("line 0").
+        let down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 34,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        dispatch(&mut state, &commands, Action::Mouse(down), size());
+        match &state.mode {
+            state::Mode::Copy(copy) => assert_eq!(copy.anchor, (0, 2)),
+            other => panic!("expected Mode::Copy, got {other:?}"),
+        }
+
+        let drag = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 34,
+            row: 4,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        dispatch(&mut state, &commands, Action::Mouse(drag), size());
+        match &state.mode {
+            state::Mode::Copy(copy) => {
+                assert_eq!(copy.anchor, (0, 2), "the anchor stays put");
+                assert_eq!(copy.cursor, (2, 2), "the cursor follows the drag");
+            }
+            other => panic!("expected Mode::Copy, got {other:?}"),
+        }
+    }
+
+    /// A click outside the log pane's content area (here, in the tree
+    /// pane's own columns) hits nothing: copy mode's selection only ever
+    /// addresses the log buffer beside it.
+    #[test]
+    fn a_click_outside_the_log_pane_does_nothing() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["build"]);
+        dispatch(&mut state, &commands, Action::EnterCopy, size());
+        let before = match &state.mode {
+            state::Mode::Copy(copy) => *copy,
+            other => panic!("expected Mode::Copy, got {other:?}"),
+        };
+
+        let click_in_tree = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        dispatch(&mut state, &commands, Action::Mouse(click_in_tree), size());
+
+        match &state.mode {
+            state::Mode::Copy(copy) => assert_eq!(*copy, before, "the click changed nothing"),
+            other => panic!("expected Mode::Copy, got {other:?}"),
         }
     }
 
@@ -400,7 +557,7 @@ mod tests {
         let (commands, mut receiver) = commands();
         let mut state = running(&["build"]);
 
-        dispatch(&mut state, &commands, Action::Quit);
+        dispatch(&mut state, &commands, Action::Quit, size());
 
         assert!(state.should_quit);
         state.apply(&summary_event(&[], &["build"]), Instant::now());
@@ -423,7 +580,7 @@ mod tests {
         let mut state = running(&["build"]);
         state.apply(&summary_event(&["build"], &[]), Instant::now());
 
-        dispatch(&mut state, &commands, Action::Quit);
+        dispatch(&mut state, &commands, Action::Quit, size());
 
         assert!(state.should_quit);
         assert_eq!(state.exit_outcome(), Some(1));
@@ -436,7 +593,7 @@ mod tests {
         let (commands, mut receiver) = commands();
         let mut state = running(&["build"]);
 
-        dispatch(&mut state, &commands, Action::CancelOrQuit);
+        dispatch(&mut state, &commands, Action::CancelOrQuit, size());
 
         assert!(!state.should_quit, "cancelling is not quitting");
         assert!(matches!(
@@ -456,7 +613,7 @@ mod tests {
         state.apply(&summary_event(&[], &["build"]), Instant::now());
         assert_eq!(state.exit_outcome(), Some(0), "the run went green first");
 
-        dispatch(&mut state, &commands, Action::CancelOrQuit);
+        dispatch(&mut state, &commands, Action::CancelOrQuit, size());
 
         assert!(state.should_quit);
         assert_eq!(state.exit_outcome(), None);
@@ -471,7 +628,7 @@ mod tests {
         let mut state = running(&["build"]);
         state.apply(&summary_event(&[], &["build"]), Instant::now());
 
-        dispatch(&mut state, &commands, Action::CancelRun);
+        dispatch(&mut state, &commands, Action::CancelRun, size());
 
         assert!(!state.should_quit);
         assert_eq!(state.exit_outcome(), Some(0));
@@ -487,8 +644,13 @@ mod tests {
         state.select(1);
         state.apply(&summary_event(&[], &["build"]), Instant::now());
 
-        dispatch(&mut state, &commands, Action::Rerun { force: false });
-        dispatch(&mut state, &commands, Action::Rerun { force: true });
+        dispatch(
+            &mut state,
+            &commands,
+            Action::Rerun { force: false },
+            size(),
+        );
+        dispatch(&mut state, &commands, Action::Rerun { force: true }, size());
 
         match &sent(&mut receiver)[..] {
             [
@@ -515,7 +677,12 @@ mod tests {
         let (commands, _receiver) = commands();
         let mut state = running(&["build"]);
 
-        dispatch(&mut state, &commands, Action::Rerun { force: false });
+        dispatch(
+            &mut state,
+            &commands,
+            Action::Rerun { force: false },
+            size(),
+        );
 
         state.apply(&summary_event(&[], &[]), Instant::now());
         assert_eq!(state.exit_outcome(), None);
@@ -527,7 +694,12 @@ mod tests {
         let (commands, mut receiver) = commands();
         let mut state = AppState::new("build", false);
 
-        dispatch(&mut state, &commands, Action::Rerun { force: false });
+        dispatch(
+            &mut state,
+            &commands,
+            Action::Rerun { force: false },
+            size(),
+        );
 
         assert!(sent(&mut receiver).is_empty());
     }
@@ -539,9 +711,9 @@ mod tests {
         let (commands, mut receiver) = commands();
         let mut state = AppState::new("build", false);
 
-        dispatch(&mut state, &commands, Action::ToggleWatch);
+        dispatch(&mut state, &commands, Action::ToggleWatch, size());
         assert!(state.watch_enabled);
-        dispatch(&mut state, &commands, Action::ToggleWatch);
+        dispatch(&mut state, &commands, Action::ToggleWatch, size());
         assert!(!state.watch_enabled);
 
         assert!(matches!(
@@ -564,13 +736,13 @@ mod tests {
             state.apply(&output("codegen", &format!("line {index}")), now);
         }
 
-        dispatch(&mut state, &commands, Action::ScrollUp(2));
+        dispatch(&mut state, &commands, Action::ScrollUp(2), size());
         assert!(matches!(
             state.logs["codegen"].scroll(),
             logs::Scroll::Paused { offset: 2 }
         ));
 
-        dispatch(&mut state, &commands, Action::FollowTail);
+        dispatch(&mut state, &commands, Action::FollowTail, size());
         assert!(matches!(
             state.logs["codegen"].scroll(),
             logs::Scroll::Following

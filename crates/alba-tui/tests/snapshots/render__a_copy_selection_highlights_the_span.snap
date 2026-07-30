@@ -1,0 +1,29 @@
+---
+source: crates/alba-tui/tests/render.rs
+assertion_line: 257
+expression: "drawn(&state, 80, 24)"
+---
+"┌─ alba · run build ── ▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 0/1 · 0.0s ──────────────────────────────┐"
+"│BEAMS                         │logs · build                                   │"
+"│ ▶ build                 0.0s…│alpha                                          │"
+"│                              │bravo                                          │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│✔ 0  ⚡ 0  ✖ 0  ○ 0           │● following                                    │" Hidden by multi-width symbols: [(7, " ")]
+"└─ hjkl/arrows move · v anchor · y copy · Esc cancel ──────────────────────────┘"

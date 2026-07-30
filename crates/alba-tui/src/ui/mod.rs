@@ -14,7 +14,7 @@
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -55,7 +55,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // so the block's own border fill supplies the rest of the dashes.
     let outer = Block::bordered()
         .title_top(Line::from(format!("─ {} ", header::text(state, now))))
-        .title_bottom(Line::from(format!("─ {} ", bottom_bar(&state.mode))));
+        .title_bottom(Line::from(format!("─ {} ", bottom_bar(state))));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -72,19 +72,28 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     logpane::draw(frame, panes[1], state);
 }
 
-/// The always-available actions for the current mode. Only `Mode::Normal`
-/// and `Mode::Search` have a keymap here: Copy, Graph, and Help belong to
-/// the tasks that give those modes behaviour, so they fall back to the
-/// one action that always applies rather than this task guessing at
-/// their eventual keymaps.
+/// The always-available actions for the current mode. Only `Mode::Normal`,
+/// `Mode::Search`, and `Mode::Copy` have a keymap here: Graph and Help
+/// belong to the tasks that give those modes behaviour, so they fall
+/// back to the one action that always applies rather than this task
+/// guessing at their eventual keymaps.
+///
+/// A copy just made (`AppState::last_copy_result`) takes over the bar
+/// entirely for the one draw it is shown on, regardless of mode — by the
+/// time it is set, `y` (or a mouse release) has already put the session
+/// back in `Mode::Normal`, so there is nothing else worth advertising
+/// that one frame.
 ///
 /// `n`/`N` live in the Normal-mode bar rather than Search's: they step
 /// the *committed* search (`AppState::last_search`), a Normal-mode
 /// binding (`input.rs`) the same way `j`/`k` are — advertising them
 /// while still composing a query would claim a key that, at that point,
 /// only ever types a character into it.
-fn bottom_bar(mode: &Mode) -> String {
-    match mode {
+fn bottom_bar(state: &AppState) -> String {
+    if let Some(result) = state.last_copy_result {
+        return format!("{result} · q quit");
+    }
+    match &state.mode {
         Mode::Normal => {
             "q quit · r rerun · f force · c cancel · w watch · n next · N prev".to_string()
         }
@@ -96,7 +105,8 @@ fn bottom_bar(mode: &Mode) -> String {
                 search.query
             )
         }
-        Mode::Copy | Mode::Graph | Mode::Help => "q quit".to_string(),
+        Mode::Copy(_) => "hjkl/arrows move · v anchor · y copy · Esc cancel".to_string(),
+        Mode::Graph | Mode::Help => "q quit".to_string(),
     }
 }
 
@@ -106,4 +116,49 @@ fn bottom_bar(mode: &Mode) -> String {
 /// the wrong way for this crate to import it.
 fn format_duration(duration: Duration) -> String {
     format!("{:.1}s", duration.as_secs_f64())
+}
+
+/// The log pane's own content rectangle — inside the outer border, past
+/// the tree pane and its divider, and inside the title/footer rows
+/// `logpane::draw` reserves — for a terminal of `width` × `height`
+/// cells. `None` below the too-small floor, where `draw` paints nothing
+/// but its one message and there is no pane to hit-test against.
+///
+/// Copy mode's mouse handling (`lib::dispatch`) asks this rather than
+/// re-deriving the layout its own way, so a click can never drift out of
+/// sync with what `draw` actually painted: both go through the exact
+/// same `Layout` calls.
+pub fn log_pane_content_area(width: u16, height: u16) -> Option<Rect> {
+    if width < MIN_WIDTH || height < MIN_HEIGHT {
+        return None;
+    }
+    let inner = Block::bordered().inner(Rect::new(0, 0, width, height));
+    let panes =
+        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(inner);
+    let rows = Layout::vertical([
+        Constraint::Length(1), // "logs · {beam}" title
+        Constraint::Min(0),    // output
+        Constraint::Length(1), // follow state
+    ])
+    .split(panes[1]);
+    Some(rows[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_pane_content_area_sits_past_the_tree_and_its_borders() {
+        // Outer border: 1 cell each side. Tree pane + divider: 31
+        // columns. Title row: 1 line. Footer row: 1 line.
+        let area = log_pane_content_area(80, 24).expect("80x24 clears the floor");
+        assert_eq!(area, Rect::new(32, 2, 47, 20));
+    }
+
+    #[test]
+    fn log_pane_content_area_is_none_below_the_floor() {
+        assert_eq!(log_pane_content_area(MIN_WIDTH - 1, 24), None);
+        assert_eq!(log_pane_content_area(80, MIN_HEIGHT - 1), None);
+    }
 }

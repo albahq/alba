@@ -151,6 +151,7 @@ fn action_in_modal_mode(event: &Event) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::copy::CopyState;
     use crate::search::SearchState;
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
@@ -253,7 +254,7 @@ mod tests {
         for mode in [
             Mode::Normal,
             Mode::Search(SearchState::new()),
-            Mode::Copy,
+            Mode::Copy(CopyState::new_at(0)),
             Mode::Graph,
             Mode::Help,
         ] {
@@ -412,7 +413,7 @@ mod tests {
     fn mouse_wheel_passes_through_in_modal_modes() {
         for mode in [
             Mode::Search(SearchState::new()),
-            Mode::Copy,
+            Mode::Copy(CopyState::new_at(0)),
             Mode::Graph,
             Mode::Help,
         ] {
@@ -450,7 +451,7 @@ mod tests {
     fn mouse_click_passes_through_in_modal_modes() {
         for mode in [
             Mode::Search(SearchState::new()),
-            Mode::Copy,
+            Mode::Copy(CopyState::new_at(0)),
             Mode::Graph,
             Mode::Help,
         ] {
@@ -483,7 +484,7 @@ mod tests {
         for mode in [
             Mode::Normal,
             Mode::Search(SearchState::new()),
-            Mode::Copy,
+            Mode::Copy(CopyState::new_at(0)),
             Mode::Graph,
             Mode::Help,
         ] {
@@ -508,7 +509,7 @@ mod tests {
         for mode in [
             Mode::Normal,
             Mode::Search(SearchState::new()),
-            Mode::Copy,
+            Mode::Copy(CopyState::new_at(0)),
             Mode::Graph,
             Mode::Help,
         ] {

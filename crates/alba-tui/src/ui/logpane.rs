@@ -8,6 +8,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::copy;
 use crate::logs::Scroll;
 use crate::state::{AppState, DIAGNOSTIC_LOG, Mode, Phase};
 
@@ -50,9 +51,24 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         .map(|buffer| buffer.view(body_height))
         .unwrap_or_default()
         .into_iter()
-        .map(|text| match query {
-            Some(query) if !query.is_empty() => highlighted_line(&text, query),
-            _ => Line::from(text),
+        .enumerate()
+        .map(|(row, text)| {
+            // Copy mode's selection takes priority over the search
+            // highlight on whichever rows it covers — the two are not
+            // meant to be shown blended, and a row is never in both a
+            // committed search's matches and mid-selection in a way a
+            // reader needs both marked on the same line.
+            if let (Mode::Copy(selection), Some(buffer)) = (&state.mode, buffer) {
+                let covered = copy::line_for_pane_row(buffer, body_height, row)
+                    .and_then(|index| selection.covers_line(index, text.chars().count()));
+                if let Some((from, to)) = covered {
+                    return copy_selected_line(&text, from, to);
+                }
+            }
+            match query {
+                Some(query) if !query.is_empty() => highlighted_line(&text, query),
+                _ => Line::from(text),
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows[1]);
@@ -100,6 +116,30 @@ fn highlighted_line(text: &str, query: &str) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Marks the inclusive character range `[from, to]` of `text` with a
+/// reversed style — copy mode's selection highlight. Slices by *char*
+/// index throughout, never by byte offset: a selection dragged across a
+/// multi-byte character must not cut it in half.
+fn copy_selected_line(text: &str, from: usize, to: usize) -> Line<'static> {
+    let chars: Vec<char> = text.chars().collect();
+    let from = from.min(chars.len());
+    let end = (to + 1).min(chars.len());
+    let mut spans = Vec::new();
+    if from > 0 {
+        spans.push(Span::raw(chars[..from].iter().collect::<String>()));
+    }
+    if end > from {
+        spans.push(Span::styled(
+            chars[from..end].iter().collect::<String>(),
+            Style::new().reversed(),
+        ));
+    }
+    if end < chars.len() {
+        spans.push(Span::raw(chars[end..].iter().collect::<String>()));
+    }
+    Line::from(spans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +165,47 @@ mod tests {
     fn a_line_with_no_match_is_unstyled() {
         let line = highlighted_line("warning: unused import", "error");
         assert_eq!(line, Line::from("warning: unused import"));
+    }
+
+    /// `TestBackend::to_string()` drops styles the same way it does for
+    /// search — this unit test over the span-building function is what
+    /// actually pins the reversed style; the snapshot in `tests/render.rs`
+    /// pins layout and the bottom bar instead.
+    #[test]
+    fn a_copy_selection_marks_the_covered_chars() {
+        let line = copy_selected_line("Compiling api", 0, 3);
+        assert_eq!(
+            line,
+            Line::from(vec![
+                Span::styled("Comp", Style::new().reversed()),
+                Span::raw("iling api"),
+            ])
+        );
+    }
+
+    /// A selection covering the whole line has nothing before or after
+    /// to leave as a plain span.
+    #[test]
+    fn a_full_line_selection_has_a_single_styled_span() {
+        let line = copy_selected_line("bravo", 0, 4);
+        assert_eq!(
+            line,
+            Line::from(vec![Span::styled("bravo", Style::new().reversed())])
+        );
+    }
+
+    /// Marking must slice by character index, not byte offset — a
+    /// multi-byte character split at the wrong boundary would panic.
+    #[test]
+    fn copy_selection_marking_does_not_panic_on_multibyte_characters() {
+        let line = copy_selected_line("héllo wörld", 1, 3);
+        assert_eq!(
+            line,
+            Line::from(vec![
+                Span::raw("h"),
+                Span::styled("éll", Style::new().reversed()),
+                Span::raw("o wörld"),
+            ])
+        );
     }
 }

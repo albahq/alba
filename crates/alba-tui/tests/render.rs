@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use alba_core::BeamId;
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::{OutputLine, Stream};
-use alba_tui::state::AppState;
+use alba_tui::copy::CopyState;
+use alba_tui::state::{AppState, Mode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -224,6 +225,34 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
         state.handle_modal_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
     state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}
+
+/// Copy mode's selection renders as part of the frame. `TestBackend`
+/// drops styles, so this pins layout and the bottom bar's own keymap
+/// text — the reversed span itself is pinned by the unit test over
+/// `logpane::copy_selected_line` instead (`TestBackend::to_string()`
+/// cannot see it either way).
+#[test]
+fn a_copy_selection_highlights_the_span() {
+    let mut state = AppState::new("build", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            target: id("build"),
+            beams: vec![id("build")],
+            edges: vec![],
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(&output("build", "alpha"), now);
+    state.apply(&output("build", "bravo"), now);
+
+    let mut copy = CopyState::new_at(0);
+    copy.cursor = (1, 2);
+    state.mode = Mode::Copy(copy);
 
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }

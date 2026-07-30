@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 
+use crate::copy::CopyState;
 use crate::logs::LogBuffer;
 use crate::search::SearchState;
 
@@ -68,7 +69,7 @@ pub enum Phase {
 pub enum Mode {
     Normal,
     Search(SearchState),
-    Copy,
+    Copy(CopyState),
     Graph,
     Help,
 }
@@ -101,6 +102,11 @@ pub struct AppState {
     /// the next search session (`enter_search`) starts a fresh, empty
     /// one and replaces it.
     pub last_search: Option<CommittedSearch>,
+    /// What `y` (or a mouse release) last put on the clipboard, shown in
+    /// the bottom bar for exactly the one draw that follows — `run`'s
+    /// loop clears it right after that draw, which is what keeps it from
+    /// lingering past the frame it was meant for.
+    pub last_copy_result: Option<&'static str>,
     pub last_summary: Option<RunSummary>,
     pub should_quit: bool,
     /// The code the last run earned, or `None` when no run may vouch.
@@ -130,6 +136,7 @@ impl AppState {
             watch_enabled,
             mode: Mode::Normal,
             last_search: None,
+            last_copy_result: None,
             last_summary: None,
             should_quit: false,
             outcome: None,
@@ -298,6 +305,21 @@ impl AppState {
         self.mode = Mode::Search(SearchState::new());
     }
 
+    /// `v`: opens copy mode, anchored at whatever line the log pane's
+    /// current scroll window shows at its own top — `pane_height` is the
+    /// log pane's content height for the terminal size `dispatch` has in
+    /// hand, the one piece of screen geometry `AppState` itself does not
+    /// otherwise need to know.
+    pub fn enter_copy(&mut self, pane_height: usize) {
+        let beam = self.current_beam_id();
+        let top_line = self
+            .logs
+            .get(&beam)
+            .map(|buffer| crate::copy::top_visible_line(buffer, pane_height))
+            .unwrap_or(0);
+        self.mode = Mode::Copy(CopyState::new_at(top_line));
+    }
+
     /// `Esc`: leaves whatever modal mode is active. Search stashes its
     /// state into `last_search` first, tagged with the beam it ran
     /// against; the other modal modes carry no payload, so there is
@@ -312,12 +334,13 @@ impl AppState {
     }
 
     /// The modal keymap's entry point: routes a key event to whichever
-    /// mode is active. Search is the only one with a handler so far —
-    /// Copy, Graph, and Help belong to the tasks that give those modes
-    /// behaviour.
+    /// mode is active. Graph and Help belong to the tasks that give
+    /// those modes behaviour.
     pub fn handle_modal_key(&mut self, key: KeyEvent) {
-        if matches!(self.mode, Mode::Search(_)) {
-            self.handle_search_key(key);
+        match self.mode {
+            Mode::Search(_) => self.handle_search_key(key),
+            Mode::Copy(_) => self.handle_copy_key(key),
+            _ => {}
         }
     }
 
@@ -353,6 +376,93 @@ impl AppState {
         }
         self.sync_search_scroll(&search);
         self.mode = Mode::Search(search);
+    }
+
+    /// Copy mode's own keymap: arrows and `hjkl` move the cursor, `v`
+    /// re-anchors the selection at wherever the cursor currently sits
+    /// (starting a fresh span from there), and `y` copies the selected
+    /// text and returns to Normal — `Esc` leaving without copying is
+    /// `leave_mode`'s job, same as every other modal mode.
+    fn handle_copy_key(&mut self, key: KeyEvent) {
+        let Mode::Copy(mut copy) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            unreachable!("handle_modal_key only calls this while Mode::Copy is active")
+        };
+        let beam = self.current_beam_id();
+        match key.code {
+            KeyCode::Char('v') => copy.anchor = copy.cursor,
+            KeyCode::Char('y') => {
+                if let Some(buffer) = self.logs.get(&beam) {
+                    let text = copy.selected_text(buffer);
+                    self.last_copy_result = Some(crate::copy::copy_to_clipboard(&text));
+                }
+                return; // stays Mode::Normal, already replaced above
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.move_copy_cursor(&mut copy, -1, 0),
+            KeyCode::Down | KeyCode::Char('j') => self.move_copy_cursor(&mut copy, 1, 0),
+            KeyCode::Left | KeyCode::Char('h') => self.move_copy_cursor(&mut copy, 0, -1),
+            KeyCode::Right | KeyCode::Char('l') => self.move_copy_cursor(&mut copy, 0, 1),
+            _ => {}
+        }
+        self.mode = Mode::Copy(copy);
+    }
+
+    fn move_copy_cursor(&self, copy: &mut CopyState, dl: isize, dc: isize) {
+        let beam = self.current_beam_id();
+        if let Some(buffer) = self.logs.get(&beam) {
+            copy.move_cursor(dl, dc, buffer);
+        }
+    }
+
+    /// Copy mode's mouse entry point: `pane_row`/`pane_col` are already
+    /// hit-tested and translated into the log pane's own content area by
+    /// the caller (`lib::dispatch`, the layer that knows the terminal's
+    /// current geometry) — `AppState` itself never touches the screen.
+    /// A drag start (`Down`) anchors a fresh selection at the clicked
+    /// line, a `Drag` extends the cursor to it, and releasing (`Up`)
+    /// copies the selection and returns to Normal, mirroring `y`. Silent
+    /// outside `Mode::Copy`, and when the row does not land on a real
+    /// buffer line (the truncation marker, or below the last line).
+    pub fn handle_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        pane_height: usize,
+        pane_row: usize,
+        pane_col: usize,
+    ) {
+        if !matches!(self.mode, Mode::Copy(_)) {
+            return;
+        }
+        let beam = self.current_beam_id();
+        let Some(line) = self
+            .logs
+            .get(&beam)
+            .and_then(|buffer| crate::copy::line_for_pane_row(buffer, pane_height, pane_row))
+        else {
+            return;
+        };
+        let Mode::Copy(mut copy) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            unreachable!("checked above")
+        };
+        match kind {
+            MouseEventKind::Down(_) => {
+                copy.anchor = (line, pane_col);
+                copy.cursor = (line, pane_col);
+                self.mode = Mode::Copy(copy);
+            }
+            MouseEventKind::Drag(_) => {
+                copy.cursor = (line, pane_col);
+                self.mode = Mode::Copy(copy);
+            }
+            MouseEventKind::Up(_) => {
+                copy.cursor = (line, pane_col);
+                if let Some(buffer) = self.logs.get(&beam) {
+                    let text = copy.selected_text(buffer);
+                    self.last_copy_result = Some(crate::copy::copy_to_clipboard(&text));
+                }
+                // stays Mode::Normal
+            }
+            _ => self.mode = Mode::Copy(copy),
+        }
     }
 
     /// `n`: the Normal-mode binding that steps the *committed* search
