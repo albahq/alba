@@ -3,7 +3,17 @@
 //! This crate is deliberately at the bottom of Alba's dependency graph: it
 //! does not depend on `alba-core` or `alba-syntax`. A [`CommandSpec`]
 //! carries an already-rendered command line — template rendering happens
-//! upstream, in the engine, before a command ever reaches an [`Executor`].
+//! upstream, in the engine, before a command ever reaches an [`ExecSession`].
+//!
+//! The [`ExecSession`] a beam runs in is the per-beam unit: [`Executor::open`]
+//! and [`ExecSession::close`] bracket the whole set of commands one beam
+//! declares, so a session can hold state — a running container, a plugin
+//! process — that outlives any single command and is shared across the
+//! beam's commands. The engine owns the bracket: it opens exactly one
+//! session per beam before its first command, runs every command through
+//! it, and closes it once, in every case (success, failure, or
+//! cancellation) — cleanup is the engine's responsibility, never a
+//! session's own.
 //!
 //! [`EmbeddedShellExecutor`] runs commands through `alba-shell`, Alba's own
 //! POSIX-like interpreter, in-process — the default. [`SystemShellExecutor`]
@@ -26,17 +36,44 @@ pub use embedded::EmbeddedShellExecutor;
 pub use shell::SystemShellExecutor;
 
 #[cfg(feature = "test-util")]
-pub use fake::{FakeBehavior, FakeExecutor};
+pub use fake::{FakeBehavior, FakeEvent, FakeExecutor};
 
-/// Runs a single already-rendered command to completion.
+/// Opens the session a beam's commands run in.
 ///
 /// Implementations are used behind `Arc<dyn Executor>` and must be
-/// `Send + Sync`; `execute` takes `&self` so a single executor instance can
-/// run many commands concurrently. See [`ExecContext::cancel`] for the
-/// cancellation contract, including its per-platform limits.
+/// `Send + Sync`; `open` takes `&self` so a single executor instance can
+/// open many sessions concurrently, one per beam. See [`ExecContext::cancel`]
+/// for the cancellation contract, including its per-platform limits.
 #[async_trait::async_trait]
 pub trait Executor: Send + Sync {
-    async fn execute(&self, cmd: CommandSpec, ctx: ExecContext) -> Result<ExecResult, ExecError>;
+    async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError>;
+}
+
+/// The per-beam unit a session's commands run in: whatever state a beam
+/// needs across its whole `run` list — a container, a plugin process —
+/// lives here, opened once before the first command and closed once after
+/// the last (or after whichever command failed or was cancelled).
+#[async_trait::async_trait]
+pub trait ExecSession: Send {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError>;
+    async fn close(self: Box<Self>) -> Result<(), ExecError>;
+}
+
+/// Everything a session needs to exist before its first command: the
+/// beam's label (names containers and plugin processes), its directory,
+/// the executor options as JSON (the engine serializes `ExecutorKind` into
+/// this; `Null` for the shell executors), an output channel for setup-time
+/// lines (an image pull), and the run's cancellation token.
+pub struct BeamContext {
+    pub beam: String,
+    pub dir: PathBuf,
+    pub options: serde_json::Value,
+    pub output: tokio::sync::mpsc::UnboundedSender<OutputLine>,
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 /// One already-rendered command line, ready to hand to a shell.

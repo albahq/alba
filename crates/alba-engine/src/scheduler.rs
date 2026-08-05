@@ -48,7 +48,7 @@ use alba_core::{
     Beam, BeamId, CoreError, ExecutorKind, Project, execution_subgraph, expand_globs,
     outputs_satisfied, render_template,
 };
-use alba_executors::{CommandSpec, ExecContext, Executor, OutputLine, Stream};
+use alba_executors::{BeamContext, CommandSpec, ExecContext, Executor, OutputLine, Stream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
@@ -124,6 +124,16 @@ fn executor_label(kind: &ExecutorKind) -> &'static str {
         ExecutorKind::Docker { .. } => {
             unreachable!("docker executor is rejected during validation, before scheduling")
         }
+    }
+}
+
+/// What a session's `BeamContext.options` carries for this beam's kind.
+/// The shell executors take no options; docker and plugin beams never get
+/// here yet (rejected in `plan`), refined when their dispatch lands.
+fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
+    match kind {
+        ExecutorKind::Shell | ExecutorKind::SystemShell => serde_json::Value::Null,
+        ExecutorKind::Docker { .. } => serde_json::Value::Null,
     }
 }
 
@@ -832,20 +842,45 @@ fn render(beam: &Beam, args: &[String]) -> Result<RenderedBeam, EngineError> {
 /// own fallback for a child with no discrete exit code.
 const NO_EXIT_CODE: i32 = -1;
 
-/// Runs the beam's commands one after another, stopping at the first
-/// failure, and classifies the outcome.
+/// Opens the beam's session, runs its commands one after another through
+/// it, stopping at the first failure, and closes the session — in every
+/// case, whether the commands succeeded, failed, or were cancelled.
 ///
 /// A command that could not be spawned at all is that beam's failure, not
 /// the run's: a missing shell or a `cwd` that does not exist is a per-beam
 /// problem, which is exactly what `keep_going` and `allow_failure` are
-/// about. The executor's message would otherwise be lost, so it is emitted
-/// as a stderr line first — the CLI already renders those where the user
-/// is looking.
+/// about. Likewise for a session that could not be opened at all — no
+/// runtime, a missing image. The executor's message would otherwise be
+/// lost, so it is emitted as a stderr line first — the CLI already renders
+/// those where the user is looking.
 async fn run_commands(
     task: &BeamTask,
     plan: &RenderedBeam,
     output: &UnboundedSender<OutputLine>,
 ) -> BeamStatus {
+    let context = BeamContext {
+        beam: task.beam.id.0.clone(),
+        dir: task.beam.dir.clone(),
+        options: executor_options(&task.beam.executor),
+        output: output.clone(),
+        cancel: task.cancel.clone(),
+    };
+    let mut session = match task.executor.open(context).await {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = output.send(OutputLine {
+                stream: Stream::Stderr,
+                text: error.to_string(),
+            });
+            return if task.cancel.is_cancelled() {
+                BeamStatus::Cancelled
+            } else {
+                failure_status(task)
+            };
+        }
+    };
+
+    let mut status = BeamStatus::Succeeded;
     for command in &plan.commands {
         let spec = CommandSpec {
             command: command.clone(),
@@ -857,7 +892,7 @@ async fn run_commands(
             cancel: task.cancel.clone(),
         };
 
-        let exit_code = match task.executor.execute(spec, context).await {
+        let exit_code = match session.execute(spec, context).await {
             Ok(result) if result.exit_code == 0 => continue,
             Ok(result) => result.exit_code,
             Err(error) => {
@@ -873,15 +908,26 @@ async fn run_commands(
         // reserved to mean "was killed" (`-1` is a legitimate one on
         // windows), so the token — not the code — is what tells a
         // cancellation apart from a genuine failure.
-        return if task.cancel.is_cancelled() {
+        status = if task.cancel.is_cancelled() {
             BeamStatus::Cancelled
         } else if task.beam.allow_failure {
             BeamStatus::FailedAllowed { exit_code }
         } else {
             BeamStatus::Failed { exit_code }
         };
+        break;
     }
-    BeamStatus::Succeeded
+
+    // Guaranteed cleanup: success, failure, and cancellation all pass
+    // here. A close failure is a notice, never a verdict change — the
+    // commands' own outcome is already decided.
+    if let Err(error) = session.close().await {
+        let _ = output.send(OutputLine {
+            stream: Stream::Stderr,
+            text: format!("session close: {error}"),
+        });
+    }
+    status
 }
 
 /// Relabels an executor's output lines as this beam's output events until

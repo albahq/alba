@@ -6,7 +6,10 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead};
 use tokio::process::{Child, Command};
 
-use crate::{CommandSpec, ExecContext, ExecError, ExecResult, Executor, OutputLine, Stream};
+use crate::{
+    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
+    OutputLine, Stream,
+};
 
 /// How long to wait, after sending the platform's "please stop" signal,
 /// before escalating to a forceful kill.
@@ -38,7 +41,23 @@ pub struct SystemShellExecutor;
 
 #[async_trait::async_trait]
 impl Executor for SystemShellExecutor {
-    async fn execute(&self, cmd: CommandSpec, ctx: ExecContext) -> Result<ExecResult, ExecError> {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(SystemShellSession))
+    }
+}
+
+/// The host shell needs no state across a beam's commands: each one is
+/// spawned as its own independent child process, so `open`/`close` are
+/// trivial.
+struct SystemShellSession;
+
+#[async_trait::async_trait]
+impl ExecSession for SystemShellSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
         let mut child = build_command(&cmd).spawn().map_err(|error| ExecError {
             message: format!("failed to spawn `{}`: {error}", cmd.command),
         })?;
@@ -85,6 +104,10 @@ impl Executor for SystemShellExecutor {
             exit_code: status.code().unwrap_or(-1),
         })
     }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
+    }
 }
 
 fn build_command(cmd: &CommandSpec) -> Command {
@@ -123,7 +146,7 @@ fn build_command(cmd: &CommandSpec) -> Command {
 /// windows), sending one [`OutputLine`] per line. A final line with no
 /// trailing newline is still emitted; lines of any length are supported
 /// since the buffer grows as needed rather than being capped.
-async fn stream_lines<R>(
+pub(crate) async fn stream_lines<R>(
     reader: R,
     stream: Stream,
     output: tokio::sync::mpsc::UnboundedSender<OutputLine>,

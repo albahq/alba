@@ -6,8 +6,22 @@
 //! one case here that does spawn an external program, to prove the
 //! process environment (in particular `PATH`) reaches it.
 
-use alba_executors::{CommandSpec, EmbeddedShellExecutor, ExecContext, Executor, Stream};
+use alba_executors::{
+    BeamContext, CommandSpec, EmbeddedShellExecutor, ExecContext, Executor, Stream,
+};
 use tokio_util::sync::CancellationToken;
+
+async fn open_session() -> Box<dyn alba_executors::ExecSession> {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let context = BeamContext {
+        beam: "test".to_string(),
+        dir: std::env::current_dir().unwrap(),
+        options: serde_json::Value::Null,
+        output: tx,
+        cancel: CancellationToken::new(),
+    };
+    EmbeddedShellExecutor.open(context).await.unwrap()
+}
 
 async fn exec(
     command: &str,
@@ -23,11 +37,13 @@ async fn exec(
         output: tx,
         cancel: CancellationToken::new(),
     };
-    let result = EmbeddedShellExecutor
+    let mut session = open_session().await;
+    let result = session
         .execute(spec, ctx)
         .await
         .map(|r| r.exit_code)
         .map_err(|e| e.to_string());
+    session.close().await.unwrap();
     let mut lines = Vec::new();
     while let Ok(line) = rx.try_recv() {
         lines.push((line.stream, line.text));
@@ -140,7 +156,8 @@ async fn cancel_a_run_a_stage_outlives() -> Duration {
         cancel: cancel.clone(),
     };
 
-    let handle = tokio::spawn(async move { EmbeddedShellExecutor.execute(spec, ctx).await });
+    let mut session = open_session().await;
+    let handle = tokio::spawn(async move { session.execute(spec, ctx).await });
     tokio::time::sleep(Duration::from_millis(500)).await;
     let cancelled_at = Instant::now();
     cancel.cancel();

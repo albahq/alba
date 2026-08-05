@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use alba_core::{BeamId, load_str};
 use alba_engine::{BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, run};
 use alba_executors::{
-    CommandSpec, ExecContext, ExecError, ExecResult, Executor, FakeBehavior, FakeExecutor,
-    OutputLine, Stream,
+    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
+    FakeBehavior, FakeEvent, FakeExecutor, OutputLine, Stream,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -476,13 +476,30 @@ struct SpawnFailureExecutor;
 
 #[async_trait::async_trait]
 impl Executor for SpawnFailureExecutor {
-    async fn execute(&self, cmd: CommandSpec, _ctx: ExecContext) -> Result<ExecResult, ExecError> {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(SpawnFailureSession))
+    }
+}
+
+struct SpawnFailureSession;
+
+#[async_trait::async_trait]
+impl ExecSession for SpawnFailureSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        _ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
         if cmd.command.contains("broken") {
             return Err(ExecError {
                 message: format!("failed to spawn `{}`", cmd.command),
             });
         }
         Ok(ExecResult { exit_code: 0 })
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
     }
 }
 
@@ -890,4 +907,147 @@ beam build { needs [helper] run "step build" }
         "beam `helper` declares parameters, but only the target beam can be given any"
     );
     assert!(commands(&executor).is_empty());
+}
+
+/// A beam's single session brackets every one of its commands: `open` runs
+/// once before the first command, `execute` runs once per command, and
+/// `close` runs once after the last — never interleaved with another
+/// beam's session, since this beam declares no dependents to race against.
+#[tokio::test]
+async fn a_beam_opens_one_session_runs_its_commands_in_it_and_closes_it() {
+    const SOURCE: &str = r#"
+beam build { run ["echo a", "echo b"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    assert_eq!(ids(&outcome.summary().succeeded), ["build"]);
+    assert_eq!(
+        executor.events(),
+        vec![
+            FakeEvent::Opened {
+                beam: "build".to_string(),
+                options: serde_json::Value::Null,
+            },
+            FakeEvent::Executed {
+                command: "echo a".to_string(),
+            },
+            FakeEvent::Executed {
+                command: "echo b".to_string(),
+            },
+            FakeEvent::Closed {
+                beam: "build".to_string(),
+            },
+        ]
+    );
+}
+
+/// `close` is guaranteed cleanup, not a happy-path courtesy: a beam whose
+/// first command fails must still close its session, and the commands after
+/// the failing one must never reach it.
+#[tokio::test]
+async fn the_session_closes_even_when_a_command_fails() {
+    const SOURCE: &str = r#"
+beam build { run ["boom", "echo never"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("boom", behavior(1, 0)));
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    assert_eq!(ids(&outcome.summary().failed), ["build"]);
+    let events = executor.events();
+    assert!(
+        matches!(events.last(), Some(FakeEvent::Closed { beam }) if beam == "build"),
+        "the session must still close after the failing command: {events:?}"
+    );
+    assert!(
+        !events.iter().any(
+            |event| matches!(event, FakeEvent::Executed { command } if command == "echo never")
+        ),
+        "the command after the failing one must never run: {events:?}"
+    );
+}
+
+/// The same guarantee under cancellation: a session opened for a beam whose
+/// only command is cancelled mid-flight must still close.
+#[tokio::test]
+async fn the_session_closes_when_the_run_is_cancelled_mid_command() {
+    const SOURCE: &str = r#"
+beam build { run "slow" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("slow", behavior(0, 30_000)));
+    let cancel = CancellationToken::new();
+
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+
+    let outcome =
+        run_target_with_cancel(SOURCE, "build", options(2, false), executor.clone(), cancel).await;
+
+    assert_eq!(ids(&outcome.summary().cancelled), ["build"]);
+    let events = executor.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Closed { beam } if beam == "build")),
+        "the session must still close after cancellation: {events:?}"
+    );
+}
+
+/// An executor that cannot even open a session for this beam — no runtime,
+/// a missing image — is that beam's own failure, reported exactly like a
+/// command that could not be spawned: a stderr line carrying the message,
+/// then `Failed { exit_code: -1 }`. No command ever reaches a session that
+/// was never created, and there is nothing to close.
+#[tokio::test]
+async fn an_open_failure_is_the_beams_failure_with_the_message_on_stderr() {
+    const SOURCE: &str = r#"
+beam build { run "echo a" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().fail_open("build", "no runtime here"));
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed), ["build"]);
+    assert_eq!(summary.exit_code(), 1);
+
+    let events = &outcome.events;
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            RunEvent::BeamFinished { id, status, .. } if id.0 == "build" => Some(status.clone()),
+            _ => None,
+        })
+        .expect("`build` must finish");
+    assert_eq!(finished, BeamStatus::Failed { exit_code: -1 });
+
+    assert!(
+        events.iter().any(
+            |event| matches!(event, RunEvent::BeamOutput { id, line, .. }
+            if id.0 == "build"
+                && line.stream == Stream::Stderr
+                && line.text.contains("no runtime here"))
+        ),
+        "the open failure's message must reach the user as stderr output: {events:?}"
+    );
+
+    let fake_events = executor.events();
+    assert!(
+        !fake_events
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Executed { .. })),
+        "no command may reach a session that was never opened: {fake_events:?}"
+    );
+    assert!(
+        !fake_events
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Closed { .. })),
+        "there is no session to close: {fake_events:?}"
+    );
 }
