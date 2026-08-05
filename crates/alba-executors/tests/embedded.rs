@@ -92,7 +92,7 @@ async fn a_parse_error_is_an_exec_error_carrying_the_diagnostic() {
 }
 
 // The cancellation contract at the level the engine actually consumes:
-// `Executor::execute` must return promptly once the token fires, awaiting
+// `ExecSession::execute` must return promptly once the token fires, awaiting
 // exactly what a real caller awaits.
 
 use std::time::{Duration, Instant};
@@ -136,8 +136,8 @@ fn escaping_descendant_helper() {
 }
 
 /// Runs `<helper> | cat`, cancels it half a second in, and returns how
-/// long `Executor::execute` then took to come back. The producer exits at
-/// once but its descendant keeps the pipe open, so the `cat` stage stays
+/// long `ExecSession::execute` then took to come back. The producer exits
+/// at once but its descendant keeps the pipe open, so the `cat` stage stays
 /// parked in a blocking read the shell can neither abort nor wait out.
 async fn cancel_a_run_a_stage_outlives() -> Duration {
     let helper = std::env::current_exe().unwrap();
