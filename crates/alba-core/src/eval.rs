@@ -65,12 +65,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use alba_syntax::{
-    BeamDecl, BeamRef, BinOp, ExecutorDecl, Expr, File, ParseError, Span, Spanned, StringTemplate,
-    TemplatePart,
+    BeamDecl, BeamRef, BinOp, ExecutorDecl, ExecutorOptionValue, Expr, File, ParseError, Span,
+    Spanned, StringTemplate, TemplatePart,
 };
 
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
-use crate::model::{Beam, BeamId, ExecutorKind, Project, Value};
+use crate::model::{Beam, BeamId, ExecutorKind, OptionValue, Project, Value};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
 const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
@@ -949,47 +949,131 @@ fn build_executor(
         return Ok(ExecutorKind::Shell);
     };
 
-    // Render every option at load time, even ones a given executor kind
-    // doesn't end up using, so a malformed interpolation anywhere in the
-    // block is still caught: executor options are a load-time field.
-    let mut options = HashMap::new();
+    // Render every option at load time, whatever the kind, so a malformed
+    // interpolation anywhere in the block is still caught.
+    let mut options: Vec<(String, Span, OptionValue)> = Vec::new();
     for (key, value) in &decl.options {
-        options.insert(
-            key.value.as_str(),
-            render_load_time_template("executor options", value, lets, params)?,
-        );
+        let rendered = match value {
+            ExecutorOptionValue::Str(template) => OptionValue::Str(render_load_time_template(
+                "executor options",
+                template,
+                lets,
+                params,
+            )?),
+            ExecutorOptionValue::Bool(flag) => OptionValue::Bool(*flag),
+            ExecutorOptionValue::List(templates) => OptionValue::List(
+                templates
+                    .iter()
+                    .map(|t| render_load_time_template("executor options", t, lets, params))
+                    .collect::<Result<_, _>>()?,
+            ),
+        };
+        options.push((key.value.clone(), key.span, rendered));
     }
 
     match decl.name.value.as_str() {
-        "shell" => Ok(ExecutorKind::Shell),
+        "shell" => no_options("shell", &options, decl).map(|()| ExecutorKind::Shell),
         "system_shell" => {
-            if !decl.options.is_empty() {
+            no_options("system_shell", &options, decl).map(|()| ExecutorKind::SystemShell)
+        }
+        "docker" => build_docker(decl, options),
+        other => Ok(ExecutorKind::Plugin {
+            name: other.to_string(),
+            options: options.into_iter().map(|(k, _, v)| (k, v)).collect(),
+        }),
+    }
+}
+
+/// Rejects any option on an executor kind that takes none (`shell`,
+/// `system_shell`).
+fn no_options(
+    name: &str,
+    options: &[(String, Span, OptionValue)],
+    decl: &ExecutorDecl,
+) -> Result<(), CoreError> {
+    if options.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::new(
+            format!("executor `{name}` takes no options"),
+            decl.name.span,
+        ))
+    }
+}
+
+/// Builds `ExecutorKind::Docker` from its already-rendered options:
+/// `image` (required), `volumes` (a list of `host:container` entries), and
+/// `workdir` (an absolute container path).
+fn build_docker(
+    decl: &ExecutorDecl,
+    options: Vec<(String, Span, OptionValue)>,
+) -> Result<ExecutorKind, CoreError> {
+    let mut image = None;
+    let mut volumes = Vec::new();
+    let mut workdir = None;
+    for (key, span, value) in options {
+        match (key.as_str(), value) {
+            ("image", OptionValue::Str(v)) => image = Some(v),
+            ("image", _) => {
                 return Err(CoreError::new(
-                    "executor `system_shell` takes no options".to_string(),
-                    decl.name.span,
+                    "executor `docker` option `image` must be a string".to_string(),
+                    span,
                 ));
             }
-            Ok(ExecutorKind::SystemShell)
-        }
-        "docker" => {
-            let image = options.remove("image").ok_or_else(|| {
-                CoreError::new(
-                    "executor `docker` requires an `image` option".to_string(),
-                    decl.name.span,
-                )
-            })?;
-            Ok(ExecutorKind::Docker { image })
-        }
-        other => {
-            let err = CoreError::new(format!("unknown executor `{other}`"), decl.name.span);
-            Err(
-                match suggest(other, ["shell", "system_shell", "docker"].into_iter()) {
-                    Some(c) => err.with_help(format!("did you mean `{c}`?")),
-                    None => err,
-                },
-            )
+            ("volumes", OptionValue::List(entries)) => {
+                for entry in &entries {
+                    // `rsplit_once` so a windows host path (`C:\cache`)
+                    // keeps its drive colon; only the last `:` splits.
+                    let valid = matches!(entry.rsplit_once(':'), Some((host, path))
+                        if !host.is_empty() && path.starts_with('/'));
+                    if !valid {
+                        return Err(CoreError::new(
+                            format!("invalid volume `{entry}`: expected `host:container`"),
+                            span,
+                        ));
+                    }
+                }
+                volumes = entries;
+            }
+            ("volumes", _) => {
+                return Err(CoreError::new(
+                    "executor `docker` option `volumes` must be a list of strings".to_string(),
+                    span,
+                ));
+            }
+            ("workdir", OptionValue::Str(v)) if v.starts_with('/') => workdir = Some(v),
+            ("workdir", _) => {
+                return Err(CoreError::new(
+                    "executor `docker` option `workdir` must be an absolute container path"
+                        .to_string(),
+                    span,
+                ));
+            }
+            (other, _) => {
+                let err = CoreError::new(
+                    format!("executor `docker` does not take an option `{other}`"),
+                    span,
+                );
+                return Err(
+                    match suggest(other, ["image", "volumes", "workdir"].into_iter()) {
+                        Some(c) => err.with_help(format!("did you mean `{c}`?")),
+                        None => err,
+                    },
+                );
+            }
         }
     }
+    let image = image.ok_or_else(|| {
+        CoreError::new(
+            "executor `docker` requires an `image` option".to_string(),
+            decl.name.span,
+        )
+    })?;
+    Ok(ExecutorKind::Docker {
+        image,
+        volumes,
+        workdir,
+    })
 }
 
 #[cfg(test)]
@@ -1416,16 +1500,114 @@ beam b { run "x" }
         assert_eq!(
             project.beams[0].executor,
             ExecutorKind::Docker {
-                image: "registry/app:latest".to_string()
+                image: "registry/app:latest".to_string(),
+                volumes: Vec::new(),
+                workdir: None,
             }
         );
     }
 
     #[test]
-    fn unknown_executor_errors_with_help() {
-        let err = load_str(r#"beam deploy { executor dokcer { image "x" } run "y" }"#).unwrap_err();
-        assert!(err.message.contains("unknown executor"));
-        assert_eq!(err.help.as_deref(), Some("did you mean `docker`?"));
+    fn executor_docker_carries_volumes_and_workdir() {
+        let project = load_str(
+            r#"beam d { executor docker { image "x" volumes ["h:/c"] workdir "/w" } run "x" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Docker {
+                image: "x".into(),
+                volumes: vec!["h:/c".into()],
+                workdir: Some("/w".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn docker_volumes_must_be_a_list() {
+        let err = load_str(r#"beam d { executor docker { image "x" volumes "h:/c" } run "x" }"#)
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `docker` option `volumes` must be a list of strings")
+        );
+    }
+
+    #[test]
+    fn docker_volume_entries_must_name_a_container_path() {
+        let err =
+            load_str(r#"beam d { executor docker { image "x" volumes ["nocolon"] } run "x" }"#)
+                .unwrap_err();
+        assert!(
+            err.message
+                .contains("invalid volume `nocolon`: expected `host:container`")
+        );
+    }
+
+    #[test]
+    fn docker_workdir_must_be_an_absolute_container_path() {
+        let err =
+            load_str(r#"beam d { executor docker { image "x" workdir "relative" } run "x" }"#)
+                .unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `docker` option `workdir` must be an absolute container path")
+        );
+    }
+
+    #[test]
+    fn docker_rejects_an_unknown_option_with_a_suggestion() {
+        let err = load_str(r#"beam d { executor docker { image "x" volume ["a:/b"] } run "x" }"#)
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `docker` does not take an option `volume`")
+        );
+        assert_eq!(err.help.as_deref(), Some("did you mean `volumes`?"));
+    }
+
+    #[test]
+    fn an_unknown_executor_becomes_a_plugin_reference() {
+        let project = load_str(
+            r#"beam d { executor podman { image "x" remote true tags ["a", "b"] } run "x" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Plugin {
+                name: "podman".into(),
+                options: vec![
+                    ("image".into(), OptionValue::Str("x".into())),
+                    ("remote".into(), OptionValue::Bool(true)),
+                    (
+                        "tags".into(),
+                        OptionValue::List(vec!["a".into(), "b".into()])
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn shell_takes_no_options() {
+        let err = load_str(r#"beam b { executor shell { image "x" } run "y" }"#).unwrap_err();
+        assert!(err.message.contains("executor `shell` takes no options"));
+    }
+
+    /// A name close to `docker` (a plausible typo) is not special-cased:
+    /// the load-time typo suggestion moved to plan time, so any name other
+    /// than `shell`/`system_shell`/`docker` becomes a plugin reference,
+    /// however near it reads to a known one.
+    #[test]
+    fn an_executor_name_near_docker_still_becomes_a_plugin_reference() {
+        let project = load_str(r#"beam deploy { executor dokcer { image "x" } run "y" }"#).unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Plugin {
+                name: "dokcer".to_string(),
+                options: vec![("image".to_string(), OptionValue::Str("x".to_string()))],
+            }
+        );
     }
 
     #[test]
@@ -1444,10 +1626,18 @@ beam b { run "x" }
         );
     }
 
+    /// Same rule as `an_executor_name_near_docker_still_becomes_a_plugin_reference`,
+    /// for a typo of `system_shell`.
     #[test]
-    fn unknown_executor_suggestions_include_system_shell() {
-        let err = load_str("beam b {\n  executor system_shel\n  run \"x\"\n}").unwrap_err();
-        assert_eq!(err.help.as_deref(), Some("did you mean `system_shell`?"));
+    fn an_executor_name_near_system_shell_still_becomes_a_plugin_reference() {
+        let project = load_str("beam b {\n  executor system_shel\n  run \"x\"\n}").unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Plugin {
+                name: "system_shel".to_string(),
+                options: Vec::new(),
+            }
+        );
     }
 
     #[test]

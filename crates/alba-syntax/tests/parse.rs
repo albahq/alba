@@ -43,3 +43,23 @@ beam deploy(target) {
 fn parses_an_example_using_every_construct() {
     insta::assert_debug_snapshot!(parse(EXAMPLE).unwrap());
 }
+
+#[test]
+fn executor_options_accept_bool_and_list_values() {
+    let src = r#"beam b {
+  executor podman { image "quay.io/x" remote true volumes ["a:/b", "c:/d"] }
+  run "x"
+}"#;
+    let file = parse(src).unwrap();
+    insta::assert_debug_snapshot!(file.beams[0].executor.as_ref().unwrap());
+}
+
+#[test]
+fn executor_option_list_reports_a_malformed_entry() {
+    let src = r#"beam b {
+  executor docker { volumes ["a:/b", true] }
+  run "x"
+}"#;
+    let err = parse(src).unwrap_err();
+    insta::assert_debug_snapshot!(err);
+}

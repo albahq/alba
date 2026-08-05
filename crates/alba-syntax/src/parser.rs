@@ -17,17 +17,23 @@
 //! - `needs [...]`/`inputs [...]`/`outputs [...]`/list-form `run [...]`
 //!   accept an optional trailing comma before `]`.
 //! - `env { NAME = value }` values and `executor <name> { option value }`
-//!   option values follow the same "keyword-ish identifier followed by its value" shape
-//!   as beam fields (`image "deployer:latest"`, no `=`), and their value is
-//!   always a string literal, parsed as a `StringTemplate`. `env` values
-//!   may be a string literal (also a `StringTemplate`) or a bare identifier
-//!   (a reference to a `let` binding or a beam parameter, as in
+//!   option values follow the same "keyword-ish identifier followed by its
+//!   value" shape as beam fields (`image "deployer:latest"`, no `=`). `env`
+//!   values may be a string literal (a `StringTemplate`) or a bare
+//!   identifier (a reference to a `let` binding or a beam parameter, as in
 //!   `env { DEPLOY_TARGET = target }`); the bare-identifier form is
 //!   modeled as a single-part template wrapping that variable reference —
 //!   equivalent to writing `"{target}"` — so `NamedString`'s value half
-//!   stays uniformly a `StringTemplate` either way.
+//!   stays uniformly a `StringTemplate` either way. An executor option's
+//!   value is never a bare identifier, but it is one of three shapes,
+//!   dispatched on its first token: `true`/`false` for a bool, `[...]` for
+//!   a list of string literals, anything else parsed as a string literal
+//!   (`ExecutorOptionValue`).
 
-use crate::ast::{BeamDecl, BeamRef, ExecutorDecl, File, Import, LetBinding, NamedString, Spanned};
+use crate::ast::{
+    BeamDecl, BeamRef, ExecutorDecl, ExecutorOptionValue, File, Import, LetBinding, NamedString,
+    Spanned,
+};
 use crate::expr::Expr;
 use crate::lexer::Lexer;
 use crate::template::{StringTemplate, TemplatePart};
@@ -334,7 +340,13 @@ impl<'a> Parser<'a> {
         let mut options = Vec::new();
         while !self.check(&TokenKind::RBrace) {
             let opt_name = self.eat_ident()?;
-            let opt_value = self.eat_template()?;
+            let opt_value = match self.peek().kind {
+                TokenKind::KwTrue | TokenKind::KwFalse => {
+                    ExecutorOptionValue::Bool(self.parse_bool_value()?)
+                }
+                TokenKind::LBracket => ExecutorOptionValue::List(self.parse_template_list()?),
+                _ => ExecutorOptionValue::Str(self.eat_template()?),
+            };
             options.push((opt_name, opt_value));
         }
         self.expect(TokenKind::RBrace, "`}`")?;
@@ -673,10 +685,11 @@ beam deploy(target) {
         let executor = beam.executor.as_ref().unwrap();
         assert_eq!(executor.name.value, "docker");
         assert_eq!(executor.options[0].0.value, "image");
-        assert_eq!(
-            executor.options[0].1.parts,
-            vec![crate::TemplatePart::Literal("deployer:latest".to_string())]
-        );
+        assert!(matches!(
+            &executor.options[0].1,
+            crate::ast::ExecutorOptionValue::Str(t)
+                if t.parts == vec![crate::TemplatePart::Literal("deployer:latest".to_string())]
+        ));
         assert_eq!(beam.env[0].0.value, "DEPLOY_TARGET");
         // `target` is a bare identifier (no quotes), so it becomes a
         // single-part template wrapping a variable reference, equivalent

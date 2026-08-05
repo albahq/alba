@@ -99,7 +99,7 @@ impl Executors {
 
     /// Which executor a beam's declared kind dispatches to.
     ///
-    /// `Docker` never reaches here: [`plan`] rejects a docker beam during
+    /// `Docker` and `Plugin` never reach here: [`plan`] rejects both during
     /// validation, before any beam task is built, so this beam's kind is
     /// always `Shell` or `SystemShell` by the time a task asks.
     fn for_beam(&self, kind: &ExecutorKind) -> Arc<dyn Executor> {
@@ -108,6 +108,9 @@ impl Executors {
             ExecutorKind::SystemShell => Arc::clone(&self.system),
             ExecutorKind::Docker { .. } => {
                 unreachable!("docker executor is rejected during validation, before scheduling")
+            }
+            ExecutorKind::Plugin { .. } => {
+                unreachable!("plugin executors are rejected during validation, before scheduling")
             }
         }
     }
@@ -124,6 +127,9 @@ fn executor_label(kind: &ExecutorKind) -> &'static str {
         ExecutorKind::Docker { .. } => {
             unreachable!("docker executor is rejected during validation, before scheduling")
         }
+        ExecutorKind::Plugin { .. } => {
+            unreachable!("plugin executors are rejected during validation, before scheduling")
+        }
     }
 }
 
@@ -134,6 +140,7 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
     match kind {
         ExecutorKind::Shell | ExecutorKind::SystemShell => serde_json::Value::Null,
         ExecutorKind::Docker { .. } => serde_json::Value::Null,
+        ExecutorKind::Plugin { .. } => serde_json::Value::Null,
     }
 }
 
@@ -258,14 +265,14 @@ pub async fn run(
     Ok(summary)
 }
 
-/// The beams to run, in the project's declaration order, once the two
-/// things that make a run unschedulable as a whole have been ruled out.
+/// The beams to run, in the project's declaration order, once the things
+/// that make a run unschedulable as a whole have been ruled out.
 ///
-/// Both checks happen here, before [`run`] spawns anything, so a docker
-/// beam or a bad parameter list fails the run without half of its subgraph
-/// having already executed. They are the only such checks: everything else
-/// that can go wrong belongs to one beam and is reported as that beam's
-/// failure once the run is under way.
+/// These checks happen here, before [`run`] spawns anything, so a docker
+/// beam, a plugin beam, or a bad parameter list fails the run without half
+/// of its subgraph having already executed. They are the only such checks:
+/// everything else that can go wrong belongs to one beam and is reported as
+/// that beam's failure once the run is under way.
 fn plan<'a>(
     project: &'a Project,
     target: &BeamId,
@@ -285,6 +292,17 @@ fn plan<'a>(
     {
         return Err(EngineError::Unschedulable(
             "docker executor is not yet supported".to_string(),
+        ));
+    }
+    // Temporary, like the docker rejection above: plugin resolution and
+    // dispatch land later, once a plugin binary can actually be found and
+    // run.
+    if beams
+        .iter()
+        .any(|beam| matches!(beam.executor, ExecutorKind::Plugin { .. }))
+    {
+        return Err(EngineError::Unschedulable(
+            "plugin executors are not yet supported".to_string(),
         ));
     }
     check_parameters(&beams, target, params)?;

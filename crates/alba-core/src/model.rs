@@ -38,10 +38,33 @@ pub enum ExecutorKind {
     /// `executor system_shell`: the host shell, the per-beam opt-out from
     /// the embedded shell.
     SystemShell,
-    /// `executor docker { image "..." }`. The engine rejects this at run
-    /// time until the docker executor exists; this crate only carries the
-    /// image name through the model.
-    Docker { image: String },
+    /// `executor docker { image "..." volumes [...] workdir "..." }`: the
+    /// engine runs this beam's commands inside a container built from
+    /// `image`, with `volumes` bind-mounted (`host:container` each) and
+    /// `workdir` as the container's working directory when set.
+    Docker {
+        image: String,
+        volumes: Vec<String>,
+        workdir: Option<String>,
+    },
+    /// `executor <name> { ... }` for any name that is not `shell`,
+    /// `system_shell`, or `docker`. Not an error: `name` is resolved at
+    /// plan time to an external `alba-executor-<name>` binary on the
+    /// `PATH`, and `options` is handed to it verbatim.
+    Plugin {
+        name: String,
+        options: Vec<(String, OptionValue)>,
+    },
+}
+
+/// The value half of an executor option, once rendered (its `{expr}`
+/// interpolation resolved, for the `Str`/`List` cases) at load time. Mirrors
+/// [`alba_syntax::ExecutorOptionValue`], minus the interpolation itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OptionValue {
+    Str(String),
+    Bool(bool),
+    List(Vec<String>),
 }
 
 /// A value produced by evaluating an [`alba_syntax::Expr`]: either of the

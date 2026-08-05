@@ -1,0 +1,12 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "expected a string literal, found `true`",
+    span: Span {
+        start: 46,
+        end: 50,
+    },
+    help: None,
+}

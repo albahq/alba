@@ -5,11 +5,11 @@
 //! an enclosing construct.
 //!
 //! String-shaped beam fields (`description`, `inputs`, `outputs`, `run`,
-//! `env` values, `cwd`, executor option values) are [`StringTemplate`]s:
-//! every string in the AST supports `{expr}` interpolation. Identifiers
-//! that name things rather than hold interpolatable text (`import` paths,
-//! the `as` alias, `version`, `default`, beam names, parameter names) stay
-//! plain `Spanned<String>`.
+//! `env` values, `cwd`, and the string/list variants of an executor option
+//! value) are [`StringTemplate`]s: every string in the AST supports
+//! `{expr}` interpolation. Identifiers that name things rather than hold
+//! interpolatable text (`import` paths, the `as` alias, `version`,
+//! `default`, beam names, parameter names) stay plain `Spanned<String>`.
 
 use crate::expr::Expr;
 use crate::template::StringTemplate;
@@ -66,16 +66,27 @@ pub struct BeamRef {
     pub name: String,
 }
 
-/// A `NAME = value` entry in an `env { ... }` block, or an `option "value"`
-/// entry in an `executor { ... }` block: a name paired with its templated
-/// string value. Named to keep clippy's `type_complexity` lint quiet.
+/// A `NAME = value` entry in an `env { ... }` block: a name paired with its
+/// templated string value. Named to keep clippy's `type_complexity` lint
+/// quiet.
 pub type NamedString = (Spanned<String>, StringTemplate);
 
-/// `executor <name> { option "value", ... }`.
+/// The value half of an `executor { ... }` block's `option value` entry:
+/// a string (`image "x"`), a boolean (`remote true`), or a list of strings
+/// (`volumes ["a:/b", "c:/d"]`). Unlike `env`'s values, an executor option
+/// is never a bare identifier — see `parser.rs`'s `parse_executor_decl`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutorOptionValue {
+    Str(StringTemplate),
+    Bool(bool),
+    List(Vec<StringTemplate>),
+}
+
+/// `executor <name> { option value, ... }`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutorDecl {
     pub name: Spanned<String>,
-    pub options: Vec<NamedString>,
+    pub options: Vec<(Spanned<String>, ExecutorOptionValue)>,
 }
 
 /// `beam name(params) { ... }`.
