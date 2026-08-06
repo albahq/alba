@@ -12,14 +12,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout}
 
 #[tokio::main]
 async fn main() {
-    let mode = env::args().nth(1).unwrap_or_else(|| "ok".to_string());
-    match mode.as_str() {
-        "die" => std::process::exit(3),
-        "mute" => mute(&mut reader()).await,
-        "garbage" => garbage().await,
-        "refuse" => refuse().await,
-        "deaf" => deaf().await,
-        _ => ok().await,
+    // `None` (no argv[1] at all) defaults to `ok`; any *explicit* but
+    // unrecognized mode fails loudly instead of silently behaving like
+    // `ok` — a typo in a test's mode string must not produce a green
+    // test that exercised nothing.
+    match env::args().nth(1).as_deref() {
+        None | Some("ok") => ok().await,
+        Some("die") => std::process::exit(3),
+        Some("mute") => mute(&mut reader()).await,
+        Some("garbage") => garbage().await,
+        Some("refuse") => refuse().await,
+        Some("deaf") => deaf().await,
+        Some("stubborn") => stubborn().await,
+        Some(other) => panic!("fake-plugin: unknown mode `{other}`"),
     }
 }
 
@@ -67,6 +72,17 @@ async fn refuse() {
     )
     .await;
     mute(&mut lines).await;
+}
+
+/// Never touches stdin at all — not even to reach EOF. Distinct from
+/// `mute`, which *does* read (and discard) stdin forever: `mute` behaves
+/// like a plugin that drains its input but never answers, `stubborn`
+/// behaves like one that never even starts draining, so a write into its
+/// stdin eventually blocks once the OS pipe buffer fills. That is the
+/// scenario the write-bounding tests need — a misbehaving plugin that can
+/// wedge a write, not just a read.
+async fn stubborn() {
+    std::future::pending::<()>().await;
 }
 
 async fn deaf() {

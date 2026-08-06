@@ -240,13 +240,30 @@ fn send_terminate_signal(child: &mut Child) {
 /// immediate child (see `terminate`'s doc comment for why).
 #[cfg(unix)]
 async fn force_kill(child: &Child) -> Result<(), ExecError> {
+    kill_process_group(child);
+    Ok(())
+}
+
+/// Sends `SIGKILL` to the whole process group `child` leads (see
+/// `build_command`'s `process_group(0)`), reaching descendants a plain
+/// `Child::kill`/`start_kill` — which only signals the immediate child —
+/// would miss.
+///
+/// Shared with `plugin.rs`, whose plugin process is spawned as its own
+/// group leader for the identical reason: the process the host directly
+/// holds is not the interesting one on a forceful kill, what it spawned
+/// to do the beam's actual work is.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(child: &Child) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
     if let Some(pid) = child.id() {
+        // Best-effort: if the group already exited between us checking
+        // and sending, `kill` returning an error (ESRCH) is fine — the
+        // caller's subsequent `wait` observes the exit either way.
         let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL);
     }
-    Ok(())
 }
 
 #[cfg(windows)]

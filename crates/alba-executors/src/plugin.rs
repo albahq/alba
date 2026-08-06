@@ -11,6 +11,21 @@
 //! relayed by a task spawned once in `open` and never joined — its
 //! lifetime is the process's, not any single command's.
 //!
+//! On unix the plugin is spawned as the leader of its own process group
+//! (mirroring `shell.rs`'s `build_command`): a plugin's entire job is
+//! running the beam's commands, so a forceful kill needs to reach what
+//! it spawned to do that, not just the plugin binary itself. No windows
+//! equivalent is wired up here, for the same reasons `shell.rs`'s
+//! `terminate` doc comment gives.
+//!
+//! Every write to the plugin's stdin is bounded by whichever timeout
+//! governs the phase it happens in (`handshake_timeout` for `open`,
+//! `grace` for `execute`'s cancellation teardown and for `close`) — not
+//! just the read that follows it. A plugin that stops draining its
+//! stdin would otherwise be able to wedge the host once a write exceeds
+//! the OS pipe buffer, regardless of how tightly the read side is
+//! bounded.
+//!
 //! This module only spawns and speaks to a plugin binary whose path is
 //! already known; resolving `alba-executor-<name>` on the `PATH` and
 //! dispatching to it is a later concern, not this one's.
@@ -23,6 +38,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::protocol::{HostMessage, PROTOCOL_VERSION, PluginMessage, WireStream};
+#[cfg(unix)]
+use crate::shell::kill_process_group;
 use crate::shell::stream_lines;
 use crate::{
     BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
@@ -30,12 +47,15 @@ use crate::{
 };
 
 /// How long `open` waits for the plugin to answer the handshake (`ready`
-/// or `error`) before giving up and killing it.
+/// or `error`) before giving up and killing it. Bounds the `open` write
+/// as well as the read that follows it — see the module doc comment.
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long, after asking a plugin to cancel the command it is running,
 /// `execute` waits for it to actually stop (any trailing output plus a
-/// final `exit`/`error`) before giving up and killing the process.
+/// final `exit`/`error`) before giving up and killing the process. Also
+/// bounds the initial `execute` write and the `close` write/wait — see
+/// the module doc comment.
 const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 /// Spawns `binary` (an `alba-executor-<name>` plugin) and speaks
@@ -94,18 +114,43 @@ impl PluginExecutor {
 #[async_trait::async_trait]
 impl Executor for PluginExecutor {
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
-        let mut child = Command::new(&self.binary)
+        // Destructured up front so `cancel` can be selected on below
+        // while `beam_name`/`dir`/`options` are moved into the `open`
+        // message independently — disjoint fields of a local binding,
+        // not the whole struct.
+        let BeamContext {
+            beam: beam_name,
+            dir,
+            options,
+            output,
+            cancel,
+        } = beam;
+
+        let mut command = Command::new(&self.binary);
+        command
             .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ExecError {
-                message: format!(
-                    "cannot spawn plugin `{}`: {error} — is it on the PATH?",
-                    self.binary.display()
-                ),
-            })?;
+            // A dropped `Child` handle does not, by itself, stop the
+            // process it represents — tokio only best-effort-reaps it
+            // once it exits on its own. Every path that gives up on a
+            // session already `kill`s and `wait`s explicitly (see
+            // `kill` below); this is the backstop for the path that
+            // doesn't: a caller dropping the `PluginSession` outright
+            // (a panic, an `execute` error the engine does not recover
+            // from, a task holding the session getting cancelled)
+            // instead of awaiting `close`.
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let mut child = command.spawn().map_err(|error| ExecError {
+            message: format!(
+                "cannot spawn plugin `{}`: {error} — is it on the PATH?",
+                self.binary.display()
+            ),
+        })?;
 
         let stdin = child.stdin.take().expect("child spawned with piped stdin");
         let stdout = child
@@ -124,7 +169,7 @@ impl Executor for PluginExecutor {
         // joined or bounded by a single `execute` call — it simply runs
         // until the plugin's stderr pipe closes, i.e. until the process
         // exits.
-        tokio::spawn(stream_lines(stderr, Stream::Stderr, beam.output.clone()));
+        tokio::spawn(stream_lines(stderr, Stream::Stderr, output.clone()));
 
         let mut session = PluginSession {
             child,
@@ -133,24 +178,42 @@ impl Executor for PluginExecutor {
             grace: self.grace,
         };
 
-        // A write failure here is ignored rather than surfaced directly:
-        // a plugin that dies immediately (the `die` scripted mode, or a
-        // real plugin crashing on startup) can race this write against
-        // its own exit and close its stdin first, which would otherwise
-        // surface as a raw broken-pipe error instead of the plugin's
-        // actual exit code. Falling through to the read below reports
-        // that death uniformly, through the same EOF handling
-        // `read_message` already gives every other premature exit.
-        let _ = session
-            .send(&HostMessage::Open {
-                protocol: PROTOCOL_VERSION,
-                beam: beam.beam,
-                dir: beam.dir.display().to_string(),
-                options: beam.options,
-            })
-            .await;
+        // The `open` write and the handshake read it waits for are
+        // bounded together by `handshake_timeout` (see the module doc
+        // comment), and the whole thing can additionally be interrupted
+        // by the caller cancelling — mirroring `docker.rs`'s `open`,
+        // which selects on cancellation during container start.
+        let handshake = tokio::select! {
+            result = tokio::time::timeout(self.handshake_timeout, async {
+                // A write failure here is ignored rather than surfaced
+                // directly: a plugin that dies immediately (the `die`
+                // scripted mode, or a real plugin crashing on startup)
+                // can race this write against its own exit and close
+                // its stdin first, which would otherwise surface as a
+                // raw broken-pipe error instead of the plugin's actual
+                // exit code. Falling through to the read reports that
+                // death uniformly, through the same EOF handling
+                // `read_message` already gives every other premature
+                // exit.
+                let _ = session
+                    .send(&HostMessage::Open {
+                        protocol: PROTOCOL_VERSION,
+                        beam: beam_name,
+                        dir: dir.display().to_string(),
+                        options,
+                    })
+                    .await;
+                session.read_message().await
+            }) => result,
+            _ = cancel.cancelled() => {
+                kill(&mut session.child).await;
+                return Err(ExecError {
+                    message: "plugin handshake cancelled".to_string(),
+                });
+            }
+        };
 
-        match tokio::time::timeout(self.handshake_timeout, session.read_message()).await {
+        match handshake {
             Ok(Ok(PluginMessage::Ready)) => Ok(Box::new(session)),
             Ok(Ok(PluginMessage::Error { message })) => {
                 kill(&mut session.child).await;
@@ -166,14 +229,24 @@ impl Executor for PluginExecutor {
             }
             Ok(Err(error)) => {
                 kill(&mut session.child).await;
-                Err(error)
+                // `read_message`'s own EOF message is phase-agnostic (it
+                // is shared with `execute`, where "before answering the
+                // handshake" would be false); the handshake-specific
+                // context is added here, at the one call site that knows
+                // it applies.
+                let message = if error.message.starts_with("plugin exited with code") {
+                    format!("{} before answering the handshake", error.message)
+                } else {
+                    error.message
+                };
+                Err(ExecError { message })
             }
             Err(_elapsed) => {
                 kill(&mut session.child).await;
                 Err(ExecError {
                     message: format!(
-                        "plugin did not answer the handshake within {}s",
-                        self.handshake_timeout.as_secs()
+                        "plugin did not answer the handshake within {:?}",
+                        self.handshake_timeout
                     ),
                 })
             }
@@ -192,6 +265,8 @@ struct PluginSession {
 
 impl PluginSession {
     /// Serializes and writes one [`HostMessage`] as a single line.
+    /// Callers are responsible for bounding this — see the module doc
+    /// comment — `send` itself never times out.
     async fn send(&mut self, message: &HostMessage) -> Result<(), ExecError> {
         let mut line = serde_json::to_string(message).expect("HostMessage always serializes");
         line.push('\n');
@@ -239,12 +314,29 @@ impl ExecSession for PluginSession {
         cmd: CommandSpec,
         ctx: ExecContext,
     ) -> Result<ExecResult, ExecError> {
-        self.send(&HostMessage::Execute {
-            command: cmd.command,
-            env: cmd.env,
-            cwd: cmd.cwd.display().to_string(),
-        })
-        .await?;
+        // Bounded by `grace`, the same budget a stalled cancellation
+        // teardown gets below: a plugin that never drains stdin must not
+        // be able to block this call before it has even received the
+        // command to run.
+        match tokio::time::timeout(
+            self.grace,
+            self.send(&HostMessage::Execute {
+                command: cmd.command,
+                env: cmd.env,
+                cwd: cmd.cwd.display().to_string(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_elapsed) => {
+                kill(&mut self.child).await;
+                return Err(ExecError {
+                    message: format!("plugin did not accept the command within {:?}", self.grace),
+                });
+            }
+        }
 
         // `None` until cancellation, then the single deadline the rest of
         // this command's teardown is bounded by: asking the plugin to
@@ -260,8 +352,17 @@ impl ExecSession for PluginSession {
                 None => tokio::select! {
                     message = self.read_message() => message,
                     _ = ctx.cancel.cancelled() => {
-                        let _ = self.send(&HostMessage::Cancel).await;
-                        deadline = Some(tokio::time::Instant::now() + self.grace);
+                        let deadline_at = tokio::time::Instant::now() + self.grace;
+                        // Bounded by the same deadline as everything
+                        // else in this teardown sequence: a plugin that
+                        // stops draining stdin must not be able to block
+                        // this send forever either.
+                        let _ = tokio::time::timeout_at(
+                            deadline_at,
+                            self.send(&HostMessage::Cancel),
+                        )
+                        .await;
+                        deadline = Some(deadline_at);
                         continue;
                     }
                 },
@@ -269,8 +370,7 @@ impl ExecSession for PluginSession {
                     match tokio::time::timeout_at(deadline, self.read_message()).await {
                         Ok(message) => message,
                         Err(_elapsed) => {
-                            let _ = self.child.start_kill();
-                            let _ = self.child.wait().await;
+                            kill(&mut self.child).await;
                             return Ok(ExecResult { exit_code: -1 });
                         }
                     }
@@ -301,35 +401,54 @@ impl ExecSession for PluginSession {
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), ExecError> {
-        // Best-effort: a plugin that already died has nothing left to
-        // read this, and the wait below reports that death either way.
-        let _ = self.send(&HostMessage::Close).await;
+        // The `close` write, shutting down our write half, and the wait
+        // for the plugin to exit are all bounded together by `grace`
+        // (see the module doc comment) — not just the wait, as before.
+        let deadline = tokio::time::Instant::now() + self.grace;
+        let outcome = tokio::time::timeout_at(deadline, async {
+            // Best-effort: a plugin that already died has nothing left
+            // to read this, and the wait below reports that death
+            // either way.
+            let _ = self.send(&HostMessage::Close).await;
+            // Lets an EOF-driven plugin (one that exits on reaching the
+            // end of stdin rather than parsing `close`'s content) act on
+            // it immediately, instead of sitting until the deadline
+            // forces a kill.
+            let _ = self.stdin.shutdown().await;
+            self.child.wait().await
+        })
+        .await;
 
-        match tokio::time::timeout(self.grace, self.child.wait()).await {
+        match outcome {
             Ok(Ok(_status)) => Ok(()),
             Ok(Err(error)) => Err(ExecError {
                 message: format!("failed to wait for plugin: {error}"),
             }),
             Err(_elapsed) => {
-                let _ = self.child.start_kill();
-                self.child
-                    .wait()
-                    .await
-                    .map(|_status| ())
-                    .map_err(|error| ExecError {
-                        message: format!("failed to wait for plugin after kill: {error}"),
-                    })
+                kill(&mut self.child).await;
+                Ok(())
             }
         }
     }
 }
 
 /// Kills and reaps a child, ignoring errors from both: used on every
-/// handshake failure path so the plugin process never outlives `open`,
-/// regardless of whether it is still running (a misbehaving-but-alive
-/// plugin) or already gone (nothing to kill, the wait just observes the
-/// exit that already happened).
+/// teardown path (a failed handshake, a cancellation grace that expired,
+/// a close that timed out) so the plugin process — and everything it
+/// spawned — never outlives the call that gave up on it.
+///
+/// On unix the plugin leads its own process group (see `process_group(0)`
+/// at the spawn site in `open`), so the group-wide `SIGKILL` sent here
+/// reaches every command the plugin was running on the beam's behalf,
+/// not just the plugin binary itself — `Child::start_kill` alone only
+/// reaches that one process, which for a real plugin can be little more
+/// than a thin wrapper around the actual work. Windows has no
+/// process-group equivalent wired up here (see `shell.rs`'s `terminate`
+/// doc comment for why this crate does not set one up), so `start_kill`
+/// there only ever reaches the immediate plugin process.
 async fn kill(child: &mut Child) {
+    #[cfg(unix)]
+    kill_process_group(child);
     let _ = child.start_kill();
     let _ = child.wait().await;
 }
