@@ -22,26 +22,49 @@ fn project(beamfile: &str) -> tempfile::TempDir {
     dir
 }
 
-/// `PATH` with the example plugin's directory prepended, so `alba`
-/// resolves `alba-executor-example` the way a real user install would —
-/// by finding it on the `PATH`, not by any special-casing of this test.
+/// `PATH` with a directory holding *only* `alba-executor-example`
+/// prepended, so `alba` resolves it the way a real user install would —
+/// by finding a plugin binary on the `PATH` with nothing else beside it.
+/// `target/debug` itself would not do: it also holds `alba`, every other
+/// test binary, and anything else this workspace produces, so prepending
+/// it directly would leave the resolution untested against exactly the
+/// kind of same-named collision a real plugin install never has to
+/// contend with.
 ///
 /// `cargo_bin` resolves a path already built into the workspace's target
 /// directory (it does not build anything itself), which is why the full
 /// gate matters here: `cargo test --workspace` builds every workspace
 /// binary, `alba-executor-example` included, so by the time this runs the
-/// file is already on disk for `cargo_bin` to find.
-fn plugin_path() -> std::ffi::OsString {
+/// file is already on disk to link into the isolated directory built
+/// below.
+///
+/// The returned `TempDir` must be kept alive by the caller for as long as
+/// the `PATH` is in use: it owns the directory the child process resolves
+/// the plugin from, and dropping it early deletes that directory (and,
+/// via `symlink`, the name the child would look up) out from under a
+/// still-running `alba`.
+fn plugin_path() -> (std::ffi::OsString, tempfile::TempDir) {
     let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
-    let dir = example
-        .parent()
-        .expect("a binary path always has a parent directory")
-        .to_path_buf();
+    let name = example
+        .file_name()
+        .expect("a binary path always has a file name");
+
+    let isolated = tempfile::tempdir().unwrap();
+    let linked = isolated.path().join(name);
+    // A symlink is enough on unix, where resolving `PATH` entries follows
+    // them like any other file; windows has no equivalent unprivileged
+    // symlink available by default, so a plain copy keeps this portable
+    // without reaching for elevated permissions just for a test.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&example, &linked).unwrap();
+    #[cfg(windows)]
+    std::fs::copy(&example, &linked).unwrap();
 
     let existing = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs = vec![dir];
+    let mut dirs = vec![isolated.path().to_path_buf()];
     dirs.extend(std::env::split_paths(&existing));
-    std::env::join_paths(dirs).expect("the augmented PATH must join into one OsString")
+    let path = std::env::join_paths(dirs).expect("the augmented PATH must join into one OsString");
+    (path, isolated)
 }
 
 /// A beam wired to `executor example` runs its command through the
@@ -52,10 +75,11 @@ fn plugin_path() -> std::ffi::OsString {
 fn a_plugin_beam_runs_end_to_end() {
     let dir =
         project("beam hello { executor example run \"echo carried by the example plugin\" }\n");
+    let (path, _plugin_dir) = plugin_path();
 
     alba()
         .current_dir(&dir)
-        .env("PATH", plugin_path())
+        .env("PATH", path)
         .args(["run", "hello"])
         .assert()
         .success()
@@ -68,10 +92,11 @@ fn a_plugin_beam_runs_end_to_end() {
 #[test]
 fn a_plugin_beams_failure_is_an_ordinary_beam_failure() {
     let dir = project("beam boom { executor example run \"fail 3\" }\n");
+    let (path, _plugin_dir) = plugin_path();
 
     alba()
         .current_dir(&dir)
-        .env("PATH", plugin_path())
+        .env("PATH", path)
         .args(["run", "boom"])
         .assert()
         .code(1)

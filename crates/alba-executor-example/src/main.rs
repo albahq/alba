@@ -133,12 +133,21 @@ fn run(receiver: &Receiver<serde_json::Value>) {
 
 /// Waits for the opening `{"type":"open",...}` message and answers it.
 /// Returns whether the session may continue (`true` for `ready`, `false`
-/// for an unsupported protocol version or a host that vanished before
-/// sending `open` at all).
+/// for an unsupported protocol version, a host that vanished before
+/// sending `open` at all, or a first message that is not `open`).
 fn handshake(receiver: &Receiver<serde_json::Value>) -> bool {
     let Ok(open) = receiver.recv() else {
         return false;
     };
+    if message_type(&open) != Some("open") {
+        // The protocol's first message is always `open` (see the module
+        // doc comment); every other message in this file is matched on
+        // its `type` tag the same way, in `run`'s own loop. A host that
+        // sends anything else here is not speaking this protocol, and
+        // there is no reply shape that would make sense to guess at, so
+        // bail instead of assuming the fields we want are present.
+        return false;
+    }
     match open.get("protocol").and_then(serde_json::Value::as_u64) {
         Some(1) => {
             reply(&serde_json::json!({"type": "ready"}));
