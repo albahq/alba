@@ -26,12 +26,14 @@
 
 use std::path::PathBuf;
 
+mod docker;
 mod embedded;
 mod shell;
 
 #[cfg(feature = "test-util")]
 mod fake;
 
+pub use docker::DockerExecutor;
 pub use embedded::EmbeddedShellExecutor;
 pub use shell::SystemShellExecutor;
 
