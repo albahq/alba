@@ -28,6 +28,7 @@ use std::path::PathBuf;
 
 mod docker;
 mod embedded;
+mod plugin;
 mod shell;
 
 #[cfg(feature = "test-util")]
@@ -37,6 +38,7 @@ pub mod protocol;
 
 pub use docker::DockerExecutor;
 pub use embedded::EmbeddedShellExecutor;
+pub use plugin::PluginExecutor;
 pub use shell::SystemShellExecutor;
 
 #[cfg(feature = "test-util")]

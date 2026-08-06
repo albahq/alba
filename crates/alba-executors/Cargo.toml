@@ -7,6 +7,10 @@ license.workspace = true
 [features]
 test-util = []
 
+[[bin]]
+name = "fake-plugin"
+path = "tests/support/fake_plugin.rs"
+
 [dependencies]
 alba-shell = { path = "../alba-shell" }
 async-trait.workspace = true
