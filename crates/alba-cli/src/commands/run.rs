@@ -109,18 +109,13 @@ pub fn run(
 }
 
 /// Every run's executor set. Docker mounts the project at the root
-/// Beamfile's directory, resolved absolutely so the mount stays correct
-/// whatever the process's cwd does afterwards.
+/// Beamfile's directory, resolved through the same helper the watcher
+/// uses so the two never disagree on where the project is rooted.
 fn executors(beamfile: &Path) -> Executors {
-    let project_root = std::path::absolute(beamfile)
-        .unwrap_or_else(|_| beamfile.to_path_buf())
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
     Executors {
         embedded: Arc::new(EmbeddedShellExecutor),
         system: Arc::new(SystemShellExecutor),
-        docker: Arc::new(DockerExecutor::new(project_root)),
+        docker: Arc::new(DockerExecutor::new(alba_engine::beamfile_dir(beamfile))),
     }
 }
 

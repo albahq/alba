@@ -91,6 +91,31 @@ fn a_docker_beam_runs_its_command_in_the_image() {
         .stdout(predicates::str::contains("hello from a container"));
 }
 
+/// The docker mount actually reaches the directory holding the Beamfile —
+/// the same directory `alba_engine::beamfile_dir` resolves for the
+/// watcher — and not some other cwd-dependent path. Mirrors
+/// `alba-executors/tests/docker.rs`'s
+/// `the_project_mount_makes_host_files_visible`, but exercised through the
+/// real CLI end to end (`commands::run::executors`'s project-root
+/// resolution included) rather than the executor directly.
+#[test]
+#[ignore = "requires a running docker daemon"]
+fn the_docker_mount_reaches_the_beamfiles_own_directory() {
+    let beam = beam_name("project_mount");
+    let _guard = ContainerGuard::new(&beam);
+    let dir = project(&format!(
+        "beam {beam} {{\n  executor docker {{ image \"alpine:3\" }}\n  run \"cat hello.txt\"\n}}\n"
+    ));
+    std::fs::write(dir.path().join("hello.txt"), "hi from the host").unwrap();
+
+    alba()
+        .current_dir(&dir)
+        .args(["run", &beam])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hi from the host"));
+}
+
 /// An image docker cannot find fails the *beam*, not the run machinery: the
 /// process exits 1 (a beam failure, `RunSummary::exit_code`), never 2 (an
 /// Alba error) — the same distinction `cli_run.rs`'s
