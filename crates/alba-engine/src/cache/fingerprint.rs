@@ -18,10 +18,12 @@ pub(crate) struct BeamFacts<'a> {
     pub env: &'a [(String, String)],
     pub args: &'a [String],
     pub needs: &'a [String],
-    /// Which executor this beam dispatches to (`"embedded"` or
-    /// `"system"`): a beam replayed under one executor must not be
-    /// mistaken for a hit computed under the other.
-    pub executor: &'static str,
+    /// Which executor this beam dispatches to, and its full configuration
+    /// (`"embedded"`, `"system"`, or a docker/plugin label carrying its
+    /// image, volumes, or options): a beam replayed under a different
+    /// executor or configuration must not be mistaken for a hit computed
+    /// under another one.
+    pub executor: &'a str,
 }
 
 /// The blake3 hex fingerprint of `facts`. Any change to how this feeds
@@ -74,7 +76,7 @@ pub(crate) fn static_contribution(
     cwd: &str,
     env: &[(String, String)],
     args: &[String],
-    executor: &'static str,
+    executor: &str,
 ) -> String {
     fingerprint(&BeamFacts {
         files: &[],

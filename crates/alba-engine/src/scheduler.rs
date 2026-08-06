@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{
-    Beam, BeamId, CoreError, ExecutorKind, Project, execution_subgraph, expand_globs,
+    Beam, BeamId, CoreError, ExecutorKind, OptionValue, Project, execution_subgraph, expand_globs,
     outputs_satisfied, render_template,
 };
 use alba_executors::{BeamContext, CommandSpec, ExecContext, Executor, OutputLine, Stream};
@@ -118,18 +118,41 @@ impl Executors {
 
 /// The fingerprint's own name for a beam's executor: participates in the
 /// cache key (see [`crate::cache::BeamFacts::executor`]) so switching a
-/// beam between `Shell` and `SystemShell` invalidates its cache entry even
-/// when nothing else about it changed.
-fn executor_label(kind: &ExecutorKind) -> &'static str {
+/// beam between `Shell` and `SystemShell`, or changing a docker image or a
+/// plugin option, invalidates its cache entry even when nothing else about
+/// it changed.
+fn executor_label(kind: &ExecutorKind) -> String {
     match kind {
-        ExecutorKind::Shell => "embedded",
-        ExecutorKind::SystemShell => "system",
-        ExecutorKind::Docker { .. } => {
-            unreachable!("docker executor is rejected during validation, before scheduling")
+        ExecutorKind::Shell => "embedded".to_string(),
+        ExecutorKind::SystemShell => "system".to_string(),
+        ExecutorKind::Docker {
+            image,
+            volumes,
+            workdir,
+        } => format!(
+            "docker:image={image};volumes={};workdir={}",
+            volumes.join(","),
+            workdir.as_deref().unwrap_or(""),
+        ),
+        ExecutorKind::Plugin { name, options } => {
+            let options = options
+                .iter()
+                .map(|(key, value)| format!("{key}={}", option_label(value)))
+                .collect::<Vec<_>>()
+                .join(";");
+            format!("plugin:{name};{options}")
         }
-        ExecutorKind::Plugin { .. } => {
-            unreachable!("plugin executors are rejected during validation, before scheduling")
-        }
+    }
+}
+
+/// The fingerprint's own name for one plugin option's value: folded into
+/// [`executor_label`] so a beam's cache entry changes with any option it
+/// declares, whatever type that option happens to be.
+fn option_label(value: &OptionValue) -> String {
+    match value {
+        OptionValue::Str(v) => v.clone(),
+        OptionValue::Bool(v) => v.to_string(),
+        OptionValue::List(v) => v.join(","),
     }
 }
 
@@ -546,7 +569,7 @@ async fn process(
             &plan.cwd.to_string_lossy(),
             &plan.env,
             &task.args,
-            executor_label(&task.beam.executor),
+            &executor_label(&task.beam.executor),
         )),
         (None, None) => None,
     };
@@ -643,7 +666,7 @@ struct CacheableBeam {
     args: Vec<String>,
     needs: Vec<String>,
     force: bool,
-    executor: &'static str,
+    executor: String,
 }
 
 impl CacheableBeam {
@@ -690,7 +713,7 @@ impl CacheableBeam {
             env: &self.env,
             args: &self.args,
             needs: &self.needs,
-            executor: self.executor,
+            executor: &self.executor,
         });
 
         let hit = (!self.force)
@@ -966,4 +989,62 @@ async fn forward_output(
         seen.push(line);
     }
     seen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_labels_are_unchanged() {
+        assert_eq!(executor_label(&ExecutorKind::Shell), "embedded");
+        assert_eq!(executor_label(&ExecutorKind::SystemShell), "system");
+    }
+
+    #[test]
+    fn a_docker_label_changes_with_every_piece_of_its_configuration() {
+        let base = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec![],
+            workdir: None,
+        };
+        let other_image = ExecutorKind::Docker {
+            image: "alpine:4".into(),
+            volumes: vec![],
+            workdir: None,
+        };
+        let with_volume = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec!["h:/c".into()],
+            workdir: None,
+        };
+        let with_workdir = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec![],
+            workdir: Some("/w".into()),
+        };
+        let labels: Vec<String> = [&base, &other_image, &with_volume, &with_workdir]
+            .iter()
+            .map(|kind| executor_label(kind))
+            .collect();
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(
+            unique.len(),
+            4,
+            "every configuration must label distinctly: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_label_changes_with_its_options() {
+        let a = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("image".into(), OptionValue::Str("x".into()))],
+        };
+        let b = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("image".into(), OptionValue::Str("y".into()))],
+        };
+        assert_ne!(executor_label(&a), executor_label(&b));
+    }
 }
