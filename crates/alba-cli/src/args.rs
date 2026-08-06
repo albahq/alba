@@ -78,7 +78,12 @@ pub enum PluginCommand {
         command: String,
         /// A long-running command for the cancellation check; the plugin
         /// must answer the cancel within the 5-second grace.
-        #[arg(long, value_name = "CMD", default_value = "sleep 30")]
+        ///
+        /// Must run well past the 100ms the check waits before sending
+        /// `cancel` — otherwise the command finishes on its own first and
+        /// the check cannot tell that apart from a prompt answer. 30
+        /// seconds comfortably outlives both that delay and the grace.
+        #[arg(long, value_name = "CMD", default_value = "sleep 30000")]
         cancel_command: String,
     },
 }

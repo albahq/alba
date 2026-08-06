@@ -149,6 +149,108 @@ fn plugin_check_passes_the_example_plugin() {
         .stdout(predicates::str::contains("conformant"));
 }
 
+/// `--cancel-command`'s own default (no flag passed at all) must actually
+/// outlive the check's 100ms delay before it sends `cancel`: regression for
+/// a default that finished on its own well before `cancel` was ever sent,
+/// which made the cancel check pass without a `cancel` message ever having
+/// crossed the wire (see `commands::plugin`'s `CANCEL_AFTER`/lower-bound
+/// doc comments).
+#[test]
+fn plugin_check_default_cancel_command_actually_exercises_cancel() {
+    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+
+    alba()
+        .args([
+            "plugin",
+            "check",
+            example.to_str().expect("a utf-8 target path"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\u{2713} cancel"))
+        .stdout(predicates::str::contains("answered in"))
+        .stdout(predicates::str::contains("conformant"));
+}
+
+/// A `--cancel-command` that finishes on its own before the check ever
+/// sends `cancel` (100ms in) cannot possibly demonstrate answering it: the
+/// lower-bound check rejects it outright instead of reporting a pass that
+/// exercised nothing.
+#[test]
+fn plugin_check_rejects_a_cancel_command_that_finishes_before_cancel_is_sent() {
+    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+
+    alba()
+        .args([
+            "plugin",
+            "check",
+            example.to_str().expect("a utf-8 target path"),
+            "--cancel-command",
+            "sleep 5",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("\u{2717} cancel"))
+        .stdout(predicates::str::contains("before"))
+        .stdout(predicates::str::contains("not conformant"));
+}
+
+/// A beam declaring no options at all must still see `options` as an empty
+/// JSON object on the wire, never `null` — the guarantee
+/// `docs/plugin-protocol.md` makes and the engine itself honours. `alba
+/// plugin check` is the one tool meant to give a third-party plugin author
+/// confidence in that guarantee, so it must honour it too: this script
+/// refuses the handshake unless it sees `"options":{}` verbatim.
+#[cfg(unix)]
+#[test]
+fn plugin_check_sends_empty_options_not_null() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("options-shape-executor");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"options":{}'*)
+      printf '%s\n' '{"type":"ready"}'
+      ;;
+    *'"type":"open"'*)
+      printf '%s\n' '{"type":"error","message":"expected options as {}"}'
+      exit 1
+      ;;
+    *'"command":"echo'*)
+      printf '%s\n' '{"type":"exit","code":0}'
+      ;;
+    *'"command":"sleep'*)
+      while IFS= read -r inner; do
+        case "$inner" in
+          *'"type":"cancel"'*)
+            printf '%s\n' '{"type":"exit","code":-1}'
+            break
+            ;;
+        esac
+      done
+      ;;
+    *'"type":"close"'*)
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    alba()
+        .args(["plugin", "check", script.to_str().expect("a utf-8 path")])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\u{2713} handshake"))
+        .stdout(predicates::str::contains("conformant"));
+}
+
 /// A plugin that answers the handshake and an ordinary command normally,
 /// but never answers `cancel` on a long-running one, must not be reported
 /// as conformant: `PluginExecutor` absorbs a plugin like this by

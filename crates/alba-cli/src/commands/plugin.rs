@@ -150,7 +150,13 @@ async fn open_session(
     let context = BeamContext {
         beam: "plugin-check".to_string(),
         dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        options: serde_json::Value::Null,
+        // An empty object, never `null`: `docs/plugin-protocol.md` (see
+        // `open`'s fields) guarantees every beam sends `options` as `{}`
+        // when it declares none, and the engine itself never sends `null`
+        // (see `alba-engine`'s `executor_options`) — a plugin coding
+        // against that guarantee (`options.as_object().unwrap()`, or
+        // deserializing into a struct) must see the same shape here.
+        options: serde_json::json!({}),
         output: tx.clone(),
         cancel: CancellationToken::new(),
     };
@@ -175,8 +181,13 @@ async fn open_session(
 /// command itself has already finished, but says nothing about a
 /// descendant it may have left behind; the timeout and error arms can
 /// abandon the command mid-flight outright. `kill` reaches a spawned
-/// plugin's whole process group in either case, which a bare drop cannot
-/// (see the module doc comment).
+/// plugin's whole process group whenever one is still alive to reach —
+/// which a bare drop cannot, see the module doc comment — but not when
+/// the plugin had already exited on its own by the time this runs (an
+/// EOF-driven `Err` from `execute`, or the plugin exiting between the
+/// timeout firing and this call): `PluginExecutor::kill`'s own doc
+/// comment covers why there is nothing left to signal on that path, and
+/// why any descendant the plugin left behind then survives unkilled.
 async fn execute_check(
     mut session: Box<dyn ExecSession>,
     command: &str,
@@ -241,6 +252,23 @@ async fn execute_check(
 /// conformant plugin apart from one that only appears to answer because
 /// the host had to kill it; the elapsed time can, and is measured for
 /// exactly that.
+///
+/// Two different elapsed measurements matter here, not one:
+///
+/// - `total_elapsed`, timed from just before `execute` is called, guards
+///   against `--cancel-command` finishing on its own before `cancel` was
+///   even sent (100ms in): a command that short makes every later
+///   measurement meaningless, since nothing about "how it answered
+///   `cancel`" was ever actually exercised. This is checked first and
+///   fails the check outright.
+/// - `answered_in`, `total_elapsed` with [`CANCEL_AFTER`] subtracted back
+///   out, is time *since the plugin was actually asked to stop* — what
+///   [`CANCEL_PROMPT_FRACTION`] of `grace` and the failure message below
+///   are actually about. Grading against `total_elapsed` instead would
+///   silently fold `CANCEL_AFTER` into the budget a slow-but-honest answer
+///   gets, and would describe a plugin that took, say, 3.95 seconds to
+///   answer `cancel` as one that "had to be killed" at the 5-second grace,
+///   which is false on both counts.
 async fn cancel_and_close_check(
     binary: &Path,
     cancel_command: &str,
@@ -288,17 +316,29 @@ async fn cancel_and_close_check(
     let bound = grace + CANCEL_TOLERANCE;
     let started = Instant::now();
     let outcome = tokio::time::timeout(bound, session.execute(cmd, ctx)).await;
-    let answered_in = started.elapsed();
+    let total_elapsed = started.elapsed();
+    // See the doc comment above: time since `cancel` was actually sent,
+    // not since `execute` was called. Saturating because a `total_elapsed`
+    // below `CANCEL_AFTER` — caught by the check below before this value
+    // is ever used to grade anything — would otherwise underflow.
+    let answered_in = total_elapsed.saturating_sub(CANCEL_AFTER);
 
     let cancel_conforms = match outcome {
+        Ok(Ok(_result)) if total_elapsed < CANCEL_AFTER => {
+            out.line(&format!(
+                "\u{2717} cancel: `--cancel-command` finished in {total_elapsed:?}, before \
+                 `cancel` was even sent at {CANCEL_AFTER:?} — pick a command that runs longer"
+            ));
+            false
+        }
         Ok(Ok(_result)) if answered_in < grace.mul_f32(CANCEL_PROMPT_FRACTION) => {
             out.line(&format!("\u{2713} cancel (answered in {answered_in:?})"));
             true
         }
         Ok(Ok(_result)) => {
             out.line(&format!(
-                "\u{2717} cancel: no answer within the {grace:?} grace; \
-                 the host had to kill the plugin"
+                "\u{2717} cancel: no answer within the {grace:?} grace ({answered_in:?} after \
+                 cancel); the host had to kill the plugin"
             ));
             false
         }
