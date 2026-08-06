@@ -1,0 +1,84 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: "file.beams[0].executor.as_ref().unwrap()"
+---
+ExecutorDecl {
+    name: Spanned {
+        value: "podman",
+        span: Span {
+            start: 20,
+            end: 26,
+        },
+    },
+    options: [
+        (
+            Spanned {
+                value: "image",
+                span: Span {
+                    start: 29,
+                    end: 34,
+                },
+            },
+            Str(
+                StringTemplate {
+                    parts: [
+                        Literal(
+                            "quay.io/x",
+                        ),
+                    ],
+                    span: Span {
+                        start: 35,
+                        end: 46,
+                    },
+                },
+            ),
+        ),
+        (
+            Spanned {
+                value: "remote",
+                span: Span {
+                    start: 47,
+                    end: 53,
+                },
+            },
+            Bool(
+                true,
+            ),
+        ),
+        (
+            Spanned {
+                value: "volumes",
+                span: Span {
+                    start: 59,
+                    end: 66,
+                },
+            },
+            List(
+                [
+                    StringTemplate {
+                        parts: [
+                            Literal(
+                                "a:/b",
+                            ),
+                        ],
+                        span: Span {
+                            start: 68,
+                            end: 74,
+                        },
+                    },
+                    StringTemplate {
+                        parts: [
+                            Literal(
+                                "c:/d",
+                            ),
+                        ],
+                        span: Span {
+                            start: 76,
+                            end: 82,
+                        },
+                    },
+                ],
+            ),
+        ),
+    ],
+}

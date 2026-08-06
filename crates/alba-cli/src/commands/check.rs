@@ -22,10 +22,11 @@ use crate::render::LineSink;
 /// Only beams running on the embedded shell (`ExecutorKind::Shell`, the
 /// default) with no parameters are checked: a parameterized beam's `run`
 /// template cannot be rendered until its arguments arrive, and
-/// `system_shell`/`docker` beams do not speak this grammar at all. A
-/// template that fails to render here is skipped silently — rendering
-/// failures are load's concern, and load already checked everything that
-/// can be checked without parameters.
+/// `system_shell`/`docker`/plugin beams do not speak this grammar at all
+/// (the `!= ExecutorKind::Shell` filter below covers plugin beams too, with
+/// no separate case needed). A template that fails to render here is
+/// skipped silently — rendering failures are load's concern, and load
+/// already checked everything that can be checked without parameters.
 ///
 /// Written through a [`LineSink`] rather than `println!`/`eprintln!`:
 /// `alba check | head -1` (or any consumer that closes its end without

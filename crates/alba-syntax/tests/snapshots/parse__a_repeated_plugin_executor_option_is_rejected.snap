@@ -1,0 +1,12 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "duplicate executor option `flag`",
+    span: Span {
+        start: 38,
+        end: 42,
+    },
+    help: None,
+}

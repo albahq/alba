@@ -45,7 +45,7 @@ use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
     CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, SessionError, WatchExit,
 };
-use alba_executors::{EmbeddedShellExecutor, SystemShellExecutor};
+use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
@@ -105,6 +105,17 @@ pub fn run(
         ))
     } else {
         runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+    }
+}
+
+/// Every run's executor set. Docker mounts the project at the root
+/// Beamfile's directory, resolved through the same helper the watcher
+/// uses so the two never disagree on where the project is rooted.
+fn executors(beamfile: &Path) -> Executors {
+    Executors {
+        embedded: Arc::new(EmbeddedShellExecutor),
+        system: Arc::new(SystemShellExecutor),
+        docker: Arc::new(DockerExecutor::new(alba_engine::beamfile_dir(beamfile))),
     }
 }
 
@@ -172,10 +183,7 @@ async fn execute(
         project,
         target,
         options,
-        Executors {
-            embedded: Arc::new(EmbeddedShellExecutor),
-            system: Arc::new(SystemShellExecutor),
-        },
+        executors(beamfile),
         events,
         cancel.clone(),
     )
@@ -272,10 +280,7 @@ async fn watch_execute(
         sources.clone(),
         target.clone(),
         options,
-        Executors {
-            embedded: Arc::new(EmbeddedShellExecutor),
-            system: Arc::new(SystemShellExecutor),
-        },
+        executors(beamfile),
         events,
         cancel,
         Box::new(watcher),
@@ -385,10 +390,7 @@ async fn tui_execute(
                 sources,
                 target,
                 options,
-                Executors {
-                    embedded: Arc::new(EmbeddedShellExecutor),
-                    system: Arc::new(SystemShellExecutor),
-                },
+                executors(&beamfile),
                 events,
                 Some(command_receiver),
                 watch,

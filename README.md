@@ -189,20 +189,35 @@ because stdout is not a terminal.
 
 A beam runs its command on Alba's embedded shell by default (see
 [Embedded shell](#embedded-shell) below); `executor system_shell` opts out
-to the host shell instead. `executor docker { image "..." }` also parses,
-but running it currently fails at run time with `docker executor is not
-yet supported`, since the docker executor is not implemented yet.
+to the host shell instead, and `executor docker { image "..." }` runs it
+inside a container (see [Docker executor](#docker-executor)). Any other
+name, `executor <name> { ... }`, refers to an external plugin (see
+[Plugins](#plugins)).
 
 ## Caching
 
 A beam that declares `inputs` is cached. Before running it, Alba checks
 whether the files matched by `inputs`, the rendered command, the beam's
-`cwd`, its `env`, its arguments, and every dependency's own fingerprint are
-all unchanged since the last successful run. If so, the beam is skipped:
-it is reported as `cached` in the output, its stored logs are replayed in
-its place, and the run's summary counts it under `cached` rather than
-`succeeded`. Change any of those inputs, even a single character in one
-matched file, and the beam runs again.
+`cwd`, its `env`, its arguments, its executor (including a docker beam's
+image, volumes, and workdir, or a plugin beam's options), and every
+dependency's own fingerprint are all unchanged since the last successful
+run. If so, the beam is skipped: it is reported as `cached` in the
+output, its stored logs are replayed in its place, and the run's summary
+counts it under `cached` rather than `succeeded`. Change any of those
+inputs, even a single character in one matched file, and the beam runs
+again.
+
+The executor's fingerprint is only as precise as what it hashes, though:
+for `executor docker`, it is the `image` field's own text, not the image
+digest it currently resolves to, so repointing a mutable tag (`docker
+pull alpine:3` fetching a new build of the same `alpine:3`) does *not*
+invalidate the cache — the tag text is unchanged, even though what it
+points at is not. The same applies to a plugin: an updated
+`alba-executor-<name>` binary reachable under the same name and options
+is invisible to the fingerprint. Pin an image by digest, or bump a
+version somewhere the fingerprint does see (the image tag itself, a
+plugin option), to force a rebuild when only the thing behind a mutable
+reference changed.
 
 A beam without declared `inputs` is never cacheable and always runs. This
 is deliberate for beams whose own work is cheaper than hashing their
@@ -561,3 +576,96 @@ those.
 Whenever the rewrite is not worth it, `executor system_shell` on that one
 beam restores exactly the previous behavior, and the rest of the Beamfile
 keeps the cross-platform guarantee.
+
+## Docker executor
+
+`executor docker { image "..." }` runs a beam's commands inside a
+container instead of on the host, via the `docker` CLI:
+
+```
+beam ship {
+  executor docker {
+    image "alpine:3"
+    volumes ["/host/cache:/cache"]
+    workdir "/srv"
+  }
+  run "./deploy.sh"
+}
+```
+
+`image` is required; `volumes` (a list of `host:container` entries) and
+`workdir` (an absolute path inside the container) are optional. Alba
+starts one container per beam and keeps it alive, dormant, for every
+command that beam's `run` list runs, so state a command leaves behind
+(files written, anything a previous command set up) is visible to the
+next one in the same beam; the container is removed once the beam ends.
+The image must provide `/bin/sh`, since every command runs through
+`docker exec ... sh -c "<command>"`.
+
+The project directory is always bind-mounted into the container. On
+unix it is mounted at its own host path, so a beam's working directory
+needs no translation; on windows it is mounted at `/workspace` instead,
+with the working directory rewritten to the matching path under
+`/workspace`. A declared `workdir` always overrides that computed path.
+
+`volumes` are bind-mounted the same way, in addition to the project
+directory, but each entry is validated when the Beamfile loads, before
+any container exists: it must split on its last colon into a non-empty
+host part and a container part starting with `/` (a windows host path
+such as `C:\cache:/cache` keeps its own drive colon and still splits
+correctly, since only the last colon counts). A docker-style suffix
+appended after the container path, such as `:ro` for a read-only mount,
+does not fit that shape and is rejected at load time rather than reaching
+`docker` at all.
+
+Running a docker beam requires `docker` on the `PATH`; it reaches
+whichever daemon that `docker` CLI is itself configured to talk to
+(Docker Desktop, a remote context, an API-compatible lookalike).
+
+Every container Alba starts carries an `alba.beam=<name>` label. Alba
+itself removes the container once the beam ends, in every outcome
+(success, failure, cancellation); the label exists for the one case that
+is not one of those — an Alba process that is killed outright (`kill -9`,
+a crash) has no chance to run that removal. Find and clean up anything
+left behind that way with:
+
+```sh
+docker rm -f $(docker ps -aq --filter label=alba.beam)
+```
+
+## Plugins
+
+`executor <name> { ... }` for any `name` that is not `shell`,
+`system_shell`, or `docker` refers to an external plugin: a separate
+`alba-executor-<name>` binary on the `PATH` that Alba spawns and speaks
+a line-oriented JSON protocol to, one process per beam, kept alive for
+every command in that beam the same way the docker executor keeps its
+container alive.
+
+Alba resolves every plugin a run needs before any beam starts: a beam
+whose plugin cannot be found on the `PATH` fails the whole run
+immediately, with a suggestion when the name looks like a typo of a
+built-in executor:
+
+```sh
+$ alba run ghost
+beam `ghost` uses executor `nosuchthing`: `nosuchthing` is neither a
+built-in executor nor `alba-executor-nosuchthing` on the PATH
+```
+
+The full wire protocol (every message, its exact JSON shape, timeouts, and
+cancellation) is specified in
+[`docs/plugin-protocol.md`](docs/plugin-protocol.md). `crates/alba-executor-example`
+is a complete reference implementation to read alongside it.
+
+`alba plugin check <BINARY>` drives a plugin binary through that whole
+protocol and reports whether it conforms, without needing a Beamfile:
+
+```sh
+$ alba plugin check target/debug/alba-executor-example
+✓ handshake
+✓ execute: exit code 0, 1 output line
+✓ cancel (answered in 2.165583ms)
+✓ close
+conformant: protocol v1
+```

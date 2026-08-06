@@ -1,7 +1,8 @@
 //! End-to-end tests for `alba run`: dependency ordering, failure and
 //! cancellation semantics, the `--log-format json` stream, parameter
-//! interpolation, and the two ways a run can fail before it starts (a
-//! docker beam, an unknown target).
+//! interpolation, and a run that fails before it starts (an unknown
+//! target). The docker executor's own end-to-end tests live in
+//! `cli_docker.rs`.
 //!
 //! Every Beamfile here runs commands that behave the same on macOS, Linux,
 //! and Windows: `echo <word>` and `exit <n>` are all that is needed, and
@@ -291,20 +292,6 @@ fn beam_params_are_interpolated() {
         .assert()
         .success()
         .stdout(predicates::str::contains("hello world"));
-}
-
-/// `executor docker` parses, but no docker executor exists yet: the run is
-/// rejected before anything executes, as an Alba error (exit 2).
-#[test]
-fn docker_executor_is_rejected() {
-    let dir = project("beam ship { executor docker { image \"x\" } run \"echo hi\" }\n");
-
-    alba()
-        .current_dir(&dir)
-        .args(["run", "ship"])
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains("not yet supported"));
 }
 
 /// A misspelled target is an Alba error (exit 2) with the loader's

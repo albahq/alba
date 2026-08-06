@@ -16,8 +16,13 @@
 //! content, so `main.rs` dispatches it before loading — a Beamfile that
 //! does not even parse must not block cleaning the cache sitting next to
 //! it.
+//!
+//! `plugin` goes further still: `alba plugin check` needs no Beamfile at
+//! all, not even to locate a directory, since it drives a binary through
+//! the protocol directly. It is dispatched the same way, before loading.
 
 pub mod cache;
 pub mod check;
 pub mod list;
+pub mod plugin;
 pub mod run;

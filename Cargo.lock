@@ -69,6 +69,14 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "which",
+]
+
+[[package]]
+name = "alba-executor-example"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -78,6 +86,8 @@ dependencies = [
  "alba-shell",
  "async-trait",
  "nix 0.29.0",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

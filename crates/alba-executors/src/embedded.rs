@@ -4,7 +4,10 @@
 //! This is the default executor (`ExecutorKind::Shell`): every beam that
 //! does not declare `executor system_shell` runs here.
 
-use crate::{CommandSpec, ExecContext, ExecError, ExecResult, Executor, OutputLine, Stream};
+use crate::{
+    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
+    OutputLine, Stream,
+};
 
 /// Runs commands by parsing and interpreting them with `alba-shell`
 /// directly, in-process: no `sh`/`powershell` child is spawned for the
@@ -14,7 +17,22 @@ pub struct EmbeddedShellExecutor;
 
 #[async_trait::async_trait]
 impl Executor for EmbeddedShellExecutor {
-    async fn execute(&self, cmd: CommandSpec, ctx: ExecContext) -> Result<ExecResult, ExecError> {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(EmbeddedShellSession))
+    }
+}
+
+/// The embedded shell needs no state across a beam's commands: each one is
+/// parsed and interpreted independently, so `open`/`close` are trivial.
+struct EmbeddedShellSession;
+
+#[async_trait::async_trait]
+impl ExecSession for EmbeddedShellSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
         // A parse failure must never spawn anything: it becomes a beam
         // failure carrying the rendered diagnostic (message, source
         // excerpt, caret, and the `executor system_shell` suggestion) as
@@ -76,6 +94,18 @@ impl Executor for EmbeddedShellExecutor {
         Ok(ExecResult {
             exit_code: result.exit_code,
         })
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
+    }
+
+    async fn kill(self: Box<Self>) {
+        // No state of its own to reach: see the struct's doc comment.
+        // `execute` is only ever awaited to completion by this crate's own
+        // callers, never abandoned mid-flight through this session, so
+        // there is nothing here for `kill` to do beyond what `close`
+        // already does.
     }
 }
 

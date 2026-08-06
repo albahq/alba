@@ -4,10 +4,11 @@
 //! ## Shape
 //!
 //! [`run`] extracts the target's execution subgraph, rejects the two
-//! things that make a run unschedulable as a whole (an executor Alba does
-//! not implement, and parameters that do not match what the target
-//! declares) *before* starting any work, then spawns one tokio task per
-//! beam. Each task waits for its dependencies, renders its `run`/`env`
+//! things that make a run unschedulable as a whole (a plugin beam whose
+//! `alba-executor-<name>` binary is not on the `PATH`, and parameters that
+//! do not match what the target declares) *before* starting any work, then
+//! spawns one tokio task per beam. Each task waits for its dependencies,
+//! renders its `run`/`env`
 //! templates with the target's parameters in scope, takes a permit from a
 //! semaphore sized by [`RunOptions::jobs`], consults the cache, and — on a
 //! miss — runs its commands sequentially, stopping at the first one that
@@ -45,10 +46,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{
-    Beam, BeamId, CoreError, ExecutorKind, Project, execution_subgraph, expand_globs,
+    Beam, BeamId, CoreError, ExecutorKind, OptionValue, Project, execution_subgraph, expand_globs,
     outputs_satisfied, render_template,
 };
-use alba_executors::{CommandSpec, ExecContext, Executor, OutputLine, Stream};
+use alba_executors::{
+    BeamContext, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor, Stream,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
@@ -86,28 +89,34 @@ pub struct Executors {
     pub embedded: Arc<dyn Executor>,
     /// `ExecutorKind::SystemShell`: the per-beam opt-out.
     pub system: Arc<dyn Executor>,
+    /// `ExecutorKind::Docker`: a beam that opted into a container.
+    pub docker: Arc<dyn Executor>,
 }
 
 impl Executors {
-    /// Both slots on the same executor: what tests and `alba check` want.
+    /// All three slots on the same executor: what tests and `alba check`
+    /// want.
     pub fn uniform(executor: Arc<dyn Executor>) -> Self {
         Self {
             embedded: Arc::clone(&executor),
-            system: executor,
+            system: Arc::clone(&executor),
+            docker: executor,
         }
     }
 
     /// Which executor a beam's declared kind dispatches to.
     ///
-    /// `Docker` never reaches here: [`plan`] rejects a docker beam during
-    /// validation, before any beam task is built, so this beam's kind is
-    /// always `Shell` or `SystemShell` by the time a task asks.
+    /// Only ever called with a built-in kind: a plugin beam's executor is
+    /// built directly in [`run`] from the path [`resolve_plugins`] already
+    /// found for it, one [`PluginExecutor`] per plugin name rather than a
+    /// shared instance held here.
     fn for_beam(&self, kind: &ExecutorKind) -> Arc<dyn Executor> {
         match kind {
             ExecutorKind::Shell => Arc::clone(&self.embedded),
             ExecutorKind::SystemShell => Arc::clone(&self.system),
-            ExecutorKind::Docker { .. } => {
-                unreachable!("docker executor is rejected during validation, before scheduling")
+            ExecutorKind::Docker { .. } => Arc::clone(&self.docker),
+            ExecutorKind::Plugin { .. } => {
+                unreachable!("plugin beams are dispatched in `run`, never through `for_beam`")
             }
         }
     }
@@ -115,24 +124,122 @@ impl Executors {
 
 /// The fingerprint's own name for a beam's executor: participates in the
 /// cache key (see [`crate::cache::BeamFacts::executor`]) so switching a
-/// beam between `Shell` and `SystemShell` invalidates its cache entry even
-/// when nothing else about it changed.
-fn executor_label(kind: &ExecutorKind) -> &'static str {
+/// beam between `Shell` and `SystemShell`, or changing a docker image or a
+/// plugin option, invalidates its cache entry even when nothing else about
+/// it changed.
+fn executor_label(kind: &ExecutorKind) -> String {
     match kind {
-        ExecutorKind::Shell => "embedded",
-        ExecutorKind::SystemShell => "system",
-        ExecutorKind::Docker { .. } => {
-            unreachable!("docker executor is rejected during validation, before scheduling")
+        // Byte-identical to before: no field ever needs escaping, and
+        // existing cache manifests for shell beams must stay valid.
+        ExecutorKind::Shell => "embedded".to_string(),
+        ExecutorKind::SystemShell => "system".to_string(),
+        ExecutorKind::Docker {
+            image,
+            volumes,
+            workdir,
+        } => {
+            let mut label = String::from("docker");
+            push_field(&mut label, image);
+            push_field(&mut label, &volumes.len().to_string());
+            for volume in volumes {
+                push_field(&mut label, volume);
+            }
+            push_field(&mut label, workdir.as_deref().unwrap_or(""));
+            label
         }
+        ExecutorKind::Plugin { name, options } => {
+            let mut label = String::from("plugin");
+            push_field(&mut label, name);
+            push_field(&mut label, &options.len().to_string());
+            for (key, value) in options {
+                push_field(&mut label, key);
+                push_option_value(&mut label, value);
+            }
+            label
+        }
+    }
+}
+
+/// Appends `value` to `label` as a length-prefixed field: `|<byte
+/// length>:<value>`. Prefixing every field with its own byte length is what
+/// makes the field boundary unambiguous — without it, a value that itself
+/// contains the separator (a volume string with a `;`, a plugin option with
+/// a `,`) could forge a boundary and make two different configurations
+/// label identically, which would serve a stale cache hit for a beam whose
+/// image, mounts, or options actually changed.
+fn push_field(label: &mut String, value: &str) {
+    label.push_str(&format!("|{}:{value}", value.len()));
+}
+
+/// Appends one plugin option's value to `label`, folded into
+/// [`executor_label`] so a beam's cache entry changes with any option it
+/// declares. The value's kind is encoded alongside its content — not just
+/// length-prefixed on its own — so, say, `Str("a,b")` cannot label the same
+/// as `List(["a", "b"])`.
+fn push_option_value(label: &mut String, value: &OptionValue) {
+    match value {
+        OptionValue::Str(v) => {
+            push_field(label, "str");
+            push_field(label, v);
+        }
+        OptionValue::Bool(v) => {
+            push_field(label, "bool");
+            push_field(label, if *v { "true" } else { "false" });
+        }
+        OptionValue::List(v) => {
+            push_field(label, "list");
+            push_field(label, &v.len().to_string());
+            for item in v {
+                push_field(label, item);
+            }
+        }
+    }
+}
+
+/// What a session's `BeamContext.options` carries for this beam's kind.
+/// The shell executors take no options; a docker beam's configuration is
+/// exactly what its executor needs to deserialize; a plugin beam's is its
+/// declared options, verbatim, as the plugin binary is the only party that
+/// knows how to interpret them.
+fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
+    match kind {
+        ExecutorKind::Shell | ExecutorKind::SystemShell => serde_json::Value::Null,
+        ExecutorKind::Docker {
+            image,
+            volumes,
+            workdir,
+        } => serde_json::json!({
+            "image": image,
+            "volumes": volumes,
+            "workdir": workdir,
+        }),
+        ExecutorKind::Plugin { options, .. } => serde_json::Value::Object(
+            options
+                .iter()
+                .map(|(key, value)| (key.clone(), option_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// One plugin option's value, converted from the core model's
+/// [`OptionValue`] into the JSON shape [`executor_options`] hands the
+/// plugin — a `List` becomes a JSON array of strings, matching how the
+/// docker options above already serialize theirs.
+fn option_json(value: &OptionValue) -> serde_json::Value {
+    match value {
+        OptionValue::Str(v) => serde_json::Value::String(v.clone()),
+        OptionValue::Bool(v) => serde_json::Value::Bool(*v),
+        OptionValue::List(v) => v.iter().cloned().map(serde_json::Value::String).collect(),
     }
 }
 
 /// Runs `target` and everything it needs, and reports what happened.
 ///
 /// Returns `Err` only for something Alba itself cannot do — an unknown
-/// target, a docker beam, wrong parameters — or for a beam's task
-/// panicking, which is a bug rather than an outcome. A beam that merely
-/// fails is not an error: it lands in [`RunSummary::failed`], and
+/// target, an unresolvable plugin beam, wrong parameters — or for a
+/// beam's task panicking, which is a bug rather than an outcome. A beam
+/// that merely fails is not an error: it lands in [`RunSummary::failed`], and
 /// [`RunSummary::exit_code`] turns that into the process exit code.
 /// `RunFinished` is emitted last, and only on the `Ok` path — an `Err` has
 /// no summary to report.
@@ -145,7 +252,7 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<RunSummary, EngineError> {
     let started_at = Instant::now();
-    let beams = plan(project, target, &options.params)?;
+    let (beams, plugins) = plan(project, target, &options.params)?;
 
     let _ = events.send(RunEvent::RunStarted {
         target: target.clone(),
@@ -213,7 +320,12 @@ pub async fn run(
             dependencies,
             status,
             slots: Arc::clone(&slots),
-            executor: executors.for_beam(&beam.executor),
+            executor: match &beam.executor {
+                ExecutorKind::Plugin { name, .. } => {
+                    Arc::new(PluginExecutor::new(plugins[name.as_str()].clone()))
+                }
+                kind => executors.for_beam(kind),
+            },
             events: events.clone(),
             cancel: cancel.clone(),
             stop: stop.clone(),
@@ -248,19 +360,20 @@ pub async fn run(
     Ok(summary)
 }
 
-/// The beams to run, in the project's declaration order, once the two
-/// things that make a run unschedulable as a whole have been ruled out.
+/// The beams to run, in the project's declaration order, and the binary
+/// path resolved for each distinct plugin name among them, once the things
+/// that make a run unschedulable as a whole have been ruled out.
 ///
-/// Both checks happen here, before [`run`] spawns anything, so a docker
-/// beam or a bad parameter list fails the run without half of its subgraph
-/// having already executed. They are the only such checks: everything else
-/// that can go wrong belongs to one beam and is reported as that beam's
-/// failure once the run is under way.
+/// These checks happen here, before [`run`] spawns anything, so a plugin
+/// beam whose binary is missing, or a bad parameter list, fails the run
+/// without half of its subgraph having already executed. They are the only
+/// such checks: everything else that can go wrong belongs to one beam and
+/// is reported as that beam's failure once the run is under way.
 fn plan<'a>(
     project: &'a Project,
     target: &BeamId,
     params: &[String],
-) -> Result<Vec<&'a Beam>, EngineError> {
+) -> Result<(Vec<&'a Beam>, HashMap<String, PathBuf>), EngineError> {
     let subgraph = execution_subgraph(project, target)?;
     let ids: HashSet<&str> = subgraph.iter().map(|id| id.0.as_str()).collect();
     let beams: Vec<&Beam> = project
@@ -269,17 +382,49 @@ fn plan<'a>(
         .filter(|beam| ids.contains(beam.id.0.as_str()))
         .collect();
 
-    if beams
-        .iter()
-        .any(|beam| matches!(beam.executor, ExecutorKind::Docker { .. }))
-    {
-        return Err(EngineError::Unschedulable(
-            "docker executor is not yet supported".to_string(),
-        ));
-    }
+    let plugins = resolve_plugins(&beams, |binary| which::which(binary).ok())?;
     check_parameters(&beams, target, params)?;
 
-    Ok(beams)
+    Ok((beams, plugins))
+}
+
+/// Resolves every distinct plugin name in the subgraph to its binary, or
+/// fails the run before anything starts. `lookup` receives the binary
+/// name (`alba-executor-<name>`) and answers with its path; production
+/// passes a `which` lookup, tests inject their own.
+fn resolve_plugins(
+    beams: &[&Beam],
+    lookup: impl Fn(&str) -> Option<PathBuf>,
+) -> Result<HashMap<String, PathBuf>, EngineError> {
+    let mut resolved = HashMap::new();
+    for beam in beams {
+        let ExecutorKind::Plugin { name, .. } = &beam.executor else {
+            continue;
+        };
+        if resolved.contains_key(name.as_str()) {
+            continue;
+        }
+        let binary = format!("alba-executor-{name}");
+        match lookup(&binary) {
+            Some(path) => {
+                resolved.insert(name.clone(), path);
+            }
+            None => {
+                let mut message = format!(
+                    "beam `{}` uses executor `{name}`: `{name}` is neither a built-in \
+                     executor nor `{binary}` on the PATH",
+                    beam.id.0,
+                );
+                if let Some(candidate) =
+                    alba_core::suggest(name, ["shell", "system_shell", "docker"].into_iter())
+                {
+                    message.push_str(&format!(" — did you mean `{candidate}`?"));
+                }
+                return Err(EngineError::Unschedulable(message));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// Checks that the run's positional arguments match what the target beam
@@ -518,7 +663,7 @@ async fn process(
             &plan.cwd.to_string_lossy(),
             &plan.env,
             &task.args,
-            executor_label(&task.beam.executor),
+            &executor_label(&task.beam.executor),
         )),
         (None, None) => None,
     };
@@ -615,7 +760,7 @@ struct CacheableBeam {
     args: Vec<String>,
     needs: Vec<String>,
     force: bool,
-    executor: &'static str,
+    executor: String,
 }
 
 impl CacheableBeam {
@@ -662,7 +807,7 @@ impl CacheableBeam {
             env: &self.env,
             args: &self.args,
             needs: &self.needs,
-            executor: self.executor,
+            executor: &self.executor,
         });
 
         let hit = (!self.force)
@@ -832,21 +977,59 @@ fn render(beam: &Beam, args: &[String]) -> Result<RenderedBeam, EngineError> {
 /// own fallback for a child with no discrete exit code.
 const NO_EXIT_CODE: i32 = -1;
 
-/// Runs the beam's commands one after another, stopping at the first
-/// failure, and classifies the outcome.
+/// Opens the beam's session, runs its commands one after another through
+/// it, stopping at the first failure, and closes the session — in every
+/// case, whether the commands succeeded, failed, or were cancelled.
 ///
 /// A command that could not be spawned at all is that beam's failure, not
 /// the run's: a missing shell or a `cwd` that does not exist is a per-beam
 /// problem, which is exactly what `keep_going` and `allow_failure` are
-/// about. The executor's message would otherwise be lost, so it is emitted
-/// as a stderr line first — the CLI already renders those where the user
-/// is looking.
+/// about. Likewise for a session that could not be opened at all — no
+/// runtime, a missing image. The executor's message would otherwise be
+/// lost, so it is emitted as a stderr line first — the CLI already renders
+/// those where the user is looking.
 async fn run_commands(
     task: &BeamTask,
     plan: &RenderedBeam,
     output: &UnboundedSender<OutputLine>,
 ) -> BeamStatus {
+    let context = BeamContext {
+        beam: task.beam.id.0.clone(),
+        dir: task.beam.dir.clone(),
+        options: executor_options(&task.beam.executor),
+        output: output.clone(),
+        cancel: task.cancel.clone(),
+    };
+    let mut session = match task.executor.open(context).await {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = output.send(OutputLine {
+                stream: Stream::Stderr,
+                text: error.to_string(),
+            });
+            return if task.cancel.is_cancelled() {
+                BeamStatus::Cancelled
+            } else {
+                failure_status(task)
+            };
+        }
+    };
+
+    let mut status = BeamStatus::Succeeded;
     for command in &plan.commands {
+        // Rechecked before every command, not just relied on to end the
+        // loop through a failing exit code: `docs/plugin-protocol.md`
+        // leaves what a cancelled command's `exit` code says entirely up
+        // to the plugin (`-1` is only the reference plugin's own
+        // convention), so a conformant plugin that answers a cancelled
+        // command with `{"type":"exit","code":0}` must not make this loop
+        // read that as "keep going" and dispatch the beam's remaining
+        // commands one by one, each opening only to be cancelled again.
+        if task.cancel.is_cancelled() {
+            status = BeamStatus::Cancelled;
+            break;
+        }
+
         let spec = CommandSpec {
             command: command.clone(),
             env: plan.env.clone(),
@@ -857,7 +1040,7 @@ async fn run_commands(
             cancel: task.cancel.clone(),
         };
 
-        let exit_code = match task.executor.execute(spec, context).await {
+        let exit_code = match session.execute(spec, context).await {
             Ok(result) if result.exit_code == 0 => continue,
             Ok(result) => result.exit_code,
             Err(error) => {
@@ -873,15 +1056,26 @@ async fn run_commands(
         // reserved to mean "was killed" (`-1` is a legitimate one on
         // windows), so the token — not the code — is what tells a
         // cancellation apart from a genuine failure.
-        return if task.cancel.is_cancelled() {
+        status = if task.cancel.is_cancelled() {
             BeamStatus::Cancelled
         } else if task.beam.allow_failure {
             BeamStatus::FailedAllowed { exit_code }
         } else {
             BeamStatus::Failed { exit_code }
         };
+        break;
     }
-    BeamStatus::Succeeded
+
+    // Guaranteed cleanup: success, failure, and cancellation all pass
+    // here. A close failure is a notice, never a verdict change — the
+    // commands' own outcome is already decided.
+    if let Err(error) = session.close().await {
+        let _ = output.send(OutputLine {
+            stream: Stream::Stderr,
+            text: format!("session close: {error}"),
+        });
+    }
+    status
 }
 
 /// Relabels an executor's output lines as this beam's output events until
@@ -902,4 +1096,203 @@ async fn forward_output(
         seen.push(line);
     }
     seen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_labels_are_unchanged() {
+        assert_eq!(executor_label(&ExecutorKind::Shell), "embedded");
+        assert_eq!(executor_label(&ExecutorKind::SystemShell), "system");
+    }
+
+    #[test]
+    fn a_docker_label_changes_with_every_piece_of_its_configuration() {
+        let base = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec![],
+            workdir: None,
+        };
+        let other_image = ExecutorKind::Docker {
+            image: "alpine:4".into(),
+            volumes: vec![],
+            workdir: None,
+        };
+        let with_volume = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec!["h:/c".into()],
+            workdir: None,
+        };
+        let with_workdir = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec![],
+            workdir: Some("/w".into()),
+        };
+        let labels: Vec<String> = [&base, &other_image, &with_volume, &with_workdir]
+            .iter()
+            .map(|kind| executor_label(kind))
+            .collect();
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(
+            unique.len(),
+            4,
+            "every configuration must label distinctly: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_label_changes_with_its_options() {
+        let a = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("image".into(), OptionValue::Str("x".into()))],
+        };
+        let b = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("image".into(), OptionValue::Str("y".into()))],
+        };
+        assert_ne!(executor_label(&a), executor_label(&b));
+    }
+
+    /// A single volume string containing `;workdir=` must not be able to
+    /// forge a workdir field boundary and land on the same label as a
+    /// distinct configuration that actually sets that workdir.
+    #[test]
+    fn a_volume_cannot_forge_a_workdir_boundary() {
+        let injected_volume = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a;workdir=X".into()],
+            workdir: None,
+        };
+        let real_workdir = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a".into()],
+            workdir: Some("X;workdir=".into()),
+        };
+        assert_ne!(
+            executor_label(&injected_volume),
+            executor_label(&real_workdir)
+        );
+    }
+
+    /// One volume whose path contains a comma must not label the same as
+    /// two separate volumes joined by a comma.
+    #[test]
+    fn a_comma_inside_a_volume_cannot_forge_a_second_volume() {
+        let one_volume = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a,b".into()],
+            workdir: None,
+        };
+        let two_volumes = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a".into(), "b".into()],
+            workdir: None,
+        };
+        assert_ne!(executor_label(&one_volume), executor_label(&two_volumes));
+    }
+
+    /// Two plugin options must not label the same as one option whose value
+    /// happens to contain the `;key=value` separator sequence.
+    #[test]
+    fn a_plugin_option_value_cannot_forge_a_second_option() {
+        let two_options = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![
+                ("a".into(), OptionValue::Str("1".into())),
+                ("b".into(), OptionValue::Str("2".into())),
+            ],
+        };
+        let injected_option = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("a".into(), OptionValue::Str("1;b=2".into()))],
+        };
+        assert_ne!(
+            executor_label(&two_options),
+            executor_label(&injected_option)
+        );
+    }
+
+    /// A `List` option whose only element contains a comma must not label
+    /// the same as a `List` with two separate elements.
+    #[test]
+    fn a_comma_inside_a_list_option_value_cannot_forge_a_second_element() {
+        let one_element = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("flags".into(), OptionValue::List(vec!["a,b".into()]))],
+        };
+        let two_elements = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![(
+                "flags".into(),
+                OptionValue::List(vec!["a".into(), "b".into()]),
+            )],
+        };
+        assert_ne!(executor_label(&one_element), executor_label(&two_elements));
+    }
+
+    /// A `Str` option must not label the same as a `List` option carrying
+    /// the same joined text: the value's kind is itself part of the label.
+    #[test]
+    fn a_str_option_cannot_forge_a_list_option_of_the_same_text() {
+        let as_str = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("flags".into(), OptionValue::Str("a,b".into()))],
+        };
+        let as_list = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![(
+                "flags".into(),
+                OptionValue::List(vec!["a".into(), "b".into()]),
+            )],
+        };
+        assert_ne!(executor_label(&as_str), executor_label(&as_list));
+    }
+
+    #[test]
+    fn a_missing_plugin_names_the_search_and_suggests_the_typo() {
+        let project =
+            alba_core::load_str(r#"beam d { executor dokcer { image "x" } run "x" }"#).unwrap();
+        let beams: Vec<&Beam> = project.beams.iter().collect();
+        let err = resolve_plugins(&beams, |_| None).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(
+                "`dokcer` is neither a built-in executor nor `alba-executor-dokcer` on the PATH"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("did you mean `docker`?"), "{message}");
+    }
+
+    #[test]
+    fn resolution_collects_one_path_per_distinct_plugin_name() {
+        let project = alba_core::load_str(
+            r#"
+beam a { executor podman { image "x" } run "a" }
+beam b { executor podman { image "y" } run "b" }
+beam c { executor remote run "c" }
+"#,
+        )
+        .unwrap();
+        let beams: Vec<&Beam> = project.beams.iter().collect();
+        let resolved = resolve_plugins(&beams, |binary| {
+            Some(PathBuf::from(format!("/bin/{binary}")))
+        })
+        .unwrap();
+        let expected: HashMap<String, PathBuf> = [
+            (
+                "podman".to_string(),
+                PathBuf::from("/bin/alba-executor-podman"),
+            ),
+            (
+                "remote".to_string(),
+                PathBuf::from("/bin/alba-executor-remote"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(resolved, expected);
+    }
 }

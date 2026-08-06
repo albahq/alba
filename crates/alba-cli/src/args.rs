@@ -46,6 +46,11 @@ pub enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    /// Work with executor plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
 }
 
 /// A subcommand of `alba cache`. `clean` is deliberately the only one for
@@ -55,6 +60,32 @@ pub enum Command {
 pub enum CacheCommand {
     /// Remove every cache entry for this project.
     Clean,
+}
+
+/// A subcommand of `alba plugin`. `check` is deliberately the only one for
+/// now; the subcommand level exists so a future `alba plugin scaffold` (or
+/// similar) can join it without breaking the CLI's shape.
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    /// Drive an executor plugin binary through protocol v1 and report
+    /// whether it conforms.
+    Check {
+        /// Path to the plugin binary to check.
+        #[arg(value_name = "BINARY")]
+        binary: PathBuf,
+        /// The command sent in the execution check.
+        #[arg(long, value_name = "CMD", default_value = "echo alba-plugin-check")]
+        command: String,
+        /// A long-running command for the cancellation check; the plugin
+        /// must answer the cancel within the 5-second grace.
+        ///
+        /// Must run well past the 100ms the check waits before sending
+        /// `cancel` — otherwise the command finishes on its own first and
+        /// the check cannot tell that apart from a prompt answer. 30
+        /// seconds comfortably outlives both that delay and the grace.
+        #[arg(long, value_name = "CMD", default_value = "sleep 30000")]
+        cancel_command: String,
+    },
 }
 
 /// Everything that shapes a run, as opposed to what the Beamfile declares.

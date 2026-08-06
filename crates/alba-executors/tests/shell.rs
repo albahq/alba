@@ -13,7 +13,9 @@
 
 use std::time::Duration;
 
-use alba_executors::{CommandSpec, ExecContext, Executor, SystemShellExecutor};
+use alba_executors::{
+    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, Executor, SystemShellExecutor,
+};
 
 fn exit_with_code(code: i32) -> String {
     format!("exit {code}")
@@ -45,6 +47,25 @@ fn spec(command: impl Into<String>) -> CommandSpec {
         env: vec![],
         cwd: std::env::current_dir().unwrap(),
     }
+}
+
+/// Opens a fresh session on [`SystemShellExecutor`], runs one command
+/// through it, and closes it — the whole `open`/`execute`/`close` bracket
+/// collapsed to a single call, since none of these tests need a session
+/// that outlives one command.
+async fn exec(cmd: CommandSpec, ctx: ExecContext) -> Result<ExecResult, ExecError> {
+    let (output, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let beam = BeamContext {
+        beam: "test".to_string(),
+        dir: std::env::current_dir().unwrap(),
+        options: serde_json::Value::Null,
+        output,
+        cancel: ctx.cancel.clone(),
+    };
+    let mut session = SystemShellExecutor.open(beam).await.unwrap();
+    let result = session.execute(cmd, ctx).await;
+    session.close().await.unwrap();
+    result
 }
 
 fn ctx() -> (
@@ -83,20 +104,19 @@ fn cancel_after(
 #[tokio::test]
 async fn runs_command_and_streams_lines() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let result = SystemShellExecutor
-        .execute(
-            CommandSpec {
-                command: "echo hello".into(),
-                env: vec![],
-                cwd: std::env::current_dir().unwrap(),
-            },
-            ExecContext {
-                output: tx,
-                cancel: Default::default(),
-            },
-        )
-        .await
-        .unwrap();
+    let result = exec(
+        CommandSpec {
+            command: "echo hello".into(),
+            env: vec![],
+            cwd: std::env::current_dir().unwrap(),
+        },
+        ExecContext {
+            output: tx,
+            cancel: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(result.exit_code, 0);
     assert_eq!(rx.recv().await.unwrap().text, "hello");
 }
@@ -104,24 +124,20 @@ async fn runs_command_and_streams_lines() {
 #[tokio::test]
 async fn propagates_exit_code_and_env() {
     let (context, _rx) = ctx();
-    let result = SystemShellExecutor
-        .execute(spec(exit_with_code(3)), context)
-        .await
-        .unwrap();
+    let result = exec(spec(exit_with_code(3)), context).await.unwrap();
     assert_eq!(result.exit_code, 3);
 
     let (context, mut rx) = ctx();
-    let result = SystemShellExecutor
-        .execute(
-            CommandSpec {
-                command: print_env_var("ALBA_TEST_VAR"),
-                env: vec![("ALBA_TEST_VAR".into(), "hi-there".into())],
-                cwd: std::env::current_dir().unwrap(),
-            },
-            context,
-        )
-        .await
-        .unwrap();
+    let result = exec(
+        CommandSpec {
+            command: print_env_var("ALBA_TEST_VAR"),
+            env: vec![("ALBA_TEST_VAR".into(), "hi-there".into())],
+            cwd: std::env::current_dir().unwrap(),
+        },
+        context,
+    )
+    .await
+    .unwrap();
     assert_eq!(result.exit_code, 0);
     assert_eq!(rx.recv().await.unwrap().text, "hi-there");
 }
@@ -132,10 +148,7 @@ async fn cancellation_terminates_child() {
     let cancel = context.cancel.clone();
     let cancelled_at = cancel_after(cancel, Duration::from_millis(100));
 
-    let result = SystemShellExecutor
-        .execute(spec(sleep_seconds(30)), context)
-        .await
-        .unwrap();
+    let result = exec(spec(sleep_seconds(30)), context).await.unwrap();
     let returned_at = tokio::time::Instant::now();
 
     // exit_code is platform/signal dependent (a killed process does not
@@ -178,8 +191,7 @@ async fn cancellation_delivers_a_real_sigterm() {
     let cancel = context.cancel.clone();
     let _cancelled_at = cancel_after(cancel, Duration::from_millis(200));
 
-    let result = SystemShellExecutor
-        .execute(spec("trap 'exit 42' TERM; sleep 30"), context)
+    let result = exec(spec("trap 'exit 42' TERM; sleep 30"), context)
         .await
         .unwrap();
 
@@ -212,10 +224,7 @@ async fn cancellation_escalates_to_sigkill_after_grace_period() {
     let cancel = context.cancel.clone();
     let cancelled_at = cancel_after(cancel, Duration::from_millis(200));
 
-    let _result = SystemShellExecutor
-        .execute(spec("trap '' TERM; sleep 30"), context)
-        .await
-        .unwrap();
+    let _result = exec(spec("trap '' TERM; sleep 30"), context).await.unwrap();
     let returned_at = tokio::time::Instant::now();
     let elapsed = returned_at - cancelled_at.await.unwrap();
 
@@ -246,13 +255,12 @@ async fn cancellation_kills_the_whole_process_group() {
     let cancel = context.cancel.clone();
     let _cancelled_at = cancel_after(cancel, Duration::from_millis(200));
 
-    SystemShellExecutor
-        .execute(
-            spec(format!("(sleep 4; touch {}) & wait", marker.display())),
-            context,
-        )
-        .await
-        .unwrap();
+    exec(
+        spec(format!("(sleep 4; touch {}) & wait", marker.display())),
+        context,
+    )
+    .await
+    .unwrap();
 
     // Give a would-be-surviving grandchild ample time to finish its 4s
     // sleep and create the marker before asserting it did not.
@@ -285,8 +293,7 @@ async fn cancellation_of_a_trap_ignoring_command_with_a_backgrounded_child_does_
     let cancel = context.cancel.clone();
     let cancelled_at = cancel_after(cancel, Duration::from_millis(200));
 
-    let _result = SystemShellExecutor
-        .execute(spec("trap '' TERM; sleep 30 & wait"), context)
+    let _result = exec(spec("trap '' TERM; sleep 30 & wait"), context)
         .await
         .unwrap();
     let elapsed = tokio::time::Instant::now() - cancelled_at.await.unwrap();
@@ -308,10 +315,7 @@ async fn cancellation_of_a_trap_ignoring_command_with_a_backgrounded_child_does_
 async fn uncancelled_run_does_not_block_on_a_backgrounded_descendant() {
     let (context, _rx) = ctx();
     let start = tokio::time::Instant::now();
-    let result = SystemShellExecutor
-        .execute(spec("sleep 6 & echo done"), context)
-        .await
-        .unwrap();
+    let result = exec(spec("sleep 6 & echo done"), context).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(result.exit_code, 0);

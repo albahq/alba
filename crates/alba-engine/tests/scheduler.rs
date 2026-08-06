@@ -13,14 +13,14 @@
 //! asserting real concurrency run on a multi-threaded one.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
 use alba_engine::{BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, run};
 use alba_executors::{
-    CommandSpec, ExecContext, ExecError, ExecResult, Executor, FakeBehavior, FakeExecutor,
-    OutputLine, Stream,
+    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
+    FakeBehavior, FakeEvent, FakeExecutor, OutputLine, Stream,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -476,7 +476,20 @@ struct SpawnFailureExecutor;
 
 #[async_trait::async_trait]
 impl Executor for SpawnFailureExecutor {
-    async fn execute(&self, cmd: CommandSpec, _ctx: ExecContext) -> Result<ExecResult, ExecError> {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(SpawnFailureSession))
+    }
+}
+
+struct SpawnFailureSession;
+
+#[async_trait::async_trait]
+impl ExecSession for SpawnFailureSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        _ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
         if cmd.command.contains("broken") {
             return Err(ExecError {
                 message: format!("failed to spawn `{}`", cmd.command),
@@ -484,6 +497,12 @@ impl Executor for SpawnFailureExecutor {
         }
         Ok(ExecResult { exit_code: 0 })
     }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
+    }
+
+    async fn kill(self: Box<Self>) {}
 }
 
 /// A command that never produced an exit code is that beam's failure, not
@@ -700,29 +719,53 @@ beam b { needs [a] run "step b" }
     assert_eq!(ids(&outcome.summary().succeeded), ["a", "b"]);
 }
 
+/// A docker beam dispatches to the `docker` executor slot, never to
+/// `embedded` or `system`, and its rendered configuration reaches the
+/// session as `BeamContext.options`.
 #[tokio::test]
-async fn docker_executor_is_rejected_before_anything_runs() {
+async fn a_docker_beam_dispatches_to_the_docker_slot_with_its_options() {
     const SOURCE: &str = r#"
-beam build { run "step build" }
-beam deploy {
-  needs [build]
-  executor docker { image "deployer:latest" }
-  run "step deploy"
+beam ship {
+  executor docker { image "alpine:3" workdir "/w" }
+  run "deploy"
 }
 "#;
 
-    let executor = Arc::new(FakeExecutor::new());
-    let outcome = run_target(SOURCE, "deploy", options(2, false), executor.clone()).await;
+    let fake_a = Arc::new(FakeExecutor::new());
+    let fake_b = Arc::new(FakeExecutor::new());
+    let outcome = run_target_with_executors(
+        SOURCE,
+        "ship",
+        options(2, false),
+        Executors {
+            embedded: fake_a.clone(),
+            system: fake_a.clone(),
+            docker: fake_b.clone(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
 
+    assert_eq!(ids(&outcome.summary().succeeded), ["ship"]);
     assert_eq!(
-        outcome.error().to_string(),
-        "docker executor is not yet supported"
+        fake_b.events(),
+        vec![
+            FakeEvent::Opened {
+                beam: "ship".to_string(),
+                options: serde_json::json!({"image": "alpine:3", "volumes": [], "workdir": "/w"}),
+            },
+            FakeEvent::Executed {
+                command: "deploy".to_string(),
+            },
+            FakeEvent::Closed {
+                beam: "ship".to_string(),
+            },
+        ]
     );
     assert!(
-        commands(&executor).is_empty(),
-        "the rejection happens before any beam starts"
+        fake_a.events().is_empty(),
+        "neither the embedded nor the system slot must see this beam"
     );
-    assert!(outcome.events.is_empty(), "no event is emitted either");
 }
 
 #[tokio::test]
@@ -803,6 +846,7 @@ beam all { needs [a, b] run "step all" }
     let executors = Executors {
         embedded: embedded.clone(),
         system: system.clone(),
+        docker: Arc::new(FakeExecutor::new()),
     };
 
     let outcome = run_target_with_executors(
@@ -827,8 +871,11 @@ beam all { needs [a, b] run "step all" }
     );
 }
 
-/// `executor system_shell` is a real, implemented executor kind: it must
-/// not trip the same unschedulability gate that rejects `docker`.
+/// `executor system_shell` is a real, implemented executor kind, exactly
+/// like `executor docker` — neither trips the unschedulability gate `run`
+/// applies before starting any beam, which only ever rejects an
+/// unresolvable plugin executor or a parameter mismatch (see the module
+/// doc comment's "Shape" section).
 #[tokio::test]
 async fn a_system_shell_beam_passes_validation() {
     const SOURCE: &str = r#"
@@ -890,4 +937,252 @@ beam build { needs [helper] run "step build" }
         "beam `helper` declares parameters, but only the target beam can be given any"
     );
     assert!(commands(&executor).is_empty());
+}
+
+/// A plugin binary missing from the `PATH` is caught during planning, the
+/// same as any other unschedulable run: nothing is spawned, and the fake
+/// executor — which would stand in for every built-in kind — never sees a
+/// single event.
+#[tokio::test]
+async fn a_run_with_an_unresolvable_plugin_fails_before_starting_anything() {
+    const SOURCE: &str = r#"
+beam d { executor notinstalled run "x" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "d", options(2, false), executor.clone()).await;
+
+    assert!(matches!(outcome.error(), EngineError::Unschedulable(_)));
+    assert!(executor.events().is_empty());
+}
+
+/// A beam's single session brackets every one of its commands: `open` runs
+/// once before the first command, `execute` runs once per command, and
+/// `close` runs once after the last — never interleaved with another
+/// beam's session, since this beam declares no dependents to race against.
+#[tokio::test]
+async fn a_beam_opens_one_session_runs_its_commands_in_it_and_closes_it() {
+    const SOURCE: &str = r#"
+beam build { run ["echo a", "echo b"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    assert_eq!(ids(&outcome.summary().succeeded), ["build"]);
+    assert_eq!(
+        executor.events(),
+        vec![
+            FakeEvent::Opened {
+                beam: "build".to_string(),
+                options: serde_json::Value::Null,
+            },
+            FakeEvent::Executed {
+                command: "echo a".to_string(),
+            },
+            FakeEvent::Executed {
+                command: "echo b".to_string(),
+            },
+            FakeEvent::Closed {
+                beam: "build".to_string(),
+            },
+        ]
+    );
+}
+
+/// `close` is guaranteed cleanup, not a happy-path courtesy: a beam whose
+/// first command fails must still close its session, and the commands after
+/// the failing one must never reach it.
+#[tokio::test]
+async fn the_session_closes_even_when_a_command_fails() {
+    const SOURCE: &str = r#"
+beam build { run ["boom", "echo never"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("boom", behavior(1, 0)));
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    assert_eq!(ids(&outcome.summary().failed), ["build"]);
+    let events = executor.events();
+    assert!(
+        matches!(events.last(), Some(FakeEvent::Closed { beam }) if beam == "build"),
+        "the session must still close after the failing command: {events:?}"
+    );
+    assert!(
+        !events.iter().any(
+            |event| matches!(event, FakeEvent::Executed { command } if command == "echo never")
+        ),
+        "the command after the failing one must never run: {events:?}"
+    );
+}
+
+/// The same guarantee under cancellation: a session opened for a beam whose
+/// only command is cancelled mid-flight must still close.
+#[tokio::test]
+async fn the_session_closes_when_the_run_is_cancelled_mid_command() {
+    const SOURCE: &str = r#"
+beam build { run "slow" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("slow", behavior(0, 30_000)));
+    let cancel = CancellationToken::new();
+
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+
+    let outcome =
+        run_target_with_cancel(SOURCE, "build", options(2, false), executor.clone(), cancel).await;
+
+    assert_eq!(ids(&outcome.summary().cancelled), ["build"]);
+    let events = executor.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Closed { beam } if beam == "build")),
+        "the session must still close after cancellation: {events:?}"
+    );
+}
+
+/// A minimal `Executor`, distinct from `FakeExecutor`, whose `execute`
+/// ignores cancellation entirely and always reports exit code 0 —
+/// modelling a plugin that answers a cancelled command with
+/// `{"type":"exit","code":0}`, a convention `docs/plugin-protocol.md`
+/// explicitly leaves open (only the reference plugin's own `-1` is
+/// documented, not required). `FakeSession` cannot model this: its own
+/// cancellation race always reports `-1`, which is exactly the code this
+/// scenario must NOT depend on.
+struct IgnoresCancelExecutor {
+    ran: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Executor for IgnoresCancelExecutor {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(IgnoresCancelSession {
+            ran: Arc::clone(&self.ran),
+        }))
+    }
+}
+
+struct IgnoresCancelSession {
+    ran: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ExecSession for IgnoresCancelSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        _ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
+        self.ran.lock().unwrap().push(cmd.command);
+        // Long enough that the test's cancellation trigger (10ms) fires
+        // while this is still running, short enough to keep the test
+        // fast — and never raced against `_ctx.cancel`, which is the
+        // whole point: this command finishes and reports success
+        // regardless of cancellation.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        Ok(ExecResult { exit_code: 0 })
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
+    }
+
+    async fn kill(self: Box<Self>) {}
+}
+
+/// The engine must not read a cancelled command's exit code as the only
+/// signal for whether to keep going: a beam whose first command answers
+/// `0` despite the run having been cancelled mid-flight must still stop
+/// there, not dispatch its remaining commands one after another. Pins
+/// Important finding 6 from the whole-branch review — the scheduler's
+/// command loop only ever broke on a non-zero exit code, so a conformant
+/// plugin using any convention besides the reference plugin's `-1` could
+/// make a cancelled beam run every remaining command anyway, each one
+/// opening only to be cancelled again.
+#[tokio::test]
+async fn cancellation_is_rechecked_between_commands_even_when_the_exit_code_is_zero() {
+    const SOURCE: &str = r#"
+beam build { run ["one", "two"] }
+"#;
+
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let executor = Arc::new(IgnoresCancelExecutor {
+        ran: Arc::clone(&ran),
+    });
+
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        trigger.cancel();
+    });
+
+    let outcome =
+        run_target_with_cancel(SOURCE, "build", options(2, false), executor, cancel).await;
+
+    assert_eq!(ids(&outcome.summary().cancelled), ["build"]);
+    assert_eq!(
+        *ran.lock().unwrap(),
+        vec!["one"],
+        "cancellation fired while `one` was still running, so `two` must \
+         never run even though `one` reported exit code 0"
+    );
+}
+
+/// An executor that cannot even open a session for this beam — no runtime,
+/// a missing image — is that beam's own failure, reported exactly like a
+/// command that could not be spawned: a stderr line carrying the message,
+/// then `Failed { exit_code: -1 }`. No command ever reaches a session that
+/// was never created, and there is nothing to close.
+#[tokio::test]
+async fn an_open_failure_is_the_beams_failure_with_the_message_on_stderr() {
+    const SOURCE: &str = r#"
+beam build { run "echo a" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().fail_open("build", "no runtime here"));
+    let outcome = run_target(SOURCE, "build", options(2, false), executor.clone()).await;
+
+    let summary = outcome.summary();
+    assert_eq!(ids(&summary.failed), ["build"]);
+    assert_eq!(summary.exit_code(), 1);
+
+    let events = &outcome.events;
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            RunEvent::BeamFinished { id, status, .. } if id.0 == "build" => Some(status.clone()),
+            _ => None,
+        })
+        .expect("`build` must finish");
+    assert_eq!(finished, BeamStatus::Failed { exit_code: -1 });
+
+    assert!(
+        events.iter().any(
+            |event| matches!(event, RunEvent::BeamOutput { id, line, .. }
+            if id.0 == "build"
+                && line.stream == Stream::Stderr
+                && line.text.contains("no runtime here"))
+        ),
+        "the open failure's message must reach the user as stderr output: {events:?}"
+    );
+
+    let fake_events = executor.events();
+    assert!(
+        !fake_events
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Executed { .. })),
+        "no command may reach a session that was never opened: {fake_events:?}"
+    );
+    assert!(
+        !fake_events
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Closed { .. })),
+        "there is no session to close: {fake_events:?}"
+    );
 }

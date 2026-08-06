@@ -1,0 +1,182 @@
+//! Scripted fake plugin binary driving `PluginExecutor`'s integration
+//! tests (`tests/plugin.rs`).
+//!
+//! Its behavior is selected by `argv[1]` (default `ok`) rather than by an
+//! `open` message or an environment variable — see
+//! `PluginExecutor::with_args`'s doc comment for why.
+
+use std::env;
+
+use alba_executors::protocol::{HostMessage, PluginMessage, WireStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout};
+
+#[tokio::main]
+async fn main() {
+    // `None` (no argv[1] at all) defaults to `ok`; any *explicit* but
+    // unrecognized mode fails loudly instead of silently behaving like
+    // `ok` — a typo in a test's mode string must not produce a green
+    // test that exercised nothing.
+    match env::args().nth(1).as_deref() {
+        None | Some("ok") => ok().await,
+        Some("die") => std::process::exit(3),
+        Some("mute") => mute(&mut reader()).await,
+        Some("garbage") => garbage().await,
+        Some("refuse") => refuse().await,
+        // A `deaf-`-prefixed mode behaves identically to plain `deaf`; the
+        // suffix is a discriminator a test can use to tell its own dropped
+        // child apart from a neighbouring test's in a process listing (see
+        // `a_dropped_session_does_not_leak_the_plugin_process`), not a
+        // distinct behavior.
+        Some(mode) if mode == "deaf" || mode.starts_with("deaf-") => deaf().await,
+        Some("stubborn") => stubborn().await,
+        Some("leaky-stderr") => leaky_stderr().await,
+        Some(other) => panic!("fake-plugin: unknown mode `{other}`"),
+    }
+}
+
+fn reader() -> Lines<BufReader<Stdin>> {
+    BufReader::new(tokio::io::stdin()).lines()
+}
+
+async fn write(out: &mut Stdout, message: &PluginMessage) {
+    let mut line = serde_json::to_string(message).expect("PluginMessage always serializes");
+    line.push('\n');
+    let _ = out.write_all(line.as_bytes()).await;
+    let _ = out.flush().await;
+}
+
+/// Reads and discards every line forever, answering nothing. This is
+/// `mute`'s whole behavior, and also the tail every other misbehaving mode
+/// falls into once it has done whatever it does before going silent, so
+/// the host's eventual kill always finds the process blocked in a read
+/// rather than racing an unrelated exit.
+async fn mute(lines: &mut Lines<BufReader<Stdin>>) {
+    while let Ok(Some(_line)) = lines.next_line().await {}
+}
+
+async fn garbage() {
+    let mut lines = reader();
+    let mut out = tokio::io::stdout();
+    let _ = out.write_all(b"this is not json\n").await;
+    let _ = out.flush().await;
+    mute(&mut lines).await;
+}
+
+async fn refuse() {
+    let mut lines = reader();
+    // The one message expected here is `open`; its content does not
+    // matter for this scenario, only that the answer is `error`.
+    if lines.next_line().await.unwrap_or(None).is_none() {
+        return;
+    }
+    let mut out = tokio::io::stdout();
+    write(
+        &mut out,
+        &PluginMessage::Error {
+            message: "protocol 1 not supported".to_string(),
+        },
+    )
+    .await;
+    mute(&mut lines).await;
+}
+
+/// Never touches stdin at all — not even to reach EOF. Distinct from
+/// `mute`, which *does* read (and discard) stdin forever: `mute` behaves
+/// like a plugin that drains its input but never answers, `stubborn`
+/// behaves like one that never even starts draining, so a write into its
+/// stdin eventually blocks once the OS pipe buffer fills. That is the
+/// scenario the write-bounding tests need — a misbehaving plugin that can
+/// wedge a write, not just a read.
+async fn stubborn() {
+    std::future::pending::<()>().await;
+}
+
+async fn deaf() {
+    let mut lines = reader();
+    if lines.next_line().await.unwrap_or(None).is_none() {
+        return;
+    }
+    let mut out = tokio::io::stdout();
+    write(&mut out, &PluginMessage::Ready).await;
+    // Ready at open, then silence: every later message (an `execute`, a
+    // `cancel`, anything) is read and discarded, never answered. This is
+    // what lets a test exercise a plugin that acknowledges the handshake
+    // but never reacts to anything afterwards, including cancellation.
+    mute(&mut lines).await;
+}
+
+/// Behaves exactly like `ok`, except it first leaks a descendant (`sleep
+/// 5`) that inherits this process's own stdio — including the write end
+/// of the pipe Alba reads this plugin's stderr from — and is never waited
+/// on. That descendant outlives this process: exiting on `close`, as `ok`
+/// does, closes only *this* process's end of that pipe, not the
+/// descendant's, so the pipe's read side sees no EOF until the descendant
+/// itself exits several seconds later. This is the scenario
+/// `close_drains_a_leaked_stderr_relay_before_returning` (in
+/// `tests/plugin.rs`) exercises: a plugin's own exit is not enough to
+/// guarantee its stderr relay task ends promptly.
+async fn leaky_stderr() {
+    let _ = std::process::Command::new("sleep").arg("5").spawn();
+    ok().await;
+}
+
+async fn ok() {
+    let mut lines = reader();
+    let Some(open_line) = lines.next_line().await.unwrap_or(None) else {
+        return;
+    };
+    if serde_json::from_str::<HostMessage>(&open_line).is_err() {
+        return;
+    }
+    let mut out = tokio::io::stdout();
+    write(&mut out, &PluginMessage::Ready).await;
+
+    loop {
+        let Some(line) = lines.next_line().await.unwrap_or(None) else {
+            return;
+        };
+        let Ok(message) = serde_json::from_str::<HostMessage>(&line) else {
+            continue;
+        };
+        match message {
+            HostMessage::Execute { command, .. } => {
+                execute(&command, &mut lines, &mut out).await;
+            }
+            HostMessage::Close => return,
+            HostMessage::Cancel | HostMessage::Open { .. } => {}
+        }
+    }
+}
+
+async fn execute(command: &str, lines: &mut Lines<BufReader<Stdin>>, out: &mut Stdout) {
+    if let Some(text) = command.strip_prefix("echo ") {
+        write(
+            out,
+            &PluginMessage::Output {
+                stream: WireStream::Stdout,
+                text: text.to_string(),
+            },
+        )
+        .await;
+        write(out, &PluginMessage::Exit { code: 0 }).await;
+    } else if let Some(code) = command.strip_prefix("fail ") {
+        let code: i32 = code.trim().parse().unwrap_or(1);
+        write(out, &PluginMessage::Exit { code }).await;
+    } else if command == "stderr-probe" {
+        eprintln!("raw stderr line");
+        write(out, &PluginMessage::Exit { code: 0 }).await;
+    } else if command == "hang" {
+        loop {
+            let Some(line) = lines.next_line().await.unwrap_or(None) else {
+                return;
+            };
+            if let Ok(HostMessage::Cancel) = serde_json::from_str::<HostMessage>(&line) {
+                write(out, &PluginMessage::Exit { code: -1 }).await;
+                return;
+            }
+            // Anything else while hanging is ignored, per the brief.
+        }
+    } else {
+        write(out, &PluginMessage::Exit { code: 1 }).await;
+    }
+}

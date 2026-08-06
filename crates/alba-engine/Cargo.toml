@@ -17,6 +17,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 alba-executors = { path = "../alba-executors", features = ["test-util"] }

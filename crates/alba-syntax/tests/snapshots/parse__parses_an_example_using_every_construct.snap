@@ -478,17 +478,19 @@ File {
                                     end: 572,
                                 },
                             },
-                            StringTemplate {
-                                parts: [
-                                    Literal(
-                                        "deployer:latest",
-                                    ),
-                                ],
-                                span: Span {
-                                    start: 573,
-                                    end: 590,
+                            Str(
+                                StringTemplate {
+                                    parts: [
+                                        Literal(
+                                            "deployer:latest",
+                                        ),
+                                    ],
+                                    span: Span {
+                                        start: 573,
+                                        end: 590,
+                                    },
                                 },
-                            },
+                            ),
                         ),
                     ],
                 },
