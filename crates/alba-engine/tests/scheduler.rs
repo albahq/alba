@@ -501,6 +501,8 @@ impl ExecSession for SpawnFailureSession {
     async fn close(self: Box<Self>) -> Result<(), ExecError> {
         Ok(())
     }
+
+    async fn kill(self: Box<Self>) {}
 }
 
 /// A command that never produced an exit code is that beam's failure, not

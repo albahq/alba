@@ -108,6 +108,13 @@ impl ExecSession for SystemShellSession {
     async fn close(self: Box<Self>) -> Result<(), ExecError> {
         Ok(())
     }
+
+    async fn kill(self: Box<Self>) {
+        // Nothing held across commands (see the struct's doc comment):
+        // each `execute` spawns, waits or cancels, and reaps its own
+        // child before ever returning, so there is no child left here for
+        // `kill` to reach.
+    }
 }
 
 fn build_command(cmd: &CommandSpec) -> Command {

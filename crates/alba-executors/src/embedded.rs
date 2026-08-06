@@ -99,6 +99,14 @@ impl ExecSession for EmbeddedShellSession {
     async fn close(self: Box<Self>) -> Result<(), ExecError> {
         Ok(())
     }
+
+    async fn kill(self: Box<Self>) {
+        // No state of its own to reach: see the struct's doc comment.
+        // `execute` is only ever awaited to completion by this crate's own
+        // callers, never abandoned mid-flight through this session, so
+        // there is nothing here for `kill` to do beyond what `close`
+        // already does.
+    }
 }
 
 /// Relays one shell output line to the executor's own output channel. A

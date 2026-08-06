@@ -144,8 +144,73 @@ fn plugin_check_passes_the_example_plugin() {
         .stdout(predicates::str::contains("\u{2713} handshake"))
         .stdout(predicates::str::contains("\u{2713} execute"))
         .stdout(predicates::str::contains("\u{2713} cancel"))
+        .stdout(predicates::str::contains("answered in"))
         .stdout(predicates::str::contains("\u{2713} close"))
         .stdout(predicates::str::contains("conformant"));
+}
+
+/// A plugin that answers the handshake and an ordinary command normally,
+/// but never answers `cancel` on a long-running one, must not be reported
+/// as conformant: `PluginExecutor` absorbs a plugin like this by
+/// force-killing it once its own grace elapses and handing back the same
+/// `Ok` a prompt answer would, so `Ok`/`Err` alone cannot catch it — only
+/// how long the answer took can (see `cancel_and_close_check`'s doc
+/// comment in `commands/plugin.rs`). `alba-executors` ships a scripted
+/// fake plugin with exactly this "answers everything but never reacts to
+/// cancel" shape (`fake-plugin`'s `deaf` mode), but its behavior is
+/// selected by an argv the wire protocol has no room to carry (see
+/// `PluginExecutor::with_args`'s doc comment) — and `deaf` ignores every
+/// message after the handshake, not just `cancel`, which would also fail
+/// this test's own execute check and make the whole run pay the 30s
+/// execute timeout on top of the cancel grace. A small script fixture
+/// keeps the two checks independent and the test fast: it answers `open`
+/// and any `echo` command immediately, and silently ignores everything
+/// else (a long-running command's `execute`, and the `cancel` sent for
+/// it) — the shape `commands/plugin.rs`'s own doc comment describes.
+#[cfg(unix)]
+#[test]
+fn plugin_check_reports_a_cancel_deaf_plugin() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("cancel-deaf-executor");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"open"'*)
+      printf '%s\n' '{"type":"ready"}'
+      ;;
+    *'"command":"echo'*)
+      printf '%s\n' '{"type":"exit","code":0}'
+      ;;
+    *'"type":"close"'*)
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    alba()
+        .args([
+            "plugin",
+            "check",
+            script.to_str().expect("a utf-8 path"),
+            "--command",
+            "echo probe",
+            "--cancel-command",
+            "sleep 30000",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("\u{2713} handshake"))
+        .stdout(predicates::str::contains("\u{2713} execute"))
+        .stdout(predicates::str::contains("\u{2717} cancel"))
+        .stdout(predicates::str::contains("not conformant"));
 }
 
 /// A binary that never answers the handshake fails the check outright: no

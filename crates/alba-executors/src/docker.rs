@@ -297,6 +297,21 @@ impl ExecSession for DockerSession {
             message: format!("docker rm exited with code {code}: {}", stderr.trim()),
         })
     }
+
+    async fn kill(self: Box<Self>) {
+        // The same removal `close` performs — `docker rm -f` reaches
+        // everything running inside the container, which is the whole
+        // process group concern `kill`'s contract cares about — but
+        // fire-and-forget: a caller reaching for `kill` instead of `close`
+        // has no use for the diagnostic `close` returns on failure.
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.container])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
 }
 
 /// Maps a spawn failure of the `docker` binary itself (as opposed to a

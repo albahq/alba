@@ -59,6 +59,17 @@ pub trait Executor: Send + Sync {
 /// needs across its whole `run` list — a container, a plugin process —
 /// lives here, opened once before the first command and closed once after
 /// the last (or after whichever command failed or was cancelled).
+///
+/// The engine itself only ever ends a session through `close`, every time,
+/// for every outcome — that bracket is its whole contract (see the module
+/// doc comment). `kill` is a second, narrower way out, for a caller
+/// outside that bracket that must abandon a session immediately rather
+/// than negotiate an end to it: `alba plugin check` (in `alba-cli`) is the
+/// motivating case, giving up on a plugin that ran past its own timeout or
+/// broke protocol mid-command. Implementations must make it reach whatever
+/// a `Drop` alone would not — a spawned process's whole process group, not
+/// only its immediate child — since a caller reaching for `kill` has
+/// already decided that a bare drop is not enough.
 #[async_trait::async_trait]
 pub trait ExecSession: Send {
     async fn execute(
@@ -67,6 +78,12 @@ pub trait ExecSession: Send {
         ctx: ExecContext,
     ) -> Result<ExecResult, ExecError>;
     async fn close(self: Box<Self>) -> Result<(), ExecError>;
+    /// Hard-stops the session right away: best-effort, infallible (there is
+    /// no error to report to — a caller reaching for this has already
+    /// given up on a graceful end), and unlike letting the session simply
+    /// drop, it must reach a spawned process's whole process group where
+    /// the platform supports it, not only the immediate child.
+    async fn kill(self: Box<Self>);
 }
 
 /// Everything a session needs to exist before its first command: the

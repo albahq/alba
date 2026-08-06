@@ -35,6 +35,9 @@ pub enum FakeEvent {
     Closed {
         beam: String,
     },
+    Killed {
+        beam: String,
+    },
 }
 
 /// The state shared between [`FakeExecutor`] and every [`FakeSession`] it
@@ -242,6 +245,18 @@ impl ExecSession for FakeSession {
             .unwrap()
             .push(FakeEvent::Closed { beam: self.beam });
         Ok(())
+    }
+
+    async fn kill(self: Box<Self>) {
+        // Nothing real to reach — this fake never spawns a process — but
+        // recorded as its own event rather than folded into `Closed`, so a
+        // test asserting the engine's own choice between the two (a future
+        // consumer of `kill`, mirroring `alba-cli`'s) can tell them apart.
+        self.state
+            .events
+            .lock()
+            .unwrap()
+            .push(FakeEvent::Killed { beam: self.beam });
     }
 }
 
@@ -457,6 +472,27 @@ mod tests {
                     options: serde_json::Value::Null,
                 },
                 FakeEvent::Closed {
+                    beam: "build".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_records_the_killed_event_with_the_beam() {
+        let executor = FakeExecutor::new();
+        let (beam, _rx) = beam_context("build");
+        let session = executor.open(beam).await.unwrap();
+        session.kill().await;
+
+        assert_eq!(
+            executor.events(),
+            vec![
+                FakeEvent::Opened {
+                    beam: "build".to_string(),
+                    options: serde_json::Value::Null,
+                },
+                FakeEvent::Killed {
                     beam: "build".to_string(),
                 },
             ]

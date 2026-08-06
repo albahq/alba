@@ -46,18 +46,6 @@ use crate::{
     OutputLine, Stream,
 };
 
-/// How long `open` waits for the plugin to answer the handshake (`ready`
-/// or `error`) before giving up and killing it. Bounds the `open` write
-/// as well as the read that follows it — see the module doc comment.
-const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long, after asking a plugin to cancel the command it is running,
-/// `execute` waits for it to actually stop (any trailing output plus a
-/// final `exit`/`error`) before giving up and killing the process. Also
-/// bounds the initial `execute` write and the `close` write/wait — see
-/// the module doc comment.
-const DEFAULT_GRACE: Duration = Duration::from_secs(5);
-
 /// Spawns `binary` (an `alba-executor-<name>` plugin) and speaks
 /// [`crate::protocol`] to it over stdin/stdout for the lifetime of one
 /// beam session. See the module doc comment for the process lifecycle.
@@ -69,12 +57,29 @@ pub struct PluginExecutor {
 }
 
 impl PluginExecutor {
+    /// How long [`Self::new`] waits for the plugin to answer the handshake
+    /// (`ready` or `error`) before giving up and killing it. Bounds the
+    /// `open` write as well as the read that follows it — see the module
+    /// doc comment. Public so a caller that needs to reason about the
+    /// exact timeout a plain [`Self::new`] session runs under — `alba
+    /// plugin check`, in `alba-cli`, is the motivating one — can read it
+    /// rather than guess a value that could silently drift from this one.
+    pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long, after asking a plugin to cancel the command it is
+    /// running, [`ExecSession::execute`] waits for it to actually stop
+    /// (any trailing output plus a final `exit`/`error`) before giving up
+    /// and killing the process. Also bounds the initial `execute` write
+    /// and the `close` write/wait — see the module doc comment. Public
+    /// for the same reason as [`Self::DEFAULT_HANDSHAKE_TIMEOUT`].
+    pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
+
     pub fn new(binary: PathBuf) -> Self {
         Self {
             binary,
             args: Vec::new(),
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            grace: DEFAULT_GRACE,
+            handshake_timeout: Self::DEFAULT_HANDSHAKE_TIMEOUT,
+            grace: Self::DEFAULT_GRACE,
         }
     }
 
@@ -429,6 +434,16 @@ impl ExecSession for PluginSession {
                 Ok(())
             }
         }
+    }
+
+    async fn kill(mut self: Box<Self>) {
+        // The same group-aware, kill-and-reap teardown every other
+        // give-up path in this file already uses (a failed handshake, an
+        // expired cancellation grace, a `close` that timed out) — the
+        // whole reason `kill` exists on the trait at all is that a bare
+        // `Drop` here would reach only this process, not the process
+        // group it leads (see `open`'s `process_group(0)`).
+        kill(&mut self.child).await;
     }
 }
 

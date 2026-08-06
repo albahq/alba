@@ -18,6 +18,18 @@
 //! If the handshake itself fails, the other three are skipped rather than
 //! attempted: they would only reopen the same unresponsive binary and pay
 //! its handshake timeout a second time for a foregone conclusion.
+//!
+//! ## Every session this drives is either closed or killed
+//!
+//! A session this module gives up on early — a protocol violation
+//! mid-`execute`, the execute check's own timeout, the cancel check's
+//! safety-net timeout — is never simply dropped. `Drop` alone reaches only
+//! a plugin's immediate process (see `alba_executors::PluginExecutor`'s own
+//! `kill_on_drop`), not whatever that process may itself have spawned to
+//! run the checked command; `ExecSession::kill` is the crate's own
+//! process-group-aware teardown, the same one every internal give-up path
+//! in `PluginExecutor` already uses, and every give-up path here uses it
+//! too rather than trusting a bare drop to do the same job.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,30 +40,33 @@ use alba_executors::{
     PluginExecutor,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::PluginCommand;
 use crate::exit::EXIT_ALBA_ERROR;
 use crate::render::LineSink;
 
-/// The protocol's own handshake timeout. Mirrored here, rather than read
-/// off `PluginExecutor::new`'s default, because the crate keeps that
-/// default private — and the cancellation check below needs to know the
-/// exact grace it is bounding its own tolerance against, not a guess that
-/// could silently drift from the real one.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The protocol's own cancellation grace, mirrored for the same reason as
-/// [`HANDSHAKE_TIMEOUT`].
-const GRACE: Duration = Duration::from_secs(5);
-
 /// How long after sending the cancellation check's command this check
 /// waits before asking the plugin to cancel it.
 const CANCEL_AFTER: Duration = Duration::from_millis(100);
 
-/// Slack added on top of [`GRACE`] when bounding the cancel check, so
-/// ordinary scheduling jitter is never mistaken for a hang.
+/// Slack added on top of [`PluginExecutor::DEFAULT_GRACE`] when bounding
+/// the cancel check's own outer wait, so ordinary scheduling jitter is
+/// never mistaken for a hang in the host's own kill-and-reap sequence (see
+/// [`cancel_and_close_check`]'s doc comment).
 const CANCEL_TOLERANCE: Duration = Duration::from_secs(1);
+
+/// The fraction of [`PluginExecutor::DEFAULT_GRACE`] an answer to `cancel`
+/// must land inside to count as prompt, rather than as the host's own
+/// grace-triggered kill masquerading as one — see
+/// [`cancel_and_close_check`]'s doc comment for why elapsed time is the
+/// only signal available at all. Chosen, not measured: wide enough that a
+/// real plugin answering within a couple hundred milliseconds has ample
+/// margin even on a loaded machine, tight enough that a plugin whose
+/// answer only arrives once the grace-driven kill fires (necessarily
+/// close to 100% of the grace) cannot be mistaken for a prompt one.
+const CANCEL_PROMPT_FRACTION: f32 = 0.8;
 
 /// How long the execute check waits for an `exit` message before giving up
 /// — generous on purpose: this check is timing the plugin's own command,
@@ -151,13 +166,17 @@ async fn open_session(
 /// code is its own business; protocol conformance is only that an `exit`
 /// message arrived at all.
 ///
-/// Takes `session` by value and never closes it: this check is its only
-/// use, and letting it drop here — rather than closing it — is deliberate,
-/// see the module doc comment for why only the cancellation check's fresh
-/// session is closed explicitly. `kill_on_drop` on the underlying child
-/// (see `alba_executors::PluginExecutor`) cleans this process up the
-/// moment `session` drops, whether that is here on a normal return or via
-/// unwinding if something above panics.
+/// Takes `session` by value and always ends it with [`ExecSession::kill`],
+/// never `close`: this check is the session's only use — see the module
+/// doc comment for why only the cancellation check's fresh session is
+/// closed — and `kill` is used unconditionally, on every outcome
+/// (success, a protocol violation, this check's own timeout), rather than
+/// just letting `session` drop. A clean `exit` message means the checked
+/// command itself has already finished, but says nothing about a
+/// descendant it may have left behind; the timeout and error arms can
+/// abandon the command mid-flight outright. `kill` reaches a spawned
+/// plugin's whole process group in either case, which a bare drop cannot
+/// (see the module doc comment).
 async fn execute_check(
     mut session: Box<dyn ExecSession>,
     command: &str,
@@ -175,7 +194,10 @@ async fn execute_check(
         cancel: CancellationToken::new(),
     };
 
-    match tokio::time::timeout(EXECUTE_TIMEOUT, session.execute(cmd, ctx)).await {
+    let outcome = tokio::time::timeout(EXECUTE_TIMEOUT, session.execute(cmd, ctx)).await;
+    session.kill().await;
+
+    match outcome {
         Ok(Ok(ExecResult { exit_code })) => {
             // `execute` only returns once every `output` line the command
             // produced has already been pushed onto this same channel —
@@ -209,12 +231,26 @@ async fn execute_check(
 /// one fresh session: opening it is [`open_session`] against a brand new
 /// process, never the one [`execute_check`] just used — see the module
 /// doc comment for why cancelling forbids reuse.
+///
+/// ## Why elapsed time, not just `Ok`/`Err`, decides the cancel check
+///
+/// `PluginExecutor::execute` absorbs a plugin that never answers `cancel`
+/// at all: once its own grace elapses it force-kills the plugin and
+/// returns `Ok(ExecResult { .. })` regardless — the same `Ok` a plugin that
+/// answered promptly would return. So `Ok`/`Err` alone cannot tell a
+/// conformant plugin apart from one that only appears to answer because
+/// the host had to kill it; the elapsed time can, and is measured for
+/// exactly that.
 async fn cancel_and_close_check(
     binary: &Path,
     cancel_command: &str,
     out: &mut LineSink<std::io::Stdout>,
 ) -> bool {
-    let executor = PluginExecutor::with_timeouts(binary.to_path_buf(), HANDSHAKE_TIMEOUT, GRACE);
+    let executor = PluginExecutor::with_timeouts(
+        binary.to_path_buf(),
+        PluginExecutor::DEFAULT_HANDSHAKE_TIMEOUT,
+        PluginExecutor::DEFAULT_GRACE,
+    );
     let (mut session, tx, _rx) = match open_session(executor).await {
         Ok(opened) => opened,
         Err(message) => {
@@ -241,17 +277,30 @@ async fn cancel_and_close_check(
     let ctx = ExecContext { output: tx, cancel };
 
     // The bound this check itself enforces on top of `PluginExecutor`'s
-    // own `GRACE`-bounded teardown, which already returns `Ok` (never
-    // hangs) whether the plugin answers `cancel` promptly or has to be
-    // killed once `GRACE` elapses — see `PluginExecutor::execute`'s own
-    // handling. This is the safety net for the one path that isn't
-    // already covered by that: something in the host's own kill-and-reap
-    // sequence itself getting stuck.
-    let bound = GRACE + CANCEL_TOLERANCE;
-    let cancel_conforms = match tokio::time::timeout(bound, session.execute(cmd, ctx)).await {
-        Ok(Ok(_result)) => {
-            out.line("\u{2713} cancel");
+    // own `DEFAULT_GRACE`-bounded teardown, which already returns `Ok`
+    // (never hangs) whether the plugin answers `cancel` promptly or has to
+    // be killed once the grace elapses — see `PluginExecutor::execute`'s
+    // own handling, and the doc comment above on why that `Ok` alone is
+    // not enough to grade this check. This bound is the safety net for the
+    // one path that isn't already covered by that: something in the
+    // host's own kill-and-reap sequence itself getting stuck.
+    let grace = PluginExecutor::DEFAULT_GRACE;
+    let bound = grace + CANCEL_TOLERANCE;
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(bound, session.execute(cmd, ctx)).await;
+    let answered_in = started.elapsed();
+
+    let cancel_conforms = match outcome {
+        Ok(Ok(_result)) if answered_in < grace.mul_f32(CANCEL_PROMPT_FRACTION) => {
+            out.line(&format!("\u{2713} cancel (answered in {answered_in:?})"));
             true
+        }
+        Ok(Ok(_result)) => {
+            out.line(&format!(
+                "\u{2717} cancel: no answer within the {grace:?} grace; \
+                 the host had to kill the plugin"
+            ));
+            false
         }
         Ok(Err(error)) => {
             out.line(&format!("\u{2717} cancel: {error}"));
@@ -263,12 +312,10 @@ async fn cancel_and_close_check(
             ));
             out.line("\u{2717} close: skipped — the cancel check did not return");
             // The in-flight `execute` future was just dropped without
-            // completing its own teardown; nothing here has any more
-            // handle on the process than `session` itself. Dropping it in
-            // turn is what stops it: `kill_on_drop` on the underlying
-            // child (see `alba_executors::PluginExecutor`) reaches it even
-            // though this path never calls `close`.
-            drop(session);
+            // completing its own teardown; `kill` reaches the plugin's
+            // whole process group directly (see the module doc comment)
+            // rather than trusting `Drop` to reach the same thing.
+            session.kill().await;
             return false;
         }
     };
