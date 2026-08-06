@@ -33,6 +33,8 @@ mod shell;
 #[cfg(feature = "test-util")]
 mod fake;
 
+pub mod protocol;
+
 pub use docker::DockerExecutor;
 pub use embedded::EmbeddedShellExecutor;
 pub use shell::SystemShellExecutor;
