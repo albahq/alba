@@ -189,9 +189,10 @@ because stdout is not a terminal.
 
 A beam runs its command on Alba's embedded shell by default (see
 [Embedded shell](#embedded-shell) below); `executor system_shell` opts out
-to the host shell instead. `executor docker { image "..." }` also parses,
-but running it currently fails at run time with `docker executor is not
-yet supported`, since the docker executor is not implemented yet.
+to the host shell instead, and `executor docker { image "..." }` runs it
+inside a container (see [Docker executor](#docker-executor)). Any other
+name, `executor <name> { ... }`, refers to an external plugin (see
+[Plugins](#plugins)).
 
 ## Caching
 
@@ -561,3 +562,78 @@ those.
 Whenever the rewrite is not worth it, `executor system_shell` on that one
 beam restores exactly the previous behavior, and the rest of the Beamfile
 keeps the cross-platform guarantee.
+
+## Docker executor
+
+`executor docker { image "..." }` runs a beam's commands inside a
+container instead of on the host, via the `docker` CLI:
+
+```
+beam ship {
+  executor docker {
+    image "alpine:3"
+    volumes ["/host/cache:/cache"]
+    workdir "/srv"
+  }
+  run "./deploy.sh"
+}
+```
+
+`image` is required; `volumes` (a list of `host:container` entries) and
+`workdir` (an absolute path inside the container) are optional. Alba
+starts one container per beam and keeps it alive, dormant, for every
+command that beam's `run` list runs, so state a command leaves behind
+(files written, anything a previous command set up) is visible to the
+next one in the same beam; the container is removed once the beam ends.
+The image must provide `/bin/sh`, since every command runs through
+`docker exec ... sh -c "<command>"`.
+
+The project directory is always bind-mounted into the container. On
+unix it is mounted at its own host path, so a beam's working directory
+needs no translation; on windows it is mounted at `/workspace` instead,
+with the working directory rewritten to the matching path under
+`/workspace`. A declared `workdir` always overrides that computed path.
+`volumes` are bind-mounted the same way, in addition to the project
+directory, and follow whatever mount syntax the `docker` CLI accepts for
+a `-v host:container` argument.
+
+Running a docker beam requires `docker` on the `PATH`; it reaches
+whichever daemon that `docker` CLI is itself configured to talk to
+(Docker Desktop, a remote context, an API-compatible lookalike).
+
+## Plugins
+
+`executor <name> { ... }` for any `name` that is not `shell`,
+`system_shell`, or `docker` refers to an external plugin: a separate
+`alba-executor-<name>` binary on the `PATH` that Alba spawns and speaks
+a line-oriented JSON protocol to, one process per beam, kept alive for
+every command in that beam the same way the docker executor keeps its
+container alive.
+
+Alba resolves every plugin a run needs before any beam starts: a beam
+whose plugin cannot be found on the `PATH` fails the whole run
+immediately, with a suggestion when the name looks like a typo of a
+built-in executor:
+
+```sh
+$ alba run ghost
+beam `ghost` uses executor `nosuchthing`: `nosuchthing` is neither a
+built-in executor nor `alba-executor-nosuchthing` on the PATH
+```
+
+The full wire protocol — every message, its exact JSON shape, timeouts,
+and cancellation — is specified in
+[`docs/plugin-protocol.md`](docs/plugin-protocol.md). `crates/alba-executor-example`
+is a complete reference implementation to read alongside it.
+
+`alba plugin check <BINARY>` drives a plugin binary through that whole
+protocol and reports whether it conforms, without needing a Beamfile:
+
+```sh
+$ alba plugin check target/debug/alba-executor-example
+✓ handshake
+✓ execute: exit code 0, 1 output line
+✓ cancel (answered in 32.682583ms)
+✓ close
+conformant: protocol v1
+```
