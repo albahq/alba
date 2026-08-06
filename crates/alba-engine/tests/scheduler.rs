@@ -13,7 +13,7 @@
 //! asserting real concurrency run on a multi-threaded one.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
@@ -871,8 +871,11 @@ beam all { needs [a, b] run "step all" }
     );
 }
 
-/// `executor system_shell` is a real, implemented executor kind: it must
-/// not trip the same unschedulability gate that rejects `docker`.
+/// `executor system_shell` is a real, implemented executor kind, exactly
+/// like `executor docker` — neither trips the unschedulability gate `run`
+/// applies before starting any beam, which only ever rejects an
+/// unresolvable plugin executor or a parameter mismatch (see the module
+/// doc comment's "Shape" section).
 #[tokio::test]
 async fn a_system_shell_beam_passes_validation() {
     const SOURCE: &str = r#"
@@ -1040,6 +1043,94 @@ beam build { run "slow" }
             .iter()
             .any(|event| matches!(event, FakeEvent::Closed { beam } if beam == "build")),
         "the session must still close after cancellation: {events:?}"
+    );
+}
+
+/// A minimal `Executor`, distinct from `FakeExecutor`, whose `execute`
+/// ignores cancellation entirely and always reports exit code 0 —
+/// modelling a plugin that answers a cancelled command with
+/// `{"type":"exit","code":0}`, a convention `docs/plugin-protocol.md`
+/// explicitly leaves open (only the reference plugin's own `-1` is
+/// documented, not required). `FakeSession` cannot model this: its own
+/// cancellation race always reports `-1`, which is exactly the code this
+/// scenario must NOT depend on.
+struct IgnoresCancelExecutor {
+    ran: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Executor for IgnoresCancelExecutor {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(IgnoresCancelSession {
+            ran: Arc::clone(&self.ran),
+        }))
+    }
+}
+
+struct IgnoresCancelSession {
+    ran: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ExecSession for IgnoresCancelSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        _ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
+        self.ran.lock().unwrap().push(cmd.command);
+        // Long enough that the test's cancellation trigger (10ms) fires
+        // while this is still running, short enough to keep the test
+        // fast — and never raced against `_ctx.cancel`, which is the
+        // whole point: this command finishes and reports success
+        // regardless of cancellation.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        Ok(ExecResult { exit_code: 0 })
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
+    }
+
+    async fn kill(self: Box<Self>) {}
+}
+
+/// The engine must not read a cancelled command's exit code as the only
+/// signal for whether to keep going: a beam whose first command answers
+/// `0` despite the run having been cancelled mid-flight must still stop
+/// there, not dispatch its remaining commands one after another. Pins
+/// Important finding 6 from the whole-branch review — the scheduler's
+/// command loop only ever broke on a non-zero exit code, so a conformant
+/// plugin using any convention besides the reference plugin's `-1` could
+/// make a cancelled beam run every remaining command anyway, each one
+/// opening only to be cancelled again.
+#[tokio::test]
+async fn cancellation_is_rechecked_between_commands_even_when_the_exit_code_is_zero() {
+    const SOURCE: &str = r#"
+beam build { run ["one", "two"] }
+"#;
+
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let executor = Arc::new(IgnoresCancelExecutor {
+        ran: Arc::clone(&ran),
+    });
+
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        trigger.cancel();
+    });
+
+    let outcome =
+        run_target_with_cancel(SOURCE, "build", options(2, false), executor, cancel).await;
+
+    assert_eq!(ids(&outcome.summary().cancelled), ["build"]);
+    assert_eq!(
+        *ran.lock().unwrap(),
+        vec!["one"],
+        "cancellation fired while `one` was still running, so `two` must \
+         never run even though `one` reported exit code 0"
     );
 }
 

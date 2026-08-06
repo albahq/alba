@@ -1017,6 +1017,19 @@ async fn run_commands(
 
     let mut status = BeamStatus::Succeeded;
     for command in &plan.commands {
+        // Rechecked before every command, not just relied on to end the
+        // loop through a failing exit code: `docs/plugin-protocol.md`
+        // leaves what a cancelled command's `exit` code says entirely up
+        // to the plugin (`-1` is only the reference plugin's own
+        // convention), so a conformant plugin that answers a cancelled
+        // command with `{"type":"exit","code":0}` must not make this loop
+        // read that as "keep going" and dispatch the beam's remaining
+        // commands one by one, each opening only to be cancelled again.
+        if task.cancel.is_cancelled() {
+            status = BeamStatus::Cancelled;
+            break;
+        }
+
         let spec = CommandSpec {
             command: command.clone(),
             env: plan.env.clone(),
