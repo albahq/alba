@@ -47,3 +47,10 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-features
+
+      # The docker executor's integration tests are `#[ignore]`d because
+      # they need a running daemon; the ubuntu runner has one, the macOS
+      # and windows runners do not.
+      - name: Test (docker executor)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --all-features -- --ignored
