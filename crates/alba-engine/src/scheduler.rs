@@ -86,29 +86,31 @@ pub struct Executors {
     pub embedded: Arc<dyn Executor>,
     /// `ExecutorKind::SystemShell`: the per-beam opt-out.
     pub system: Arc<dyn Executor>,
+    /// `ExecutorKind::Docker`: a beam that opted into a container.
+    pub docker: Arc<dyn Executor>,
 }
 
 impl Executors {
-    /// Both slots on the same executor: what tests and `alba check` want.
+    /// All three slots on the same executor: what tests and `alba check`
+    /// want.
     pub fn uniform(executor: Arc<dyn Executor>) -> Self {
         Self {
             embedded: Arc::clone(&executor),
-            system: executor,
+            system: Arc::clone(&executor),
+            docker: executor,
         }
     }
 
     /// Which executor a beam's declared kind dispatches to.
     ///
-    /// `Docker` and `Plugin` never reach here: [`plan`] rejects both during
-    /// validation, before any beam task is built, so this beam's kind is
-    /// always `Shell` or `SystemShell` by the time a task asks.
+    /// `Plugin` never reaches here: [`plan`] rejects it during validation,
+    /// before any beam task is built, so this beam's kind is never that
+    /// variant by the time a task asks.
     fn for_beam(&self, kind: &ExecutorKind) -> Arc<dyn Executor> {
         match kind {
             ExecutorKind::Shell => Arc::clone(&self.embedded),
             ExecutorKind::SystemShell => Arc::clone(&self.system),
-            ExecutorKind::Docker { .. } => {
-                unreachable!("docker executor is rejected during validation, before scheduling")
-            }
+            ExecutorKind::Docker { .. } => Arc::clone(&self.docker),
             ExecutorKind::Plugin { .. } => {
                 unreachable!("plugin executors are rejected during validation, before scheduling")
             }
@@ -191,12 +193,21 @@ fn push_option_value(label: &mut String, value: &OptionValue) {
 }
 
 /// What a session's `BeamContext.options` carries for this beam's kind.
-/// The shell executors take no options; docker and plugin beams never get
+/// The shell executors take no options; a docker beam's configuration is
+/// exactly what its executor needs to deserialize. Plugin beams never get
 /// here yet (rejected in `plan`), refined when their dispatch lands.
 fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
     match kind {
         ExecutorKind::Shell | ExecutorKind::SystemShell => serde_json::Value::Null,
-        ExecutorKind::Docker { .. } => serde_json::Value::Null,
+        ExecutorKind::Docker {
+            image,
+            volumes,
+            workdir,
+        } => serde_json::json!({
+            "image": image,
+            "volumes": volumes,
+            "workdir": workdir,
+        }),
         ExecutorKind::Plugin { .. } => serde_json::Value::Null,
     }
 }
@@ -204,7 +215,7 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
 /// Runs `target` and everything it needs, and reports what happened.
 ///
 /// Returns `Err` only for something Alba itself cannot do — an unknown
-/// target, a docker beam, wrong parameters — or for a beam's task
+/// target, a plugin beam, wrong parameters — or for a beam's task
 /// panicking, which is a bug rather than an outcome. A beam that merely
 /// fails is not an error: it lands in [`RunSummary::failed`], and
 /// [`RunSummary::exit_code`] turns that into the process exit code.
@@ -325,11 +336,11 @@ pub async fn run(
 /// The beams to run, in the project's declaration order, once the things
 /// that make a run unschedulable as a whole have been ruled out.
 ///
-/// These checks happen here, before [`run`] spawns anything, so a docker
-/// beam, a plugin beam, or a bad parameter list fails the run without half
-/// of its subgraph having already executed. They are the only such checks:
-/// everything else that can go wrong belongs to one beam and is reported as
-/// that beam's failure once the run is under way.
+/// These checks happen here, before [`run`] spawns anything, so a plugin
+/// beam or a bad parameter list fails the run without half of its subgraph
+/// having already executed. They are the only such checks: everything else
+/// that can go wrong belongs to one beam and is reported as that beam's
+/// failure once the run is under way.
 fn plan<'a>(
     project: &'a Project,
     target: &BeamId,
@@ -343,17 +354,8 @@ fn plan<'a>(
         .filter(|beam| ids.contains(beam.id.0.as_str()))
         .collect();
 
-    if beams
-        .iter()
-        .any(|beam| matches!(beam.executor, ExecutorKind::Docker { .. }))
-    {
-        return Err(EngineError::Unschedulable(
-            "docker executor is not yet supported".to_string(),
-        ));
-    }
-    // Temporary, like the docker rejection above: plugin resolution and
-    // dispatch land later, once a plugin binary can actually be found and
-    // run.
+    // Temporary: plugin resolution and dispatch land later, once a plugin
+    // binary can actually be found and run.
     if beams
         .iter()
         .any(|beam| matches!(beam.executor, ExecutorKind::Plugin { .. }))

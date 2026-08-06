@@ -45,7 +45,7 @@ use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
     CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, SessionError, WatchExit,
 };
-use alba_executors::{EmbeddedShellExecutor, SystemShellExecutor};
+use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
@@ -105,6 +105,22 @@ pub fn run(
         ))
     } else {
         runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+    }
+}
+
+/// Every run's executor set. Docker mounts the project at the root
+/// Beamfile's directory, resolved absolutely so the mount stays correct
+/// whatever the process's cwd does afterwards.
+fn executors(beamfile: &Path) -> Executors {
+    let project_root = std::path::absolute(beamfile)
+        .unwrap_or_else(|_| beamfile.to_path_buf())
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Executors {
+        embedded: Arc::new(EmbeddedShellExecutor),
+        system: Arc::new(SystemShellExecutor),
+        docker: Arc::new(DockerExecutor::new(project_root)),
     }
 }
 
@@ -172,10 +188,7 @@ async fn execute(
         project,
         target,
         options,
-        Executors {
-            embedded: Arc::new(EmbeddedShellExecutor),
-            system: Arc::new(SystemShellExecutor),
-        },
+        executors(beamfile),
         events,
         cancel.clone(),
     )
@@ -272,10 +285,7 @@ async fn watch_execute(
         sources.clone(),
         target.clone(),
         options,
-        Executors {
-            embedded: Arc::new(EmbeddedShellExecutor),
-            system: Arc::new(SystemShellExecutor),
-        },
+        executors(beamfile),
         events,
         cancel,
         Box::new(watcher),
@@ -385,10 +395,7 @@ async fn tui_execute(
                 sources,
                 target,
                 options,
-                Executors {
-                    embedded: Arc::new(EmbeddedShellExecutor),
-                    system: Arc::new(SystemShellExecutor),
-                },
+                executors(&beamfile),
                 events,
                 Some(command_receiver),
                 watch,

@@ -717,29 +717,53 @@ beam b { needs [a] run "step b" }
     assert_eq!(ids(&outcome.summary().succeeded), ["a", "b"]);
 }
 
+/// A docker beam dispatches to the `docker` executor slot, never to
+/// `embedded` or `system`, and its rendered configuration reaches the
+/// session as `BeamContext.options`.
 #[tokio::test]
-async fn docker_executor_is_rejected_before_anything_runs() {
+async fn a_docker_beam_dispatches_to_the_docker_slot_with_its_options() {
     const SOURCE: &str = r#"
-beam build { run "step build" }
-beam deploy {
-  needs [build]
-  executor docker { image "deployer:latest" }
-  run "step deploy"
+beam ship {
+  executor docker { image "alpine:3" workdir "/w" }
+  run "deploy"
 }
 "#;
 
-    let executor = Arc::new(FakeExecutor::new());
-    let outcome = run_target(SOURCE, "deploy", options(2, false), executor.clone()).await;
+    let fake_a = Arc::new(FakeExecutor::new());
+    let fake_b = Arc::new(FakeExecutor::new());
+    let outcome = run_target_with_executors(
+        SOURCE,
+        "ship",
+        options(2, false),
+        Executors {
+            embedded: fake_a.clone(),
+            system: fake_a.clone(),
+            docker: fake_b.clone(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
 
+    assert_eq!(ids(&outcome.summary().succeeded), ["ship"]);
     assert_eq!(
-        outcome.error().to_string(),
-        "docker executor is not yet supported"
+        fake_b.events(),
+        vec![
+            FakeEvent::Opened {
+                beam: "ship".to_string(),
+                options: serde_json::json!({"image": "alpine:3", "volumes": [], "workdir": "/w"}),
+            },
+            FakeEvent::Executed {
+                command: "deploy".to_string(),
+            },
+            FakeEvent::Closed {
+                beam: "ship".to_string(),
+            },
+        ]
     );
     assert!(
-        commands(&executor).is_empty(),
-        "the rejection happens before any beam starts"
+        fake_a.events().is_empty(),
+        "neither the embedded nor the system slot must see this beam"
     );
-    assert!(outcome.events.is_empty(), "no event is emitted either");
 }
 
 #[tokio::test]
@@ -820,6 +844,7 @@ beam all { needs [a, b] run "step all" }
     let executors = Executors {
         embedded: embedded.clone(),
         system: system.clone(),
+        docker: Arc::new(FakeExecutor::new()),
     };
 
     let outcome = run_target_with_executors(
