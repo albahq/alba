@@ -73,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "alba-executor-example"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "alba-executors"
 version = "0.1.0"
 dependencies = [
