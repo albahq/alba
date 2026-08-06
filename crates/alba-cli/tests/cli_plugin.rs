@@ -121,3 +121,60 @@ fn a_missing_plugin_is_a_clean_plan_time_error() {
             "neither a built-in executor nor `alba-executor-nosuchthing`",
         ));
 }
+
+/// `alba plugin check` drives the reference plugin through the whole
+/// protocol — handshake, an execute, a cancel on a fresh session, and that
+/// session's close — and reports every check as passing.
+#[test]
+fn plugin_check_passes_the_example_plugin() {
+    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+
+    alba()
+        .args([
+            "plugin",
+            "check",
+            example.to_str().expect("a utf-8 target path"),
+            "--command",
+            "echo probe",
+            "--cancel-command",
+            "sleep 30000",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\u{2713} handshake"))
+        .stdout(predicates::str::contains("\u{2713} execute"))
+        .stdout(predicates::str::contains("\u{2713} cancel"))
+        .stdout(predicates::str::contains("\u{2713} close"))
+        .stdout(predicates::str::contains("conformant"));
+}
+
+/// A binary that never answers the handshake fails the check outright: no
+/// process left running past the check's own handshake timeout, and a
+/// clean non-conformant report rather than a hang.
+#[cfg(unix)]
+#[test]
+fn plugin_check_reports_a_mute_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("mute-executor");
+    std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    alba()
+        .args(["plugin", "check", script.to_str().expect("a utf-8 path")])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("\u{2717} handshake"));
+}
+
+/// A binary path that does not exist at all is Alba's own error, not a
+/// verdict on some plugin's conformance — reported as exit 2, the same
+/// code every other "Alba itself failed" case uses.
+#[test]
+fn plugin_check_rejects_a_missing_binary_as_an_alba_error() {
+    alba()
+        .args(["plugin", "check", "/no/such/binary"])
+        .assert()
+        .code(2);
+}

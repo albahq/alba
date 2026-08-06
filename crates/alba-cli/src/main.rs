@@ -27,6 +27,14 @@ fn main() {
 }
 
 fn run(cli: Cli) -> i32 {
+    // `plugin check` needs no Beamfile at all — it drives a binary through
+    // the protocol directly — so it is dispatched before `resolve_beamfile`
+    // even runs, unlike `cache` below, which still needs the Beamfile's
+    // location even though not its content.
+    if let Some(Command::Plugin { command }) = &cli.command {
+        return commands::plugin::run(command);
+    }
+
     let beamfile = match resolve_beamfile(cli.file.as_deref()) {
         Ok(path) => path,
         Err(message) => {
@@ -57,6 +65,7 @@ fn run(cli: Cli) -> i32 {
         // Already handled and returned from above, before the project was
         // even loaded — see the `if let` there for why.
         Some(Command::Cache { .. }) => unreachable!("cache is dispatched before loading"),
+        Some(Command::Plugin { .. }) => unreachable!("plugin is dispatched before loading"),
         Some(Command::Check) => commands::check::run(&project),
         // A named beam is taken as-is; an omitted one falls back to the
         // declared `default`, the same target bare `alba` would have run —
