@@ -198,12 +198,26 @@ name, `executor <name> { ... }`, refers to an external plugin (see
 
 A beam that declares `inputs` is cached. Before running it, Alba checks
 whether the files matched by `inputs`, the rendered command, the beam's
-`cwd`, its `env`, its arguments, and every dependency's own fingerprint are
-all unchanged since the last successful run. If so, the beam is skipped:
-it is reported as `cached` in the output, its stored logs are replayed in
-its place, and the run's summary counts it under `cached` rather than
-`succeeded`. Change any of those inputs, even a single character in one
-matched file, and the beam runs again.
+`cwd`, its `env`, its arguments, its executor (including a docker beam's
+image, volumes, and workdir, or a plugin beam's options), and every
+dependency's own fingerprint are all unchanged since the last successful
+run. If so, the beam is skipped: it is reported as `cached` in the
+output, its stored logs are replayed in its place, and the run's summary
+counts it under `cached` rather than `succeeded`. Change any of those
+inputs, even a single character in one matched file, and the beam runs
+again.
+
+The executor's fingerprint is only as precise as what it hashes, though:
+for `executor docker`, it is the `image` field's own text, not the image
+digest it currently resolves to, so repointing a mutable tag (`docker
+pull alpine:3` fetching a new build of the same `alpine:3`) does *not*
+invalidate the cache — the tag text is unchanged, even though what it
+points at is not. The same applies to a plugin: an updated
+`alba-executor-<name>` binary reachable under the same name and options
+is invisible to the fingerprint. Pin an image by digest, or bump a
+version somewhere the fingerprint does see (the image tag itself, a
+plugin option), to force a rebuild when only the thing behind a mutable
+reference changed.
 
 A beam without declared `inputs` is never cacheable and always runs. This
 is deliberate for beams whose own work is cheaper than hashing their
@@ -608,6 +622,17 @@ Running a docker beam requires `docker` on the `PATH`; it reaches
 whichever daemon that `docker` CLI is itself configured to talk to
 (Docker Desktop, a remote context, an API-compatible lookalike).
 
+Every container Alba starts carries an `alba.beam=<name>` label. Alba
+itself removes the container once the beam ends, in every outcome
+(success, failure, cancellation); the label exists for the one case that
+is not one of those — an Alba process that is killed outright (`kill -9`,
+a crash) has no chance to run that removal. Find and clean up anything
+left behind that way with:
+
+```sh
+docker rm -f $(docker ps -aq --filter label=alba.beam)
+```
+
 ## Plugins
 
 `executor <name> { ... }` for any `name` that is not `shell`,
@@ -640,7 +665,7 @@ protocol and reports whether it conforms, without needing a Beamfile:
 $ alba plugin check target/debug/alba-executor-example
 ✓ handshake
 ✓ execute: exit code 0, 1 output line
-✓ cancel (answered in 32.682583ms)
+✓ cancel (answered in 2.165583ms)
 ✓ close
 conformant: protocol v1
 ```

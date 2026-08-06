@@ -105,7 +105,12 @@ Sent on the plugin's stdin.
   `run` entry (template interpolation already applied).
 - `env`: the environment variables for this command, as an array of
   two-element `[key, value]` arrays, **not** a JSON object. `{"K":"V"}`
-  is not valid on this wire; `[["K","V"]]` is.
+  is not valid on this wire; `[["K","V"]]` is. These extend and override
+  whatever environment the plugin process itself runs with — matching
+  names win, everything else the plugin already sees stays available —
+  rather than replacing it wholesale; all three of Alba's own built-in
+  executors follow that same rule, and a plugin should too, so a beam
+  written against one executor behaves the same when pointed at another.
 - `cwd`: the working directory this command should run in, as an absolute
   path.
 
@@ -189,7 +194,7 @@ Beamfile or a beam to run it from:
 $ alba plugin check target/debug/alba-executor-example --command "echo probe" --cancel-command "sleep 30000"
 ✓ handshake
 ✓ execute: exit code 0, 1 output line
-✓ cancel (answered in 102.537167ms)
+✓ cancel (answered in 2.182667ms)
 ✓ close
 conformant: protocol v1
 ```
@@ -201,14 +206,19 @@ Four checks run in order:
 2. **execute**: runs `--command` (default `echo alba-plugin-check`) on that
    same session and waits for its `exit`.
 3. **cancel**: opens a **fresh** session (a new process, never the one
-   `execute` just used) and runs `--cancel-command` (default `sleep 30`) on
-   it, sending `cancel` 100ms in. This check does not just check that
-   `execute` eventually returns: a plugin that never answers `cancel` at all
-   is absorbed by Alba's own 5-second grace and force-killed, which would
-   otherwise look identical to a plugin that answered promptly. The check
-   times how long the answer actually took and only passes a plugin that
-   replied well inside the grace. A plugin that only "answers" because the
-   host had to kill it is reported as **not** conformant.
+   `execute` just used) and runs `--cancel-command` (default `sleep 30000`,
+   i.e. 30 seconds — comfortably longer than both the 100ms delay below and
+   the 5-second grace, so the command is still running when `cancel`
+   arrives) on it, sending `cancel` 100ms in. This check does not just
+   check that `execute` eventually returns: a command that finishes on its
+   own before `cancel` is even sent is rejected outright, since nothing
+   about answering `cancel` was actually exercised; and a plugin that never
+   answers `cancel` at all is absorbed by Alba's own 5-second grace and
+   force-killed, which would otherwise look identical to a plugin that
+   answered promptly. The check times how long the answer actually took
+   *after* `cancel` was sent and only passes a plugin that replied well
+   inside the grace. A plugin that only "answers" because the host had to
+   kill it is reported as **not** conformant.
 4. **close**: closes that same fresh session.
 
 If the handshake itself fails, the other three checks are skipped rather
