@@ -123,36 +123,70 @@ impl Executors {
 /// it changed.
 fn executor_label(kind: &ExecutorKind) -> String {
     match kind {
+        // Byte-identical to before: no field ever needs escaping, and
+        // existing cache manifests for shell beams must stay valid.
         ExecutorKind::Shell => "embedded".to_string(),
         ExecutorKind::SystemShell => "system".to_string(),
         ExecutorKind::Docker {
             image,
             volumes,
             workdir,
-        } => format!(
-            "docker:image={image};volumes={};workdir={}",
-            volumes.join(","),
-            workdir.as_deref().unwrap_or(""),
-        ),
+        } => {
+            let mut label = String::from("docker");
+            push_field(&mut label, image);
+            push_field(&mut label, &volumes.len().to_string());
+            for volume in volumes {
+                push_field(&mut label, volume);
+            }
+            push_field(&mut label, workdir.as_deref().unwrap_or(""));
+            label
+        }
         ExecutorKind::Plugin { name, options } => {
-            let options = options
-                .iter()
-                .map(|(key, value)| format!("{key}={}", option_label(value)))
-                .collect::<Vec<_>>()
-                .join(";");
-            format!("plugin:{name};{options}")
+            let mut label = String::from("plugin");
+            push_field(&mut label, name);
+            push_field(&mut label, &options.len().to_string());
+            for (key, value) in options {
+                push_field(&mut label, key);
+                push_option_value(&mut label, value);
+            }
+            label
         }
     }
 }
 
-/// The fingerprint's own name for one plugin option's value: folded into
+/// Appends `value` to `label` as a length-prefixed field: `|<byte
+/// length>:<value>`. Prefixing every field with its own byte length is what
+/// makes the field boundary unambiguous — without it, a value that itself
+/// contains the separator (a volume string with a `;`, a plugin option with
+/// a `,`) could forge a boundary and make two different configurations
+/// label identically, which would serve a stale cache hit for a beam whose
+/// image, mounts, or options actually changed.
+fn push_field(label: &mut String, value: &str) {
+    label.push_str(&format!("|{}:{value}", value.len()));
+}
+
+/// Appends one plugin option's value to `label`, folded into
 /// [`executor_label`] so a beam's cache entry changes with any option it
-/// declares, whatever type that option happens to be.
-fn option_label(value: &OptionValue) -> String {
+/// declares. The value's kind is encoded alongside its content — not just
+/// length-prefixed on its own — so, say, `Str("a,b")` cannot label the same
+/// as `List(["a", "b"])`.
+fn push_option_value(label: &mut String, value: &OptionValue) {
     match value {
-        OptionValue::Str(v) => v.clone(),
-        OptionValue::Bool(v) => v.to_string(),
-        OptionValue::List(v) => v.join(","),
+        OptionValue::Str(v) => {
+            push_field(label, "str");
+            push_field(label, v);
+        }
+        OptionValue::Bool(v) => {
+            push_field(label, "bool");
+            push_field(label, if *v { "true" } else { "false" });
+        }
+        OptionValue::List(v) => {
+            push_field(label, "list");
+            push_field(label, &v.len().to_string());
+            for item in v {
+                push_field(label, item);
+            }
+        }
     }
 }
 
@@ -1046,5 +1080,100 @@ mod tests {
             options: vec![("image".into(), OptionValue::Str("y".into()))],
         };
         assert_ne!(executor_label(&a), executor_label(&b));
+    }
+
+    /// A single volume string containing `;workdir=` must not be able to
+    /// forge a workdir field boundary and land on the same label as a
+    /// distinct configuration that actually sets that workdir.
+    #[test]
+    fn a_volume_cannot_forge_a_workdir_boundary() {
+        let injected_volume = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a;workdir=X".into()],
+            workdir: None,
+        };
+        let real_workdir = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a".into()],
+            workdir: Some("X;workdir=".into()),
+        };
+        assert_ne!(
+            executor_label(&injected_volume),
+            executor_label(&real_workdir)
+        );
+    }
+
+    /// One volume whose path contains a comma must not label the same as
+    /// two separate volumes joined by a comma.
+    #[test]
+    fn a_comma_inside_a_volume_cannot_forge_a_second_volume() {
+        let one_volume = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a,b".into()],
+            workdir: None,
+        };
+        let two_volumes = ExecutorKind::Docker {
+            image: "img".into(),
+            volumes: vec!["a".into(), "b".into()],
+            workdir: None,
+        };
+        assert_ne!(executor_label(&one_volume), executor_label(&two_volumes));
+    }
+
+    /// Two plugin options must not label the same as one option whose value
+    /// happens to contain the `;key=value` separator sequence.
+    #[test]
+    fn a_plugin_option_value_cannot_forge_a_second_option() {
+        let two_options = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![
+                ("a".into(), OptionValue::Str("1".into())),
+                ("b".into(), OptionValue::Str("2".into())),
+            ],
+        };
+        let injected_option = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("a".into(), OptionValue::Str("1;b=2".into()))],
+        };
+        assert_ne!(
+            executor_label(&two_options),
+            executor_label(&injected_option)
+        );
+    }
+
+    /// A `List` option whose only element contains a comma must not label
+    /// the same as a `List` with two separate elements.
+    #[test]
+    fn a_comma_inside_a_list_option_value_cannot_forge_a_second_element() {
+        let one_element = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("flags".into(), OptionValue::List(vec!["a,b".into()]))],
+        };
+        let two_elements = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![(
+                "flags".into(),
+                OptionValue::List(vec!["a".into(), "b".into()]),
+            )],
+        };
+        assert_ne!(executor_label(&one_element), executor_label(&two_elements));
+    }
+
+    /// A `Str` option must not label the same as a `List` option carrying
+    /// the same joined text: the value's kind is itself part of the label.
+    #[test]
+    fn a_str_option_cannot_forge_a_list_option_of_the_same_text() {
+        let as_str = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![("flags".into(), OptionValue::Str("a,b".into()))],
+        };
+        let as_list = ExecutorKind::Plugin {
+            name: "podman".into(),
+            options: vec![(
+                "flags".into(),
+                OptionValue::List(vec!["a".into(), "b".into()]),
+            )],
+        };
+        assert_ne!(executor_label(&as_str), executor_label(&as_list));
     }
 }
