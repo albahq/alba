@@ -8,8 +8,17 @@
 //! once in `open`, and the same process answers every subsequent
 //! `execute`/`close` message. Stderr is free-form diagnostic output the
 //! plugin can produce at any point across the whole session, so it is
-//! relayed by a task spawned once in `open` and never joined — its
-//! lifetime is the process's, not any single command's.
+//! relayed by a task spawned once in `open` and kept alive for the whole
+//! session rather than per command — but unlike a single command's
+//! stdout/stderr (see `docker.rs`, `shell.rs`), that task's own lifetime is
+//! bounded by [`DRAIN_PERIOD`], not left to run detached forever: `close`
+//! and `kill` both wait for it, briefly, before giving up on it. A plugin
+//! that leaves a descendant holding its inherited stderr open (a
+//! backgrounded process, a daemon it started) would otherwise keep this
+//! task — and the `UnboundedSender` clone it holds — alive past the
+//! session's own end, which wedges `alba-engine`'s `forward_output` (it
+//! only returns once every sender is dropped) and, with it, the whole
+//! beam.
 //!
 //! On unix the plugin is spawned as the leader of its own process group
 //! (mirroring `shell.rs`'s `build_command`): a plugin's entire job is
@@ -36,6 +45,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::task::JoinHandle;
 
 use crate::protocol::{HostMessage, PROTOCOL_VERSION, PluginMessage, WireStream};
 #[cfg(unix)]
@@ -45,6 +55,14 @@ use crate::{
     BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
     OutputLine, Stream,
 };
+
+/// How long `close`/`kill` wait for the stderr relay task (spawned once in
+/// `open`, see the module doc comment) to end on its own before aborting
+/// it outright. Mirrors `shell.rs`'s and `docker.rs`'s `DRAIN_PERIOD` of
+/// the same name and rationale: bounding it is what keeps a plugin's
+/// stray descendant from wedging the session's teardown, or the engine
+/// waiting on it, forever.
+const DRAIN_PERIOD: Duration = Duration::from_secs(2);
 
 /// Spawns `binary` (an `alba-executor-<name>` plugin) and speaks
 /// [`crate::protocol`] to it over stdin/stdout for the lifetime of one
@@ -167,20 +185,23 @@ impl Executor for PluginExecutor {
             .take()
             .expect("child spawned with piped stderr");
 
-        // Detached: stderr is free-form output the plugin can produce at
-        // any point across the whole session, not just during the
-        // command executing right now, so unlike a single command's
-        // stdout/stderr (see docker.rs, shell.rs) this task is never
-        // joined or bounded by a single `execute` call — it simply runs
-        // until the plugin's stderr pipe closes, i.e. until the process
-        // exits.
-        tokio::spawn(stream_lines(stderr, Stream::Stderr, output.clone()));
+        // Not bounded by a single `execute` call: stderr is free-form
+        // output the plugin can produce at any point across the whole
+        // session, not just during the command executing right now, so
+        // unlike a single command's stdout/stderr (see docker.rs, shell.rs)
+        // this task simply runs until the plugin's stderr pipe closes —
+        // ordinarily because the process exited. Kept as a `JoinHandle` on
+        // the session (rather than left detached) so `close`/`kill` can
+        // still bound how long they wait on it — see the module doc
+        // comment and `DRAIN_PERIOD`.
+        let stderr_task = tokio::spawn(stream_lines(stderr, Stream::Stderr, output.clone()));
 
         let mut session = PluginSession {
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
             grace: self.grace,
+            stderr_task,
         };
 
         // The `open` write and the handshake read it waits for are
@@ -266,6 +287,11 @@ struct PluginSession {
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
     grace: Duration,
+    /// The task relaying this session's stderr, spawned once in `open` and
+    /// kept alive for the session's whole lifetime (see the module doc
+    /// comment). `close` and `kill` both drain it, bounded by
+    /// [`DRAIN_PERIOD`], instead of leaving it to run detached forever.
+    stderr_task: JoinHandle<()>,
 }
 
 impl PluginSession {
@@ -405,45 +431,101 @@ impl ExecSession for PluginSession {
         }
     }
 
-    async fn close(mut self: Box<Self>) -> Result<(), ExecError> {
-        // The `close` write, shutting down our write half, and the wait
-        // for the plugin to exit are all bounded together by `grace`
-        // (see the module doc comment) — not just the wait, as before.
-        let deadline = tokio::time::Instant::now() + self.grace;
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        // Destructured up front: `stdin` needs to be dropped outright
+        // partway through (see below), and the stderr relay task needs
+        // draining afterwards regardless of which arm below returns —
+        // both are easier to do as plain locals than through `self`.
+        let PluginSession {
+            mut child,
+            mut stdin,
+            grace,
+            stderr_task,
+            ..
+        } = *self;
+
+        // The `close` write, actually closing our end of the pipe, and
+        // the wait for the plugin to exit are all bounded together by
+        // `grace` (see the module doc comment) — not just the wait, as
+        // before.
+        let deadline = tokio::time::Instant::now() + grace;
         let outcome = tokio::time::timeout_at(deadline, async {
             // Best-effort: a plugin that already died has nothing left
             // to read this, and the wait below reports that death
             // either way.
-            let _ = self.send(&HostMessage::Close).await;
-            // Lets an EOF-driven plugin (one that exits on reaching the
-            // end of stdin rather than parsing `close`'s content) act on
-            // it immediately, instead of sitting until the deadline
-            // forces a kill.
-            let _ = self.stdin.shutdown().await;
-            self.child.wait().await
+            let mut line =
+                serde_json::to_string(&HostMessage::Close).expect("HostMessage always serializes");
+            line.push('\n');
+            let _ = stdin.write_all(line.as_bytes()).await;
+            // Dropped outright rather than `shutdown()`-ed: on unix,
+            // `ChildStdin::poll_shutdown` delegates to an implementation
+            // that reports success without ever touching the underlying
+            // descriptor (tokio's `ChildStdio` unix backend), so it never
+            // actually closes the pipe. Only dropping the handle does —
+            // which is what lets an EOF-driven plugin (one that exits on
+            // reaching the end of stdin rather than parsing `close`'s
+            // content, the reference plugin's own documented default —
+            // and exactly what `docs/plugin-protocol.md` promises: "Alba
+            // ... closes its own end of the plugin's stdin") act on it
+            // immediately, instead of sitting until the deadline forces a
+            // kill.
+            drop(stdin);
+            child.wait().await
         })
         .await;
 
-        match outcome {
+        let result = match outcome {
             Ok(Ok(_status)) => Ok(()),
             Ok(Err(error)) => Err(ExecError {
                 message: format!("failed to wait for plugin: {error}"),
             }),
             Err(_elapsed) => {
-                kill(&mut self.child).await;
+                kill(&mut child).await;
                 Ok(())
             }
-        }
+        };
+
+        finish_stderr_relay(stderr_task).await;
+        result
     }
 
-    async fn kill(mut self: Box<Self>) {
+    async fn kill(self: Box<Self>) {
         // The same group-aware, kill-and-reap teardown every other
         // give-up path in this file already uses (a failed handshake, an
         // expired cancellation grace, a `close` that timed out) — the
         // whole reason `kill` exists on the trait at all is that a bare
         // `Drop` here would reach only this process, not the process
         // group it leads (see `open`'s `process_group(0)`).
-        kill(&mut self.child).await;
+        //
+        // That group-wide signal only reaches something, though, if
+        // `child` is still a live handle to a real process: on the path
+        // where the session's last `read_message` already observed EOF
+        // (the plugin exited on its own) `read_message` has already
+        // `wait()`-ed the child, so `Child::id()` here is `None` and the
+        // signal below is a no-op — any descendant the plugin left behind
+        // on *that* path survives unkilled. See also
+        // `alba-cli`'s `commands::plugin` module doc comment, which
+        // documents the same gap for `alba plugin check`.
+        let PluginSession {
+            mut child,
+            stderr_task,
+            ..
+        } = *self;
+        kill(&mut child).await;
+        finish_stderr_relay(stderr_task).await;
+    }
+}
+
+/// Waits for the stderr relay task (see the module doc comment and
+/// [`PluginSession::stderr_task`]) to end on its own — the plugin's
+/// stderr pipe closing once the process has actually exited — for up to
+/// [`DRAIN_PERIOD`], then aborts it outright.
+async fn finish_stderr_relay(mut handle: JoinHandle<()>) {
+    if tokio::time::timeout(DRAIN_PERIOD, &mut handle)
+        .await
+        .is_err()
+    {
+        handle.abort();
     }
 }
 

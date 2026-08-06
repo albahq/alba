@@ -355,6 +355,60 @@ async fn a_cancelled_beam_interrupts_a_pending_handshake() {
     );
 }
 
+/// Regression for the stderr relay task wedging a session's teardown: a
+/// plugin that leaks a descendant holding its own inherited stderr open
+/// (`leaky-stderr`, see `tests/support/fake_plugin.rs`) exits on `close`
+/// exactly like a well-behaved plugin does, but the pipe Alba reads its
+/// stderr from stays open regardless, because the descendant still holds
+/// its write end. Before the relay task was bounded by `DRAIN_PERIOD` and
+/// drained inside `close()`, that task — and the `output` sender clone it
+/// holds — stayed alive for as long as the descendant did, which in
+/// production is exactly the clone `alba-engine`'s `forward_output` waits
+/// on every sender of before it returns: this is what wedges a whole beam
+/// behind a single Ctrl-C.
+#[tokio::test]
+async fn close_drains_a_leaked_stderr_relay_before_returning() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let executor = executor_for("leaky-stderr");
+    let mut session = tokio::time::timeout(HANG_GUARD, executor.open(beam_context(tx.clone())))
+        .await
+        .expect("open() must not hang")
+        .expect("handshake with a well-behaved plugin must succeed");
+
+    let result = session
+        .execute(
+            command("echo ping"),
+            exec_context(tx.clone(), CancellationToken::new()),
+        )
+        .await
+        .expect("echo must succeed");
+    assert_eq!(result.exit_code, 0);
+
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(HANG_GUARD, session.close())
+        .await
+        .expect("close() must not hang on a leaked stderr descendant")
+        .expect("close must succeed");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "close() must return within roughly DRAIN_PERIOD even with a leaked \
+         descendant still holding the plugin's stderr pipe open, took {elapsed:?}"
+    );
+
+    // Dropping every clone this test itself still holds and draining
+    // whatever is already buffered (the echoed "ping" line) until the
+    // channel actually closes is the proof that no other clone — the
+    // relay task's — is left alive: before the fix, the final `recv()`
+    // below would hang until the leaked descendant exited on its own
+    // several seconds later, instead of observing `None` promptly.
+    drop(tx);
+    while let Some(_line) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the channel must close promptly once close() has returned")
+    {}
+}
+
 /// Unix-only: shells out to `ps` to look for a still-running child of this
 /// test process, which windows has no equivalent one-liner for. The other
 /// tests already cover kill-and-reap on every path that runs explicit
@@ -362,11 +416,28 @@ async fn a_cancelled_beam_interrupts_a_pending_handshake() {
 /// one path that doesn't — dropping the session outright — so it is the
 /// one test that needs to look at the OS process table instead of at
 /// `PluginExecutor`'s return values.
+///
+/// The whole test binary is one process, so every test in it shares this
+/// same `my_pid` as `ppid` — filtering on `ppid` alone would also match a
+/// neighbouring `deaf`-mode test's still-alive child (or one already on
+/// its way out), turning this into a false *failure* whenever the suite
+/// runs them concurrently, not just a false pass. A `deaf-<unique>` argv
+/// tag (see `tests/support/fake_plugin.rs`) — visible in `ps`'s own
+/// command column as this process's actual argument, not just its
+/// executable name — is what lets this test identify the exact child it
+/// dropped, rather than any `fake-plugin` running as our child.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_dropped_session_does_not_leak_the_plugin_process() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let executor = executor_for("deaf");
+    let tag = format!(
+        "deaf-leak-probe-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let executor = PluginExecutor::new(fake_plugin_path()).with_args(vec![tag.clone()]);
     let session = tokio::time::timeout(HANG_GUARD, executor.open(beam_context(tx)))
         .await
         .expect("open() must not hang")
@@ -394,8 +465,16 @@ async fn a_dropped_session_does_not_leak_the_plugin_process() {
             // processes whose command line merely mentions
             // "fake-plugin" in passing (this very test's own source, if
             // it were running under a shell that echoes it, for one).
+            // `fields[3]` (the argv this process was actually spawned
+            // with) is checked against the unique `tag` above, not just
+            // `fields[2]` (the executable), so a neighbouring test's own
+            // `fake-plugin` child — running under our shared `ppid` — can
+            // never be mistaken for the one this test dropped.
             let fields: Vec<&str> = line.split_whitespace().collect();
-            fields.len() >= 3 && fields[1] == my_pid && fields[2].ends_with("fake-plugin")
+            fields.len() >= 4
+                && fields[1] == my_pid
+                && fields[2].ends_with("fake-plugin")
+                && fields[3] == tag
         });
         if !still_running {
             break;

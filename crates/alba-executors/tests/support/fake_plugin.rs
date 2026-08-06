@@ -22,8 +22,14 @@ async fn main() {
         Some("mute") => mute(&mut reader()).await,
         Some("garbage") => garbage().await,
         Some("refuse") => refuse().await,
-        Some("deaf") => deaf().await,
+        // A `deaf-`-prefixed mode behaves identically to plain `deaf`; the
+        // suffix is a discriminator a test can use to tell its own dropped
+        // child apart from a neighbouring test's in a process listing (see
+        // `a_dropped_session_does_not_leak_the_plugin_process`), not a
+        // distinct behavior.
+        Some(mode) if mode == "deaf" || mode.starts_with("deaf-") => deaf().await,
         Some("stubborn") => stubborn().await,
+        Some("leaky-stderr") => leaky_stderr().await,
         Some(other) => panic!("fake-plugin: unknown mode `{other}`"),
     }
 }
@@ -97,6 +103,21 @@ async fn deaf() {
     // what lets a test exercise a plugin that acknowledges the handshake
     // but never reacts to anything afterwards, including cancellation.
     mute(&mut lines).await;
+}
+
+/// Behaves exactly like `ok`, except it first leaks a descendant (`sleep
+/// 5`) that inherits this process's own stdio — including the write end
+/// of the pipe Alba reads this plugin's stderr from — and is never waited
+/// on. That descendant outlives this process: exiting on `close`, as `ok`
+/// does, closes only *this* process's end of that pipe, not the
+/// descendant's, so the pipe's read side sees no EOF until the descendant
+/// itself exits several seconds later. This is the scenario
+/// `close_drains_a_leaked_stderr_relay_before_returning` (in
+/// `tests/plugin.rs`) exercises: a plugin's own exit is not enough to
+/// guarantee its stderr relay task ends promptly.
+async fn leaky_stderr() {
+    let _ = std::process::Command::new("sleep").arg("5").spawn();
+    ok().await;
 }
 
 async fn ok() {
