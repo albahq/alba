@@ -28,7 +28,9 @@
 //!   value is never a bare identifier, but it is one of three shapes,
 //!   dispatched on its first token: `true`/`false` for a bool, `[...]` for
 //!   a list of string literals, anything else parsed as a string literal
-//!   (`ExecutorOptionValue`).
+//!   (`ExecutorOptionValue`). Like a beam field, an executor option key may
+//!   appear at most once per `executor <name> { ... }` block; a repeat is
+//!   a parse error (`duplicate executor option`), for the same reason.
 
 use crate::ast::{
     BeamDecl, BeamRef, ExecutorDecl, ExecutorOptionValue, File, Import, LetBinding, NamedString,
@@ -338,8 +340,22 @@ impl<'a> Parser<'a> {
         }
         self.advance();
         let mut options = Vec::new();
+        // Same rule as `parse_beam_field`'s `seen` set, for the same
+        // reason: a repeated option key is far more likely to be a
+        // copy-paste mistake than an intentional overwrite, and silently
+        // keeping only the last value (as `serde_json::Map`'s `FromIterator`
+        // would once this reaches `alba-engine`) would hide exactly that
+        // mistake.
+        let mut seen = HashSet::new();
         while !self.check(&TokenKind::RBrace) {
             let opt_name = self.eat_ident()?;
+            if !seen.insert(opt_name.value.clone()) {
+                return Err(ParseError {
+                    message: format!("duplicate executor option `{}`", opt_name.value),
+                    span: opt_name.span,
+                    help: None,
+                });
+            }
             let opt_value = match self.peek().kind {
                 TokenKind::KwTrue | TokenKind::KwFalse => {
                     ExecutorOptionValue::Bool(self.parse_bool_value()?)

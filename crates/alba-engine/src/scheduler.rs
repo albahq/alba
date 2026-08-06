@@ -237,9 +237,9 @@ fn option_json(value: &OptionValue) -> serde_json::Value {
 /// Runs `target` and everything it needs, and reports what happened.
 ///
 /// Returns `Err` only for something Alba itself cannot do — an unknown
-/// target, a plugin beam, wrong parameters — or for a beam's task
-/// panicking, which is a bug rather than an outcome. A beam that merely
-/// fails is not an error: it lands in [`RunSummary::failed`], and
+/// target, an unresolvable plugin beam, wrong parameters — or for a
+/// beam's task panicking, which is a bug rather than an outcome. A beam
+/// that merely fails is not an error: it lands in [`RunSummary::failed`], and
 /// [`RunSummary::exit_code`] turns that into the process exit code.
 /// `RunFinished` is emitted last, and only on the `Ok` path — an `Err` has
 /// no summary to report.

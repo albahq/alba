@@ -63,3 +63,23 @@ fn executor_option_list_reports_a_malformed_entry() {
     let err = parse(src).unwrap_err();
     insta::assert_debug_snapshot!(err);
 }
+
+#[test]
+fn a_repeated_plugin_executor_option_is_rejected() {
+    let src = r#"beam b {
+  executor podman { flag "a" flag "b" }
+  run "x"
+}"#;
+    let err = parse(src).unwrap_err();
+    insta::assert_debug_snapshot!(err);
+}
+
+#[test]
+fn a_repeated_docker_executor_option_is_rejected() {
+    let src = r#"beam b {
+  executor docker { image "a" image "b" }
+  run "x"
+}"#;
+    let err = parse(src).unwrap_err();
+    insta::assert_debug_snapshot!(err);
+}
