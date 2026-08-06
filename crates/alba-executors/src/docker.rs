@@ -23,7 +23,6 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::shell::stream_lines;
@@ -62,24 +61,21 @@ impl DockerExecutor {
 #[derive(Debug, PartialEq, serde::Deserialize)]
 struct DockerConfig {
     image: String,
-    // `#[serde(default)]` alone only kicks in when the key is absent; the
-    // DSL's `volumes ["h:/c"]` is optional, so the engine's rendered JSON
-    // carries an explicit `"volumes": null` rather than omitting the key,
-    // which plain `default` does not tolerate for a non-`Option` field.
-    #[serde(default, deserialize_with = "null_as_default")]
+    // The engine's rendered JSON (`executor_options` in `alba-engine`)
+    // always sends `volumes` as an array, possibly empty, never absent and
+    // never `null` — the DSL's `volumes ["h:/c"]` being optional only
+    // means that array can be empty, not that the key itself can be
+    // missing. `#[serde(default)]` is kept anyway as plain defensive
+    // robustness against a hand-authored `options` value that does omit
+    // it, not because Alba itself ever produces one.
+    #[serde(default)]
     volumes: Vec<String>,
+    // `workdir`, unlike `volumes`, genuinely can be `null` on the wire —
+    // the DSL's `workdir` is truly optional, and the engine sends it as
+    // JSON `null` rather than omitting the key — so this one needs to stay
+    // an `Option`, not just a defaulted `Vec`.
     #[serde(default)]
     workdir: Option<String>,
-}
-
-/// Treats an explicit JSON `null` the same as an absent field, deserializing
-/// it to `T::default()` instead of failing.
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Default + serde::Deserialize<'de>,
-{
-    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[async_trait::async_trait]
@@ -133,14 +129,21 @@ impl Executor for DockerExecutor {
                 // Best-effort: killing the local `docker run -d` process
                 // does not cancel container creation daemon-side, so this
                 // can race and fail with "No such container" if the
-                // container had not finished being created yet — that
-                // failure is fine, there is nothing left to remove either
-                // way. What matters is that we wait for the removal
-                // (bounded by STOP_GRACE) instead of detaching it: a
-                // detached, unawaited `docker rm -f` risks losing the race
-                // against the daemon actually finishing container
-                // creation, which would orphan a running container that
-                // `--rm` cannot reclaim (see the module doc comment).
+                // daemon had not finished creating the container yet by
+                // the time this `rm -f` reaches it. That failure is fine
+                // on its own — it means the removal below simply lost a
+                // race against a creation that has not landed *yet*, not
+                // that there is nothing left to clean up: the daemon can
+                // finish creating the container moments later regardless
+                // of the local `docker run` process being killed, and
+                // that container then runs the dormant `sleep 2147483647`
+                // forever, which `--rm` never reclaims on its own (see the
+                // module doc comment). What matters is that we wait for
+                // the removal (bounded by STOP_GRACE) instead of
+                // detaching it: a detached, unawaited `docker rm -f` risks
+                // losing the race against the daemon actually finishing
+                // container creation, which would orphan that container
+                // rather than catch and remove it right after.
                 let _ = tokio::time::timeout(STOP_GRACE, run_quiet(&["rm", "-f", &name])).await;
                 stdout_task.abort();
                 stderr_task.abort();
@@ -481,10 +484,14 @@ mod tests {
 
     #[test]
     fn config_deserializes_with_defaults() {
-        let config: DockerConfig = serde_json::from_value(
-            serde_json::json!({"image": "alpine:3", "volumes": null, "workdir": null}),
-        )
-        .unwrap();
+        // `workdir` is genuinely optional on the wire and can be sent as
+        // an explicit JSON `null` (see the struct's own doc comment);
+        // `volumes` is exercised as fully absent instead, since the
+        // engine never actually sends it as `null` — absence is what its
+        // `#[serde(default)]` is really defending against.
+        let config: DockerConfig =
+            serde_json::from_value(serde_json::json!({"image": "alpine:3", "workdir": null}))
+                .unwrap();
         assert_eq!(
             config,
             DockerConfig {
