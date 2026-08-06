@@ -593,9 +593,16 @@ unix it is mounted at its own host path, so a beam's working directory
 needs no translation; on windows it is mounted at `/workspace` instead,
 with the working directory rewritten to the matching path under
 `/workspace`. A declared `workdir` always overrides that computed path.
+
 `volumes` are bind-mounted the same way, in addition to the project
-directory, and follow whatever mount syntax the `docker` CLI accepts for
-a `-v host:container` argument.
+directory, but each entry is validated when the Beamfile loads, before
+any container exists: it must split on its last colon into a non-empty
+host part and a container part starting with `/` (a windows host path
+such as `C:\cache:/cache` keeps its own drive colon and still splits
+correctly, since only the last colon counts). A docker-style suffix
+appended after the container path, such as `:ro` for a read-only mount,
+does not fit that shape and is rejected at load time rather than reaching
+`docker` at all.
 
 Running a docker beam requires `docker` on the `PATH`; it reaches
 whichever daemon that `docker` CLI is itself configured to talk to
@@ -621,8 +628,8 @@ beam `ghost` uses executor `nosuchthing`: `nosuchthing` is neither a
 built-in executor nor `alba-executor-nosuchthing` on the PATH
 ```
 
-The full wire protocol — every message, its exact JSON shape, timeouts,
-and cancellation — is specified in
+The full wire protocol (every message, its exact JSON shape, timeouts, and
+cancellation) is specified in
 [`docs/plugin-protocol.md`](docs/plugin-protocol.md). `crates/alba-executor-example`
 is a complete reference implementation to read alongside it.
 

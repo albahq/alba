@@ -38,14 +38,14 @@ executor nor `alba-executor-dokcer` on the PATH — did you mean `docker`?
 Every option written inside the `executor <name> { ... }` block is forwarded
 to the plugin verbatim, as the `open` message's `options` field (see
 [Messages](#messages) below). Alba does not know or validate the shape of
-those options — that is entirely the plugin's job, including reporting a bad
+those options: that is entirely the plugin's job, including reporting a bad
 one back through the `error` message at handshake time.
 
 ## Lifecycle
 
 Alba spawns one plugin process per beam. The process is started when the
 beam's session opens and stays alive for every command that beam's `run`
-list declares — state a command leaves behind (files on disk, anything the
+list declares. State a command leaves behind (files on disk, anything the
 plugin itself keeps in memory) is visible to the next command in the same
 beam, exactly like a shell session would behave.
 
@@ -63,8 +63,8 @@ The session ends with `close`, sent once, after the last `execute` has been
 answered; the plugin is expected to exit its process in response. See
 [Timeouts](#timeouts) for what happens if it does not.
 
-If the plugin's process exits at any other point without being asked to —
-its stdout pipe closes while Alba is still expecting a reply — that is
+If the plugin's process exits at any other point without being asked to
+(its stdout pipe closes while Alba is still expecting a reply), that is
 treated as an error naming the exit code it left behind (`plugin exited
 with code <N>`, with `before answering the handshake` appended if it
 happened during `open`), not a silent end of the session.
@@ -72,7 +72,7 @@ happened during `open`), not a silent end of the session.
 ## Messages
 
 Every message is a JSON object with a `type` field naming it, on its own
-line. The examples below are the literal, byte-for-byte wire encoding —
+line. The examples below are the literal, byte-for-byte wire encoding:
 copy them, do not reformat or re-order the fields.
 
 ### Host to plugin
@@ -88,22 +88,25 @@ Sent on the plugin's stdin.
 
 `open`'s fields:
 
-- `protocol` — the protocol version Alba speaks. Always `1` today; see
+- `protocol`: the protocol version Alba speaks. Always `1` today; see
   [Versioning](#versioning).
-- `beam` — the beam's name.
-- `dir` — the beam's directory, as an absolute path.
-- `options` — whatever JSON value the beam's `executor <name> { ... }` block
-  rendered to, forwarded verbatim. A beam with no options at all sends
-  `options` as JSON `null`, not an absent field.
+- `beam`: the beam's name.
+- `dir`: the beam's directory, as an absolute path.
+- `options`: whatever JSON value the beam's `executor <name> { ... }` block
+  rendered to, forwarded verbatim. A beam declaring no options at all still
+  sends `options` as an empty JSON object (`{}`), never `null` and never an
+  absent field: Alba builds it from the declared option list regardless of
+  how many entries that list has, and an empty list still builds an empty
+  object.
 
 `execute`'s fields:
 
-- `command` — the exact, already-rendered command text from the beam's
+- `command`: the exact, already-rendered command text from the beam's
   `run` entry (template interpolation already applied).
-- `env` — the environment variables for this command, as an array of
-  two-element `[key, value]` arrays — **not** a JSON object. `{"K":"V"}`
+- `env`: the environment variables for this command, as an array of
+  two-element `[key, value]` arrays, **not** a JSON object. `{"K":"V"}`
   is not valid on this wire; `[["K","V"]]` is.
-- `cwd` — the working directory this command should run in, as an absolute
+- `cwd`: the working directory this command should run in, as an absolute
   path.
 
 `cancel` and `close` carry no fields beyond `type`.
@@ -126,9 +129,9 @@ Sent on the plugin's stdout.
   command it stopped early because of a `cancel`; any other convention is
   up to the plugin).
 - `error`'s `message` is free-form text shown to whoever is watching the
-  beam run. Answering `open` with `error` ends the session immediately —
-  the plugin is expected to exit right after sending it, and Alba does not
-  send anything further to it.
+  beam run. Answering `open` with `error` ends the session immediately: the
+  plugin is expected to exit right after sending it, and Alba does not send
+  anything further to it.
 
 A line that fails to parse as JSON, or parses but does not match any of
 these shapes, is a protocol violation: Alba reports it (quoting the
@@ -139,23 +142,23 @@ the answer to `open`; sending it at any other point is also a violation.
 
 `open` carries the protocol version Alba speaks as `protocol`, currently
 always `1`. A plugin that supports it answers `ready`. A plugin that does
-not — an older Alba speaking a version the plugin has since dropped, or a
-newer one the plugin does not know yet — answers `error` (a message
+not (an older Alba speaking a version the plugin has since dropped, or a
+newer one the plugin does not know yet) answers `error` (a message
 mentioning the unsupported version is conventional, though not required)
 and is expected to exit; Alba does not send it anything past that.
 
 ## Cancellation
 
-While a command is running (after `execute`, before its `exit` or `error`),
-Alba can send `cancel` — when the beam's run is interrupted, or another beam
-it depends on fails without `allow_failure`. The plugin should stop the
-command as soon as it reasonably can and then still answer for it, exactly
-as any other command ends: one or more `output` lines if there is anything
-left to report, followed by exactly one `exit` (or `error`).
+While a command is running (after `execute`, before its `exit` or
+`error`), Alba can send `cancel`: the beam's run is interrupted, or another
+beam it depends on fails without `allow_failure`. The plugin should stop
+the command as soon as it reasonably can and then still answer for it,
+exactly as any other command ends: one or more `output` lines if there is
+anything left to report, followed by exactly one `exit` (or `error`).
 
 Alba gives the plugin **5 seconds** from sending `cancel` to receive that
-final answer. A plugin that has not replied by then is killed outright —
-process and, on unix, its whole process group — rather than waited on
+final answer. A plugin that has not replied by then is killed outright
+(the process and, on unix, its whole process group) rather than waited on
 further, so answer promptly rather than trying to finish the command's
 remaining work first.
 
@@ -166,6 +169,15 @@ not answered `ready` or `error` within 10 seconds of receiving `open`, Alba
 gives up, kills the process, and reports the beam as failed. A plugin doing
 nontrivial setup during `open` (pulling an image, warming a cache) needs to
 finish it inside that window.
+
+`close` is bounded by the same **5-second** grace that
+[Cancellation](#cancellation) uses: Alba sends `close`, closes its own end
+of the plugin's stdin, and waits for the process to exit. A plugin that has
+not exited by then is killed the same way an unanswered `cancel` is. Unlike
+the handshake timeout, this one is not reported back as a failure: by the
+time `close` runs, the beam's own outcome has already been decided, and a
+slow exit here is treated as cleanup, not as a reason to fail the beam that
+just finished.
 
 ## Conformance
 
@@ -184,20 +196,20 @@ conformant: protocol v1
 
 Four checks run in order:
 
-1. **handshake** — opens a session against the binary (`open`, waiting for
+1. **handshake**: opens a session against the binary (`open`, waiting for
    `ready` or `error`).
-2. **execute** — runs `--command` (default `echo alba-plugin-check`) on that
+2. **execute**: runs `--command` (default `echo alba-plugin-check`) on that
    same session and waits for its `exit`.
-3. **cancel** — opens a **fresh** session (a new process, never the one
+3. **cancel**: opens a **fresh** session (a new process, never the one
    `execute` just used) and runs `--cancel-command` (default `sleep 30`) on
    it, sending `cancel` 100ms in. This check does not just check that
    `execute` eventually returns: a plugin that never answers `cancel` at all
    is absorbed by Alba's own 5-second grace and force-killed, which would
    otherwise look identical to a plugin that answered promptly. The check
    times how long the answer actually took and only passes a plugin that
-   replied well inside the grace — a plugin that only "answers" because the
+   replied well inside the grace. A plugin that only "answers" because the
    host had to kill it is reported as **not** conformant.
-4. **close** — closes that same fresh session.
+4. **close**: closes that same fresh session.
 
 If the handshake itself fails, the other three checks are skipped rather
 than attempted against a binary already known to be unresponsive. A plugin
