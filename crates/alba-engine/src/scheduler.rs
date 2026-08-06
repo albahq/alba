@@ -4,10 +4,11 @@
 //! ## Shape
 //!
 //! [`run`] extracts the target's execution subgraph, rejects the two
-//! things that make a run unschedulable as a whole (an executor Alba does
-//! not implement, and parameters that do not match what the target
-//! declares) *before* starting any work, then spawns one tokio task per
-//! beam. Each task waits for its dependencies, renders its `run`/`env`
+//! things that make a run unschedulable as a whole (a plugin beam whose
+//! `alba-executor-<name>` binary is not on the `PATH`, and parameters that
+//! do not match what the target declares) *before* starting any work, then
+//! spawns one tokio task per beam. Each task waits for its dependencies,
+//! renders its `run`/`env`
 //! templates with the target's parameters in scope, takes a permit from a
 //! semaphore sized by [`RunOptions::jobs`], consults the cache, and — on a
 //! miss — runs its commands sequentially, stopping at the first one that
@@ -48,7 +49,9 @@ use alba_core::{
     Beam, BeamId, CoreError, ExecutorKind, OptionValue, Project, execution_subgraph, expand_globs,
     outputs_satisfied, render_template,
 };
-use alba_executors::{BeamContext, CommandSpec, ExecContext, Executor, OutputLine, Stream};
+use alba_executors::{
+    BeamContext, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor, Stream,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
@@ -103,16 +106,17 @@ impl Executors {
 
     /// Which executor a beam's declared kind dispatches to.
     ///
-    /// `Plugin` never reaches here: [`plan`] rejects it during validation,
-    /// before any beam task is built, so this beam's kind is never that
-    /// variant by the time a task asks.
+    /// Only ever called with a built-in kind: a plugin beam's executor is
+    /// built directly in [`run`] from the path [`resolve_plugins`] already
+    /// found for it, one [`PluginExecutor`] per plugin name rather than a
+    /// shared instance held here.
     fn for_beam(&self, kind: &ExecutorKind) -> Arc<dyn Executor> {
         match kind {
             ExecutorKind::Shell => Arc::clone(&self.embedded),
             ExecutorKind::SystemShell => Arc::clone(&self.system),
             ExecutorKind::Docker { .. } => Arc::clone(&self.docker),
             ExecutorKind::Plugin { .. } => {
-                unreachable!("plugin executors are rejected during validation, before scheduling")
+                unreachable!("plugin beams are dispatched in `run`, never through `for_beam`")
             }
         }
     }
@@ -194,8 +198,9 @@ fn push_option_value(label: &mut String, value: &OptionValue) {
 
 /// What a session's `BeamContext.options` carries for this beam's kind.
 /// The shell executors take no options; a docker beam's configuration is
-/// exactly what its executor needs to deserialize. Plugin beams never get
-/// here yet (rejected in `plan`), refined when their dispatch lands.
+/// exactly what its executor needs to deserialize; a plugin beam's is its
+/// declared options, verbatim, as the plugin binary is the only party that
+/// knows how to interpret them.
 fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
     match kind {
         ExecutorKind::Shell | ExecutorKind::SystemShell => serde_json::Value::Null,
@@ -208,7 +213,24 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
             "volumes": volumes,
             "workdir": workdir,
         }),
-        ExecutorKind::Plugin { .. } => serde_json::Value::Null,
+        ExecutorKind::Plugin { options, .. } => serde_json::Value::Object(
+            options
+                .iter()
+                .map(|(key, value)| (key.clone(), option_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// One plugin option's value, converted from the core model's
+/// [`OptionValue`] into the JSON shape [`executor_options`] hands the
+/// plugin — a `List` becomes a JSON array of strings, matching how the
+/// docker options above already serialize theirs.
+fn option_json(value: &OptionValue) -> serde_json::Value {
+    match value {
+        OptionValue::Str(v) => serde_json::Value::String(v.clone()),
+        OptionValue::Bool(v) => serde_json::Value::Bool(*v),
+        OptionValue::List(v) => v.iter().cloned().map(serde_json::Value::String).collect(),
     }
 }
 
@@ -230,7 +252,7 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<RunSummary, EngineError> {
     let started_at = Instant::now();
-    let beams = plan(project, target, &options.params)?;
+    let (beams, plugins) = plan(project, target, &options.params)?;
 
     let _ = events.send(RunEvent::RunStarted {
         target: target.clone(),
@@ -298,7 +320,12 @@ pub async fn run(
             dependencies,
             status,
             slots: Arc::clone(&slots),
-            executor: executors.for_beam(&beam.executor),
+            executor: match &beam.executor {
+                ExecutorKind::Plugin { name, .. } => {
+                    Arc::new(PluginExecutor::new(plugins[name.as_str()].clone()))
+                }
+                kind => executors.for_beam(kind),
+            },
             events: events.clone(),
             cancel: cancel.clone(),
             stop: stop.clone(),
@@ -333,19 +360,20 @@ pub async fn run(
     Ok(summary)
 }
 
-/// The beams to run, in the project's declaration order, once the things
+/// The beams to run, in the project's declaration order, and the binary
+/// path resolved for each distinct plugin name among them, once the things
 /// that make a run unschedulable as a whole have been ruled out.
 ///
 /// These checks happen here, before [`run`] spawns anything, so a plugin
-/// beam or a bad parameter list fails the run without half of its subgraph
-/// having already executed. They are the only such checks: everything else
-/// that can go wrong belongs to one beam and is reported as that beam's
-/// failure once the run is under way.
+/// beam whose binary is missing, or a bad parameter list, fails the run
+/// without half of its subgraph having already executed. They are the only
+/// such checks: everything else that can go wrong belongs to one beam and
+/// is reported as that beam's failure once the run is under way.
 fn plan<'a>(
     project: &'a Project,
     target: &BeamId,
     params: &[String],
-) -> Result<Vec<&'a Beam>, EngineError> {
+) -> Result<(Vec<&'a Beam>, HashMap<String, PathBuf>), EngineError> {
     let subgraph = execution_subgraph(project, target)?;
     let ids: HashSet<&str> = subgraph.iter().map(|id| id.0.as_str()).collect();
     let beams: Vec<&Beam> = project
@@ -354,19 +382,49 @@ fn plan<'a>(
         .filter(|beam| ids.contains(beam.id.0.as_str()))
         .collect();
 
-    // Temporary: plugin resolution and dispatch land later, once a plugin
-    // binary can actually be found and run.
-    if beams
-        .iter()
-        .any(|beam| matches!(beam.executor, ExecutorKind::Plugin { .. }))
-    {
-        return Err(EngineError::Unschedulable(
-            "plugin executors are not yet supported".to_string(),
-        ));
-    }
+    let plugins = resolve_plugins(&beams, |binary| which::which(binary).ok())?;
     check_parameters(&beams, target, params)?;
 
-    Ok(beams)
+    Ok((beams, plugins))
+}
+
+/// Resolves every distinct plugin name in the subgraph to its binary, or
+/// fails the run before anything starts. `lookup` receives the binary
+/// name (`alba-executor-<name>`) and answers with its path; production
+/// passes a `which` lookup, tests inject their own.
+fn resolve_plugins(
+    beams: &[&Beam],
+    lookup: impl Fn(&str) -> Option<PathBuf>,
+) -> Result<HashMap<String, PathBuf>, EngineError> {
+    let mut resolved = HashMap::new();
+    for beam in beams {
+        let ExecutorKind::Plugin { name, .. } = &beam.executor else {
+            continue;
+        };
+        if resolved.contains_key(name.as_str()) {
+            continue;
+        }
+        let binary = format!("alba-executor-{name}");
+        match lookup(&binary) {
+            Some(path) => {
+                resolved.insert(name.clone(), path);
+            }
+            None => {
+                let mut message = format!(
+                    "beam `{}` uses executor `{name}`: `{name}` is neither a built-in \
+                     executor nor `{binary}` on the PATH",
+                    beam.id.0,
+                );
+                if let Some(candidate) =
+                    alba_core::suggest(name, ["shell", "system_shell", "docker"].into_iter())
+                {
+                    message.push_str(&format!(" — did you mean `{candidate}`?"));
+                }
+                return Err(EngineError::Unschedulable(message));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// Checks that the run's positional arguments match what the target beam
@@ -1177,5 +1235,51 @@ mod tests {
             )],
         };
         assert_ne!(executor_label(&as_str), executor_label(&as_list));
+    }
+
+    #[test]
+    fn a_missing_plugin_names_the_search_and_suggests_the_typo() {
+        let project =
+            alba_core::load_str(r#"beam d { executor dokcer { image "x" } run "x" }"#).unwrap();
+        let beams: Vec<&Beam> = project.beams.iter().collect();
+        let err = resolve_plugins(&beams, |_| None).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(
+                "`dokcer` is neither a built-in executor nor `alba-executor-dokcer` on the PATH"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("did you mean `docker`?"), "{message}");
+    }
+
+    #[test]
+    fn resolution_collects_one_path_per_distinct_plugin_name() {
+        let project = alba_core::load_str(
+            r#"
+beam a { executor podman { image "x" } run "a" }
+beam b { executor podman { image "y" } run "b" }
+beam c { executor remote run "c" }
+"#,
+        )
+        .unwrap();
+        let beams: Vec<&Beam> = project.beams.iter().collect();
+        let resolved = resolve_plugins(&beams, |binary| {
+            Some(PathBuf::from(format!("/bin/{binary}")))
+        })
+        .unwrap();
+        let expected: HashMap<String, PathBuf> = [
+            (
+                "podman".to_string(),
+                PathBuf::from("/bin/alba-executor-podman"),
+            ),
+            (
+                "remote".to_string(),
+                PathBuf::from("/bin/alba-executor-remote"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(resolved, expected);
     }
 }

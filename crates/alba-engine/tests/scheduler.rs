@@ -934,6 +934,23 @@ beam build { needs [helper] run "step build" }
     assert!(commands(&executor).is_empty());
 }
 
+/// A plugin binary missing from the `PATH` is caught during planning, the
+/// same as any other unschedulable run: nothing is spawned, and the fake
+/// executor — which would stand in for every built-in kind — never sees a
+/// single event.
+#[tokio::test]
+async fn a_run_with_an_unresolvable_plugin_fails_before_starting_anything() {
+    const SOURCE: &str = r#"
+beam d { executor notinstalled run "x" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "d", options(2, false), executor.clone()).await;
+
+    assert!(matches!(outcome.error(), EngineError::Unschedulable(_)));
+    assert!(executor.events().is_empty());
+}
+
 /// A beam's single session brackets every one of its commands: `open` runs
 /// once before the first command, `execute` runs once per command, and
 /// `close` runs once after the last — never interleaved with another

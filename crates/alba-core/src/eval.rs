@@ -184,14 +184,13 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// explicit tie-break the suggestion offered for the same typo could
 /// change from run to run.
 ///
-/// `pub(crate)`: `graph.rs`'s "unknown beam" and "unknown target"
-/// diagnostics reuse this exact function (and its tie-break rule) for
-/// their own "did you mean...?" help, rather than duplicating it a third
-/// time alongside `alba_syntax::parser`'s private original.
-pub(crate) fn suggest<'a>(
-    name: &str,
-    candidates: impl Iterator<Item = &'a str>,
-) -> Option<&'a str> {
+/// `pub`: `graph.rs`'s "unknown beam" and "unknown target" diagnostics
+/// reuse this exact function (and its tie-break rule) for their own "did
+/// you mean...?" help, rather than duplicating it a third time alongside
+/// `alba_syntax::parser`'s private original — and `alba-engine`'s plugin
+/// resolution reuses it again for a missing `alba-executor-<name>`
+/// binary's own did-you-mean help.
+pub fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let mut scored: Vec<(&str, usize)> = candidates
         .map(|candidate| (candidate, levenshtein(name, candidate)))
         .filter(|&(_, distance)| distance <= 2)
