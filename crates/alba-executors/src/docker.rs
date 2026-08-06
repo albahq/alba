@@ -11,12 +11,15 @@
 //! This shells out to the `docker` CLI rather than talking to the daemon
 //! through an API client, so it works unmodified against Docker Desktop,
 //! remote docker contexts, and API-compatible lookalikes (anything `docker`
-//! itself is configured to talk to). The container is started with `--rm`
-//! so that even a crashed Alba process leaves cleanup to the daemon instead
-//! of leaking a stopped container forever.
+//! itself is configured to talk to). The container is started with `--rm`,
+//! which only reclaims it once it *stops* — since its main process is a
+//! dormant `sleep` that never stops on its own, `--rm` is not a safety net
+//! against a crashed Alba process. The `alba.beam=<beam>` label (see
+//! `run_args`) is the only handle a later, out-of-process cleanup has for
+//! finding and removing containers a crashed run left behind.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -28,9 +31,21 @@ use crate::{
     BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor, Stream,
 };
 
-/// How long to wait for `docker stop` to succeed gracefully before falling
-/// back to a forceful kill of the `docker exec` process itself.
+/// How long a cancelled command's whole teardown sequence — asking the
+/// daemon to stop the container, removing it, and reaping the local
+/// `docker` process — may take before escalating to a forceful kill of
+/// that local process. This bounds the *entire* sequence, not just the
+/// final wait: a slow or unreachable daemon must not be able to hold a
+/// cancelled beam past the grace period this advertises.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// How long to wait for the stdout/stderr reader tasks to observe EOF
+/// after a `docker exec` child has exited, before giving up on further
+/// output and returning anyway. Mirrors `shell.rs`'s `DRAIN_PERIOD`: a
+/// command that backgrounds a descendant inside the container could
+/// otherwise hold the pipe open and block `execute()` forever waiting for
+/// an EOF that never comes.
+const DRAIN_PERIOD: Duration = Duration::from_secs(2);
 
 /// Runs beam commands inside a per-session docker container. See the module
 /// doc comment for the container lifecycle.
@@ -115,7 +130,18 @@ impl Executor for DockerExecutor {
             _ = beam.cancel.cancelled() => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                remove_container_fire_and_forget(&name);
+                // Best-effort: killing the local `docker run -d` process
+                // does not cancel container creation daemon-side, so this
+                // can race and fail with "No such container" if the
+                // container had not finished being created yet — that
+                // failure is fine, there is nothing left to remove either
+                // way. What matters is that we wait for the removal
+                // (bounded by STOP_GRACE) instead of detaching it: a
+                // detached, unawaited `docker rm -f` risks losing the race
+                // against the daemon actually finishing container
+                // creation, which would orphan a running container that
+                // `--rm` cannot reclaim (see the module doc comment).
+                let _ = tokio::time::timeout(STOP_GRACE, run_quiet(&["rm", "-f", &name])).await;
                 stdout_task.abort();
                 stderr_task.abort();
                 return Err(ExecError {
@@ -139,22 +165,19 @@ impl Executor for DockerExecutor {
 
         Ok(Box::new(DockerSession {
             container: container_id.trim().to_string(),
-            name,
             mapping,
         }))
     }
 }
 
 /// The session opened for one beam: `container` (its docker-assigned id) is
-/// the target of every `docker exec`/`stop`/`rm` this session issues;
-/// `name` is kept alongside it (it is what `--name` was given at `run`
-/// time) purely for diagnosability — e.g. in a debug dump of a stuck
-/// session — since the id alone is not human-legible.
+/// the target of every `docker exec`/`stop`/`rm` this session issues. The
+/// `--name` given at `run` time is not kept here — nothing reads it once
+/// the id is known, and a stored-but-unread field is not worth carrying
+/// against a future diagnostic that does not exist yet.
 #[derive(Debug)]
 struct DockerSession {
     container: String,
-    #[allow(dead_code)]
-    name: String,
     mapping: PathMapping,
 }
 
@@ -189,28 +212,56 @@ impl ExecSession for DockerSession {
         let mut stderr_task =
             tokio::spawn(stream_lines(stderr, Stream::Stderr, ctx.output.clone()));
 
-        let status = tokio::select! {
+        let status_result: Result<ExitStatus, ExecError> = tokio::select! {
             result = child.wait() => result.map_err(|error| ExecError {
                 message: format!("failed to wait for `docker exec`: {error}"),
-            })?,
+            }),
             _ = ctx.cancel.cancelled() => {
-                run_quiet(&["stop", "--time", "5", &self.container]).await;
-                run_quiet(&["rm", "-f", &self.container]).await;
-                match tokio::time::timeout(STOP_GRACE, child.wait()).await {
-                    Ok(result) => result.map_err(|error| ExecError {
-                        message: format!("failed to wait for cancelled `docker exec`: {error}"),
-                    })?,
-                    Err(_elapsed) => {
-                        let _ = child.kill().await;
-                        child.wait().await.map_err(|error| ExecError {
-                            message: format!("failed to wait for killed `docker exec`: {error}"),
-                        })?
-                    }
+                // Ask the daemon to stop the container, then make sure the
+                // local `docker exec` process is gone. The whole sequence
+                // — stop, rm, and reaping the child — is bounded by
+                // STOP_GRACE so a slow or unreachable daemon cannot hold
+                // the beam past the grace period it advertises; only the
+                // fallback kill is unbounded, and it targets our own local
+                // process, which cannot itself hang on the daemon.
+                let teardown = async {
+                    run_quiet(&["stop", "--time", &STOP_GRACE.as_secs().to_string(), &self.container]).await;
+                    run_quiet(&["rm", "-f", &self.container]).await;
+                    let _ = child.wait().await;
+                };
+                if tokio::time::timeout(STOP_GRACE, teardown).await.is_err() {
+                    let _ = child.kill().await;
                 }
+                child.wait().await.map_err(|error| ExecError {
+                    message: format!("failed to wait for cancelled `docker exec`: {error}"),
+                })
             }
         };
 
-        let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        // On error, nobody is going to read `ctx.output` after `execute`
+        // returns; abort the reader tasks instead of leaving them
+        // detached and still writing to a channel side nothing drains.
+        let status = match status_result {
+            Ok(status) => status,
+            Err(error) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(error);
+            }
+        };
+
+        // The child has exited, so its pipes are closing/closed; let the
+        // reader tasks drain what's left, bounded by DRAIN_PERIOD — see
+        // its doc comment, mirroring `shell.rs`'s identical reasoning: an
+        // unconditional join could hang forever on a surviving descendant
+        // inside the container still holding a pipe open.
+        let drain = async {
+            let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        };
+        if tokio::time::timeout(DRAIN_PERIOD, drain).await.is_err() {
+            stdout_task.abort();
+            stderr_task.abort();
+        }
 
         Ok(ExecResult {
             exit_code: status.code().unwrap_or(-1),
@@ -218,23 +269,33 @@ impl ExecSession for DockerSession {
     }
 
     async fn close(self: Box<Self>) -> Result<(), ExecError> {
-        let mut child = Command::new("docker")
+        // Piped (not null) stderr: a genuine failure here reaches the
+        // user (the engine downgrades it to a notice, but does not
+        // discard it), so its diagnosis should not be reduced to a bare
+        // exit code.
+        let output = Command::new("docker")
             .args(["rm", "-f", &self.container])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::piped())
+            .output()
+            .await
             .map_err(docker_spawn_error)?;
-        let status = child.wait().await.map_err(|error| ExecError {
-            message: format!("failed to wait for `docker rm`: {error}"),
-        })?;
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            return Err(ExecError {
-                message: format!("docker rm exited with code {code}"),
-            });
+        if output.status.success() {
+            return Ok(());
         }
-        Ok(())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such container") {
+            // A cancelled `execute` already stopped and removed this
+            // container (see its teardown sequence); `close` still runs
+            // unconditionally afterwards, so this is the expected,
+            // truthful outcome, not a failure the user needs to see.
+            return Ok(());
+        }
+        let code = output.status.code().unwrap_or(-1);
+        Err(ExecError {
+            message: format!("docker rm exited with code {code}: {}", stderr.trim()),
+        })
     }
 }
 
@@ -263,19 +324,6 @@ async fn run_quiet(args: &[&str]) {
     {
         let _ = child.wait().await;
     }
-}
-
-/// Best-effort, non-blocking `docker rm -f`: used when the container may
-/// not have finished starting yet (a cancellation raced with `docker run`
-/// itself), so there is nothing worth waiting on — the process is spawned
-/// and immediately let go.
-fn remove_container_fire_and_forget(name: &str) {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", name])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
 }
 
 /// A unique, docker-legal name for the container backing one beam session:
