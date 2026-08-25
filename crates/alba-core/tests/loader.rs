@@ -381,6 +381,18 @@ fn git_fields_evaluate_from_the_repository_holding_the_beamfile() {
     let sha =
         alba_core::render_template(&project.beams[0].run[0], &project.beams[0].scope).unwrap();
     assert_eq!(sha.len(), "echo ".len() + 40, "{sha}");
+    // Not just the prefix and suffix: the `short_sha` in between must
+    // actually look like one (non-empty, hexadecimal), so a formatting
+    // typo in between "main-" and " dirty" would still be caught.
+    let short_sha = description
+        .strip_prefix("main-")
+        .and_then(|rest| rest.strip_suffix(" dirty"))
+        .unwrap_or_else(|| panic!("unexpected description shape: {description}"));
+    assert!(!short_sha.is_empty(), "{description}");
+    assert!(
+        short_sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "{description}"
+    );
 }
 
 #[test]
@@ -388,6 +400,22 @@ fn git_is_only_spawned_when_an_expression_reads_it() {
     // Not a repository at all: loading must still succeed.
     let dir = tempfile::tempdir().unwrap();
     write(dir.path().join("Beamfile"), "beam b { run \"echo plain\" }");
+    load_project(&dir.path().join("Beamfile")).unwrap();
+}
+
+#[test]
+fn git_behind_a_statically_known_untaken_branch_is_never_spawned() {
+    // Not a repository at all: if `check_expr` evaluated `git.branch`
+    // eagerly while validating the untaken `else` branch of a
+    // statically-known `if`, this load would fail before the beam ever
+    // ran. `run` is deferred to schedule time, so nothing here ever calls
+    // `eval_expr` on it either; only `check_expr`'s load-time pass touches
+    // this expression.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "beam x { run \"{if true then 'a' else git.branch}\" }",
+    );
     load_project(&dir.path().join("Beamfile")).unwrap();
 }
 

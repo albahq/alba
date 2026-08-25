@@ -138,22 +138,15 @@ impl Scope {
         }
     }
 
-    /// The `git.<field>` value, or the error to report at `span`.
+    /// The `git.<field>` value, or the error to report at `span`. Callers
+    /// have already run `check_field` (below), so a bad object or field
+    /// name never reaches here: the only remaining way to fail is `git`
+    /// being unavailable in this scope, or the real `git.head()` call
+    /// itself failing.
     fn git_field(&self, field: &Spanned<String>, span: Span) -> Result<Value, CoreError> {
         let Some(git) = &self.git else {
             return Err(CoreError::new("`git` is not available here", span));
         };
-        // The field name is checked before `git.head()` runs, so an
-        // unknown field like `git.tag` fails without spawning git.
-        if !matches!(
-            field.value.as_str(),
-            "branch" | "sha" | "short_sha" | "dirty"
-        ) {
-            return Err(
-                CoreError::new(format!("unknown git field `{}`", field.value), field.span)
-                    .with_help("expected one of `branch`, `sha`, `short_sha`, `dirty`"),
-            );
-        }
         let head = git.head().map_err(|error| {
             CoreError::new(format!("cannot read `git.{}`: {error}", field.value), span)
         })?;
@@ -162,7 +155,7 @@ impl Scope {
             "sha" => Value::Str(head.sha.clone()),
             "short_sha" => Value::Str(head.short_sha.clone()),
             "dirty" => Value::Bool(head.dirty),
-            _ => unreachable!("checked above"),
+            _ => unreachable!("checked by check_field before this method is ever called"),
         })
     }
 
@@ -225,20 +218,38 @@ fn expr_span(expr: &Expr) -> Option<Span> {
     }
 }
 
-/// `object.field`: only `git` has fields. Shared by evaluation and
-/// load-time checking, which agree on the answer since the values are
-/// known as soon as git answers.
-fn eval_field(
-    object: &Spanned<String>,
-    field: &Spanned<String>,
-    scope: &Scope,
-) -> Result<Value, CoreError> {
+/// `object.field`: only `git` has fields, and only the four values below
+/// exist on it. Spawn-free: this alone is what `check_expr` runs, so
+/// `git.tag` or `foo.bar` is rejected at load time without ever touching
+/// git. Shared with `eval_field`, which extends this with the real
+/// `git.head()` lookup once a value is actually needed.
+fn check_field(object: &Spanned<String>, field: &Spanned<String>) -> Result<(), CoreError> {
     if object.value != "git" {
         return Err(CoreError::new(
             format!("`{}` has no fields; only `git` does", object.value),
             object.span,
         ));
     }
+    if !matches!(
+        field.value.as_str(),
+        "branch" | "sha" | "short_sha" | "dirty"
+    ) {
+        return Err(
+            CoreError::new(format!("unknown git field `{}`", field.value), field.span)
+                .with_help("expected one of `branch`, `sha`, `short_sha`, `dirty`"),
+        );
+    }
+    Ok(())
+}
+
+/// `object.field`, evaluated for real: [`check_field`]'s spawn-free name
+/// check, then the actual `git.head()` lookup through the scope.
+fn eval_field(
+    object: &Spanned<String>,
+    field: &Spanned<String>,
+    scope: &Scope,
+) -> Result<Value, CoreError> {
+    check_field(object, field)?;
     scope.git_field(field, Span::new(object.span.start, field.span.end))
 }
 
@@ -685,7 +696,18 @@ fn check_expr(
                 }
             }
         }
-        Expr::Field { object, field } => eval_field(object, field, lets).map(StaticValue::Known),
+        // Spawn-free name check only: whether `object` has fields and
+        // whether `field` is one of `git`'s four. The real `git.head()`
+        // lookup happens only at evaluation time (`eval_field`, via
+        // `eval_with_fallback`), never here — otherwise a beam whose
+        // condition never takes the branch that reads `git` would still
+        // spawn it just because `check_expr` validates both branches of an
+        // `if` (see above). `env()` calls defer the same way, for the same
+        // reason.
+        Expr::Field { object, field } => {
+            check_field(object, field)?;
+            Ok(StaticValue::Unknown)
+        }
     }
 }
 
