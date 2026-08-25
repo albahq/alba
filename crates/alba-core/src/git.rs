@@ -108,10 +108,14 @@ pub fn known_hook(name: &str) -> Option<&'static KnownHook> {
     KNOWN_HOOKS.iter().find(|hook| hook.name == name)
 }
 
-/// Runs `git <args>` in `cwd` and returns its stdout, trimmed of the
-/// trailing newline. A non-zero exit is a [`GitError`] carrying stderr.
-fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
-    let output = Command::new("git")
+/// Spawns `git <args>` in `cwd` and returns its raw output. The only
+/// concern here is whether the process could run at all: a missing `git`
+/// binary is the fixed [`GitError`] every caller reports the same way.
+/// Interpreting the exit status (success, or a status worth treating as
+/// "no answer" rather than failure, as [`hooks_path`] does for `1`) is
+/// left to the caller.
+fn spawn(cwd: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
+    Command::new("git")
         .current_dir(cwd)
         .args(args)
         .output()
@@ -121,7 +125,13 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             } else {
                 GitError(format!("cannot run git: {error}"))
             }
-        })?;
+        })
+}
+
+/// Runs `git <args>` in `cwd` and returns its raw stdout. A non-zero exit
+/// is a [`GitError`] carrying the command and stderr.
+fn git_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
+    let output = spawn(cwd, args)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(GitError(format!(
@@ -130,8 +140,27 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             stderr.trim()
         )));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(output.stdout)
+}
+
+/// Runs `git <args>` in `cwd` and returns its stdout as text, trimmed of
+/// the trailing newline.
+fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    let stdout = git_output(cwd, args)?;
+    let stdout = String::from_utf8_lossy(&stdout);
     Ok(stdout.trim_end_matches(['\n', '\r']).to_string())
+}
+
+/// Splits `-z`-terminated `git` output (paths separated by `NUL`, not
+/// newline) into its entries. `-z` also turns off `core.quotepath`, so a
+/// non-ASCII or special-character filename comes back verbatim instead of
+/// C-quoted (`"caf\303\251.txt"`).
+fn split_nul_terminated(bytes: &[u8]) -> Vec<PathBuf> {
+    String::from_utf8_lossy(bytes)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// The repository's top-level directory, canonical.
@@ -160,14 +189,10 @@ pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
 /// untracked file `.gitignore` does not exclude; relative to `cwd`,
 /// sorted, without duplicates. Paths outside `cwd` are not reported.
 pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitError> {
-    let diff = git(cwd, &["diff", "--name-only", "--relative", reference])?;
-    let untracked = git(cwd, &["ls-files", "--others", "--exclude-standard"])?;
-    let mut paths: Vec<PathBuf> = diff
-        .lines()
-        .chain(untracked.lines())
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .collect();
+    let diff = git_output(cwd, &["diff", "--name-only", "--relative", "-z", reference])?;
+    let untracked = git_output(cwd, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    let mut paths = split_nul_terminated(&diff);
+    paths.extend(split_nul_terminated(&untracked));
     paths.sort();
     paths.dedup();
     Ok(paths)
@@ -176,18 +201,16 @@ pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitErr
 /// The repository-local `core.hooksPath`, if set.
 pub fn hooks_path(cwd: &Path) -> Result<Option<String>, GitError> {
     // `git config --get` exits 1 when the key is unset: not an error here.
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(["config", "--local", "--get", "core.hooksPath"])
-        .output()
-        .map_err(|error| GitError(format!("cannot run git: {error}")))?;
+    let args = ["config", "--local", "--get", "core.hooksPath"];
+    let output = spawn(cwd, &args)?;
     match output.status.code() {
         Some(0) => Ok(Some(
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
         )),
         Some(1) => Ok(None),
         _ => Err(GitError(format!(
-            "git config failed: {}",
+            "git {} failed: {}",
+            args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         ))),
     }

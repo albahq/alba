@@ -102,6 +102,17 @@ fn changed_files_against_a_branch_sees_commits_since_it() {
     assert!(changed_files(dir.path(), "HEAD").unwrap().is_empty());
 }
 
+/// Git's default `core.quotepath=true` C-quotes any path holding non-ASCII
+/// bytes (`café.txt` becomes the literal line `"caf\303\251.txt"`) unless
+/// asked for `-z` output; a name like this must come back untouched.
+#[test]
+fn changed_files_reports_a_non_ascii_filename_verbatim() {
+    let dir = repository();
+    std::fs::write(dir.path().join("café.txt"), "").unwrap();
+    let changed = changed_files(dir.path(), "HEAD").unwrap();
+    assert_eq!(changed, [Path::new("café.txt")]);
+}
+
 #[test]
 fn an_unknown_reference_is_a_git_error() {
     let dir = repository();
