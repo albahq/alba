@@ -181,6 +181,19 @@ impl CopyResult {
     }
 }
 
+/// What the header calls the run: the target, the targets joined, or the
+/// reference an affected run found nothing for.
+fn run_label(targets: &[BeamId], affected_by: Option<&str>) -> String {
+    match (targets, affected_by) {
+        ([], Some(reference)) => format!("nothing affected by {reference}"),
+        (targets, _) => targets
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 impl AppState {
     pub fn new(target: &str, watch_enabled: bool) -> Self {
         Self {
@@ -214,10 +227,16 @@ impl AppState {
     pub fn apply(&mut self, event: &RunEvent, now: Instant) {
         match event {
             RunEvent::RunStarted {
-                target,
+                targets,
+                affected_by,
                 beams,
                 edges,
-            } => self.start_run(target.0.clone(), beams, edges, now),
+            } => self.start_run(
+                run_label(targets, affected_by.as_deref()),
+                beams,
+                edges,
+                now,
+            ),
             RunEvent::BeamStarted { id } | RunEvent::BeamCached { id } => {
                 if let Some(row) = self.row_mut(&id.0) {
                     row.state = BeamState::Running { since: now };
@@ -823,13 +842,13 @@ impl AppState {
     /// the closest thing to "where they were" left to offer.
     fn start_run(
         &mut self,
-        target: String,
+        label: String,
         beams: &[BeamId],
         edges: &[(BeamId, BeamId)],
         now: Instant,
     ) {
         let selected_id = self.selected_beam().map(|row| row.id.clone());
-        self.target = target;
+        self.target = label;
         self.beams = beams
             .iter()
             .map(|id| BeamRow {
@@ -883,7 +902,8 @@ mod tests {
 
     fn run_started(target: &str, beams: &[&str], edges: &[(&str, &str)]) -> RunEvent {
         RunEvent::RunStarted {
-            target: id(target),
+            targets: vec![id(target)],
+            affected_by: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: edges.iter().map(|(a, b)| (id(a), id(b))).collect(),
         }

@@ -306,10 +306,10 @@ fn run_beam(id: &str, force: bool) -> SessionCommand {
 
 /// The beam a run was started for.
 fn started_target(event: RunEvent) -> String {
-    let RunEvent::RunStarted { target, .. } = event else {
+    let RunEvent::RunStarted { targets, .. } = event else {
         unreachable!("not a RunStarted event")
     };
-    target.0
+    targets[0].0.clone()
 }
 
 /// The summary a run ended on.

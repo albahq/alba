@@ -31,13 +31,19 @@ use alba_executors::OutputLine;
 pub enum RunEvent {
     /// A run is beginning. First event of every run, before any
     /// `BeamStarted`/`BeamCached`, carrying the snapshot of what this run
-    /// will schedule: the target, its subgraph in plan order, and the
-    /// dependency edges between members of that subgraph. A snapshot rather
-    /// than something the consumer looks up, because a watch session
-    /// reloads the Beamfile mid-session — a run's graph is not known once
-    /// and for all.
+    /// will schedule: the targets, the union of their subgraphs in plan
+    /// order, and the dependency edges between members of that subgraph. A
+    /// snapshot rather than something the consumer looks up, because a
+    /// watch session reloads the Beamfile mid-session — a run's graph is
+    /// not known once and for all.
     RunStarted {
-        target: BeamId,
+        /// The beams the run was asked for: one for `alba run <beam>`,
+        /// any number for an affected run, none for an affected run that
+        /// found nothing to do.
+        targets: Vec<BeamId>,
+        /// The git reference an affected run was computed against, when
+        /// it was one.
+        affected_by: Option<String>,
         beams: Vec<BeamId>,
         /// `(beam, dependency)`: the first needs the second. Both ends are
         /// always members of `beams` — the subgraph is transitively closed.

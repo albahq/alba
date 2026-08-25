@@ -214,7 +214,8 @@ mod tests {
         let mut state = AppState::new("t", false);
         state.apply(
             &RunEvent::RunStarted {
-                target: BeamId("t".to_string()),
+                targets: vec![BeamId("t".to_string())],
+                affected_by: None,
                 beams: beams.iter().map(|name| BeamId(name.to_string())).collect(),
                 edges: edges
                     .iter()

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
-use alba_engine::{CacheOptions, Executors, RunOptions, run};
+use alba_engine::{CacheOptions, Executors, RunOptions, Targets, run};
 use alba_executors::FakeExecutor;
 use tokio_util::sync::CancellationToken;
 
@@ -45,7 +45,7 @@ async fn run_once(dir: &Path) -> alba_engine::RunSummary {
     let (events, _incoming) = tokio::sync::mpsc::unbounded_channel();
     run(
         &project,
-        &BeamId("build".to_string()),
+        &Targets::beam(BeamId("build".to_string())),
         options(dir),
         Executors::uniform(Arc::new(FakeExecutor::new())),
         events,

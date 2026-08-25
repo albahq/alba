@@ -1,13 +1,13 @@
-//! The scheduler: turns a validated [`Project`] and a target beam into a
-//! bounded-parallel run.
+//! The scheduler: turns a validated [`Project`] and a set of target beams
+//! into a bounded-parallel run.
 //!
 //! ## Shape
 //!
-//! [`run`] extracts the target's execution subgraph, rejects the two
-//! things that make a run unschedulable as a whole (a plugin beam whose
-//! `alba-executor-<name>` binary is not on the `PATH`, and parameters that
-//! do not match what the target declares) *before* starting any work, then
-//! spawns one tokio task per beam. Each task waits for its dependencies,
+//! [`run`] extracts the union of every target's execution subgraph, rejects
+//! the two things that make a run unschedulable as a whole (a plugin beam
+//! whose `alba-executor-<name>` binary is not on the `PATH`, and parameters
+//! that do not match what the targets declare) *before* starting any work,
+//! then spawns one tokio task per beam. Each task waits for its dependencies,
 //! renders its `run`/`env`
 //! templates with the target's parameters in scope, takes a permit from a
 //! semaphore sized by [`RunOptions::jobs`], consults the cache, and — on a
@@ -234,7 +234,26 @@ fn option_json(value: &OptionValue) -> serde_json::Value {
     }
 }
 
-/// Runs `target` and everything it needs, and reports what happened.
+/// What a run schedules: the target beams (each with its subgraph), and
+/// where they came from when a git reference chose them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Targets {
+    pub beams: Vec<BeamId>,
+    pub affected_by: Option<String>,
+}
+
+impl Targets {
+    /// The everyday case: `alba run <beam>`.
+    pub fn beam(id: BeamId) -> Self {
+        Self {
+            beams: vec![id],
+            affected_by: None,
+        }
+    }
+}
+
+/// Runs every beam in `targets` and everything each one needs, and reports
+/// what happened.
 ///
 /// Returns `Err` only for something Alba itself cannot do — an unknown
 /// target, an unresolvable plugin beam, wrong parameters — or for a
@@ -245,17 +264,18 @@ fn option_json(value: &OptionValue) -> serde_json::Value {
 /// no summary to report.
 pub async fn run(
     project: &Project,
-    target: &BeamId,
+    targets: &Targets,
     options: RunOptions,
     executors: Executors,
     events: UnboundedSender<RunEvent>,
     cancel: CancellationToken,
 ) -> Result<RunSummary, EngineError> {
     let started_at = Instant::now();
-    let (beams, plugins) = plan(project, target, &options.params)?;
+    let (beams, plugins) = plan(project, &targets.beams, &options.params)?;
 
     let _ = events.send(RunEvent::RunStarted {
-        target: target.clone(),
+        targets: targets.beams.clone(),
+        affected_by: targets.affected_by.clone(),
         beams: beams.iter().map(|beam| beam.id.clone()).collect(),
         edges: beams
             .iter()
@@ -309,7 +329,7 @@ pub async fn run(
         );
 
         let task = BeamTask {
-            args: if beam.id == *target {
+            args: if targets.beams.len() == 1 && beam.id == targets.beams[0] {
                 options.params.clone()
             } else {
                 Vec::new()
@@ -364,6 +384,9 @@ pub async fn run(
 /// path resolved for each distinct plugin name among them, once the things
 /// that make a run unschedulable as a whole have been ruled out.
 ///
+/// The subgraph is the union of every target's own execution subgraph,
+/// deduplicated so a beam shared by several targets is scheduled once.
+///
 /// These checks happen here, before [`run`] spawns anything, so a plugin
 /// beam whose binary is missing, or a bad parameter list, fails the run
 /// without half of its subgraph having already executed. They are the only
@@ -371,11 +394,17 @@ pub async fn run(
 /// is reported as that beam's failure once the run is under way.
 fn plan<'a>(
     project: &'a Project,
-    target: &BeamId,
+    targets: &[BeamId],
     params: &[String],
 ) -> Result<(Vec<&'a Beam>, HashMap<String, PathBuf>), EngineError> {
-    let subgraph = execution_subgraph(project, target)?;
-    let ids: HashSet<&str> = subgraph.iter().map(|id| id.0.as_str()).collect();
+    let mut ids: HashSet<String> = HashSet::new();
+    for target in targets {
+        ids.extend(
+            execution_subgraph(project, target)?
+                .into_iter()
+                .map(|id| id.0),
+        );
+    }
     let beams: Vec<&Beam> = project
         .beams
         .iter()
@@ -383,7 +412,7 @@ fn plan<'a>(
         .collect();
 
     let plugins = resolve_plugins(&beams, |binary| which::which(binary).ok())?;
-    check_parameters(&beams, target, params)?;
+    check_parameters(&beams, targets, params)?;
 
     Ok((beams, plugins))
 }
@@ -427,36 +456,50 @@ fn resolve_plugins(
     Ok(resolved)
 }
 
-/// Checks that the run's positional arguments match what the target beam
-/// declares, and that no other beam in the subgraph declares parameters —
-/// only the target can be given any, so a dependency with parameters could
+/// Checks that the run's positional arguments match what the target beams
+/// declare, and that no other beam in the subgraph declares parameters —
+/// only a target can be given any, so a dependency with parameters could
 /// never have them bound.
+///
+/// Positional arguments only ever bind when there is exactly one target:
+/// with several, nothing tells which target they belong to, so every
+/// target must then take none.
 fn check_parameters(
     beams: &[&Beam],
-    target: &BeamId,
+    targets: &[BeamId],
     params: &[String],
 ) -> Result<(), EngineError> {
+    if !params.is_empty() && targets.len() != 1 {
+        return Err(EngineError::Unschedulable(format!(
+            "positional arguments need exactly one target beam, got {}",
+            targets.len()
+        )));
+    }
     for beam in beams {
-        if beam.id != *target && !beam.params.is_empty() {
+        let is_target = targets.contains(&beam.id);
+        if !is_target && !beam.params.is_empty() {
             return Err(EngineError::Unschedulable(format!(
-                "beam `{}` declares parameters, but only the target beam can be given any",
+                "beam `{}` declares parameters, but only a target beam can be given any",
                 beam.id.0
             )));
         }
+        if is_target {
+            let given = if targets.len() == 1 { params.len() } else { 0 };
+            check_arity(beam, given)?;
+        }
     }
+    Ok(())
+}
 
-    // `execution_subgraph` already rejected a target that does not exist.
-    let Some(beam) = beams.iter().find(|beam| beam.id == *target) else {
-        return Ok(());
-    };
+/// Checks that `beam` — a target — declares exactly `given` parameters.
+fn check_arity(beam: &Beam, given: usize) -> Result<(), EngineError> {
     let expected = beam.params.len();
-    if expected == params.len() {
+    if expected == given {
         return Ok(());
     }
 
-    let given = params.len();
     Err(EngineError::Unschedulable(if expected == 0 {
-        format!("beam `{}` takes no parameters, got {given}", target.0)
+        format!("beam `{}` takes no parameters, got {given}", beam.id.0)
     } else {
         let names = beam
             .params
@@ -467,7 +510,7 @@ fn check_parameters(
         let plural = if expected == 1 { "" } else { "s" };
         format!(
             "beam `{}` expects {expected} parameter{plural} ({names}), got {given}",
-            target.0
+            beam.id.0
         )
     }))
 }
@@ -487,7 +530,8 @@ struct BeamOutcome {
 /// list, since all of it is handed to a spawned task as a unit.
 struct BeamTask {
     beam: Beam,
-    /// The target's positional arguments; empty for every other beam.
+    /// The lone target's positional arguments — bindable only when there
+    /// is exactly one target; empty for every other beam.
     args: Vec<String>,
     dependencies: Vec<watch::Receiver<Option<BeamOutcome>>>,
     status: watch::Sender<Option<BeamOutcome>>,

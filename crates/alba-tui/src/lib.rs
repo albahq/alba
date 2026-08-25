@@ -423,7 +423,8 @@ mod tests {
 
     fn run_started(beams: &[&str]) -> RunEvent {
         RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: Vec::new(),
         }
@@ -1122,7 +1123,8 @@ mod tests {
         // leaves "build" nowhere in the state.
         state.apply(
             &RunEvent::RunStarted {
-                target: id("codegen"),
+                targets: vec![id("codegen")],
+                affected_by: None,
                 beams: vec![id("codegen")],
                 edges: Vec::new(),
             },
