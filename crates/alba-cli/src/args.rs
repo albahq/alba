@@ -41,6 +41,16 @@ pub enum Command {
         #[command(flatten)]
         flags: RunFlags,
     },
+    /// List the beams affected by what changed since a git reference,
+    /// without running anything.
+    Affected {
+        /// The git reference to diff the working tree against.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// `text`: one beam per line; `json`: `{"beams": [...]}`.
+        #[arg(long, value_name = "FORMAT", value_enum, default_value_t = LogFormat::Text)]
+        log_format: LogFormat,
+    },
     /// Manage the project's cache.
     Cache {
         #[command(subcommand)]
@@ -132,6 +142,13 @@ pub struct RunFlags {
     /// declares as `inputs` change. Ctrl-C ends the session.
     #[arg(long)]
     pub watch: bool,
+
+    /// Run only the beams affected by what changed since this git
+    /// reference (their `inputs`, or their Beamfile), and their dependents.
+    /// With a beam, that beam runs if it is affected and nothing runs
+    /// otherwise; without one, every affected beam is a target.
+    #[arg(long, value_name = "REF")]
+    pub affected: Option<String>,
 
     /// Force the interactive interface on, even where it would default off
     ///

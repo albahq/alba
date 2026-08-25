@@ -20,7 +20,12 @@
 //! `plugin` goes further still: `alba plugin check` needs no Beamfile at
 //! all, not even to locate a directory, since it drives a binary through
 //! the protocol directly. It is dispatched the same way, before loading.
+//!
+//! `affected` lists the beams a git reference's diff touches, and never
+//! runs anything — it is the dry run of `alba run --affected`, meant for
+//! CI to gate on.
 
+pub mod affected;
 pub mod cache;
 pub mod check;
 pub mod list;

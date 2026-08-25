@@ -44,7 +44,7 @@ use std::sync::Arc;
 use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
     CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection,
-    SessionError, Targets, WatchExit,
+    SessionError, WatchExit,
 };
 use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -54,7 +54,7 @@ use crate::args::{LogFormat, OutputStyle, RunFlags};
 use crate::exit::{EXIT_ALBA_ERROR, EXIT_INTERRUPTED};
 use crate::render::{GroupedRenderer, InterleavedRenderer, JsonRenderer, LineSink, Renderer};
 
-/// Runs `target` and returns the process exit code.
+/// Runs `selection` and returns the process exit code.
 ///
 /// Loading already happened in `main.rs` (see the `commands` module doc
 /// comment); `sources` is carried in only to render an [`EngineError`]
@@ -64,7 +64,7 @@ pub fn run(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
@@ -98,14 +98,16 @@ pub fn run(
     // are otherwise exactly the program they were.
     if interactive {
         runtime.block_on(tui_execute(
-            project, sources, beamfile, target, params, flags,
+            project, sources, beamfile, selection, params, flags,
         ))
     } else if flags.watch {
         runtime.block_on(watch_execute(
-            project, sources, beamfile, target, params, flags,
+            project, sources, beamfile, selection, params, flags,
         ))
     } else {
-        runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+        runtime.block_on(execute(
+            project, sources, beamfile, selection, params, flags,
+        ))
     }
 }
 
@@ -160,7 +162,7 @@ async fn execute(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
@@ -174,6 +176,21 @@ async fn execute(
         }),
     };
 
+    let root = alba_engine::beamfile_dir(beamfile);
+    let targets = match alba_engine::select(project, sources, &root, selection) {
+        Ok(targets) => targets,
+        Err(error) => {
+            LineSink::stderr().line(render_engine_error(&error, sources).trim_end());
+            return EXIT_ALBA_ERROR;
+        }
+    };
+    if let Some(reference) = &targets.affected_by
+        && targets.beams.is_empty()
+    {
+        LineSink::stderr().line(&format!("\u{2713} nothing affected by {reference}"));
+        return 0;
+    }
+
     let (events, incoming) = unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -182,7 +199,7 @@ async fn execute(
 
     let result = alba_engine::run(
         project,
-        &Targets::beam(target.clone()),
+        &targets,
         options,
         executors(beamfile),
         events,
@@ -233,22 +250,22 @@ async fn watch_execute(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
     let mut err = LineSink::stderr();
 
-    match alba_core::execution_subgraph(project, target) {
-        Ok(subgraph) => {
-            if let Some(warning) = no_inputs_warning(project, target, &subgraph) {
-                err.line(&warning);
-            }
-        }
-        Err(error) => {
-            err.line(crate::render_core_error(&error, sources).trim_end());
-            return EXIT_ALBA_ERROR;
-        }
+    let root = alba_engine::beamfile_dir(beamfile);
+    if let Err(error) = alba_engine::select(project, sources, &root, selection) {
+        err.line(render_engine_error(&error, sources).trim_end());
+        return EXIT_ALBA_ERROR;
+    }
+    if let Some(target) = selection.watched_target()
+        && let Ok(subgraph) = alba_core::execution_subgraph(project, target)
+        && let Some(warning) = no_inputs_warning(project, target, &subgraph)
+    {
+        err.line(&warning);
     }
 
     let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources)) {
@@ -279,7 +296,7 @@ async fn watch_execute(
         beamfile,
         project.clone(),
         sources.clone(),
-        Selection::Beam(target.clone()),
+        selection.clone(),
         options,
         executors(beamfile),
         events,
@@ -339,7 +356,7 @@ async fn tui_execute(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
@@ -349,8 +366,9 @@ async fn tui_execute(
     // `no_inputs_warning`'s advice belongs to a session that can only
     // watch, and this one shows its watch state in the header and lets `w`
     // change it.
-    if let Err(error) = alba_core::execution_subgraph(project, target) {
-        err.line(crate::render_core_error(&error, sources).trim_end());
+    let root = alba_engine::beamfile_dir(beamfile);
+    if let Err(error) = alba_engine::select(project, sources, &root, selection) {
+        err.line(render_engine_error(&error, sources).trim_end());
         return EXIT_ALBA_ERROR;
     }
 
@@ -382,14 +400,14 @@ async fn tui_execute(
         let beamfile = beamfile.to_path_buf();
         let project = project.clone();
         let sources = sources.clone();
-        let target = target.clone();
+        let selection = selection.clone();
         let watch = flags.watch;
         async move {
             alba_engine::session(
                 &beamfile,
                 project,
                 sources,
-                Selection::Beam(target),
+                selection,
                 options,
                 executors(&beamfile),
                 events,
@@ -413,7 +431,7 @@ async fn tui_execute(
         incoming,
         commands,
         alba_tui::TuiOptions {
-            target: target.0.clone(),
+            target: selection_label(selection),
             watch: flags.watch,
         },
     )
@@ -452,6 +470,20 @@ async fn tui_execute(
         // sources: an abandoned run, a parked session, or a session the
         // user quit before anything finished all report an interruption.
         None => outcome.last_run_code.unwrap_or(EXIT_INTERRUPTED),
+    }
+}
+
+/// What the interface calls the session before its first run reports.
+fn selection_label(selection: &Selection) -> String {
+    match selection {
+        Selection::Beam(id)
+        | Selection::Affected {
+            within: Some(id), ..
+        } => id.0.clone(),
+        Selection::Affected {
+            reference,
+            within: None,
+        } => format!("affected by {reference}"),
     }
 }
 
@@ -496,7 +528,13 @@ fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'
 /// the user would have been left looking at.
 fn replay<W: std::io::Write>(err: &mut LineSink<W>, outcome: &alba_tui::TuiOutcome) {
     if let Some(summary) = &outcome.last_summary {
-        crate::render::print_summary(err, summary);
+        // The interface tracks its own `affected_by` for the header it
+        // draws live; `TuiOutcome` does not carry it back out, so the
+        // replay reports plain counts rather than the `nothing affected`
+        // line. Out of scope here: no failed beam's replay can be empty in
+        // the first place, since a run with a failed beam is never one
+        // `--affected` found nothing for.
+        crate::render::print_summary(err, summary, None);
     }
 
     for (beam, lines) in &outcome.failed_logs {

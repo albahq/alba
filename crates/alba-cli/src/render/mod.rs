@@ -206,16 +206,39 @@ pub(super) fn handle_watch_event(
 /// duration is always last, so the line is never empty even for a run
 /// whose every bucket happens to be empty.
 ///
+/// `affected_by` is the reference an `--affected` run targeted, `None` for
+/// an ordinary run; see [`summary_line`] for what it changes.
+///
 /// Generic over the sink's writer rather than fixed to stderr: the
 /// renderers all pass their own `LineSink<io::Stderr>`, while a test can
 /// pass one over a buffer and read back the very line the user sees.
-pub fn print_summary<W: Write>(sink: &mut LineSink<W>, summary: &RunSummary) {
-    sink.line(&summary_line(summary));
+pub fn print_summary<W: Write>(
+    sink: &mut LineSink<W>,
+    summary: &RunSummary,
+    affected_by: Option<&str>,
+) {
+    sink.line(&summary_line(summary, affected_by));
 }
 
 /// The summary's text, split out from the writing so it can be asserted
 /// directly rather than through a captured stream.
-fn summary_line(summary: &RunSummary) -> String {
+///
+/// An `--affected` run with nothing to show for it — no bucket holds a
+/// single beam — reports `✓ nothing affected by <ref>` instead of an empty
+/// count line: every bucket empty is what an ordinary run's summary would
+/// print as a bare duration, which would read as "a run happened and
+/// nothing came of it" rather than "there was nothing to run".
+fn summary_line(summary: &RunSummary, affected_by: Option<&str>) -> String {
+    if let Some(reference) = affected_by
+        && summary.succeeded.is_empty()
+        && summary.cached.is_empty()
+        && summary.failed.is_empty()
+        && summary.failed_allowed.is_empty()
+        && summary.cancelled.is_empty()
+    {
+        return format!("\u{2713} nothing affected by {reference}");
+    }
+
     let counts = [
         ("\u{2713}", summary.succeeded.len(), "succeeded"),
         ("\u{21ba}", summary.cached.len(), "cached"),
@@ -272,7 +295,7 @@ mod tests {
         };
 
         assert_eq!(
-            summary_line(&summary),
+            summary_line(&summary, None),
             "\u{2713} 1 succeeded \u{b7} \u{21ba} 2 cached \u{b7} 4.1s"
         );
     }
@@ -287,8 +310,34 @@ mod tests {
         };
 
         assert_eq!(
-            summary_line(&summary),
+            summary_line(&summary, None),
             "\u{2713} 1 succeeded \u{b7} \u{2298} 2 cancelled \u{b7} 4.1s"
+        );
+    }
+
+    /// The empty-run line, verbatim: `--affected <ref>` with nothing to
+    /// show for it reports why, rather than a bare duration.
+    #[test]
+    fn an_affected_run_with_no_targets_says_nothing_was_affected() {
+        assert_eq!(
+            summary_line(&RunSummary::default(), Some("HEAD")),
+            "\u{2713} nothing affected by HEAD"
+        );
+    }
+
+    /// `affected_by` only changes the empty case: a run that did affect
+    /// something reports its counts as usual.
+    #[test]
+    fn an_affected_run_with_targets_reports_its_counts_as_usual() {
+        let summary = RunSummary {
+            succeeded: vec![BeamId("a".to_string())],
+            duration: Duration::from_millis(4100),
+            ..RunSummary::default()
+        };
+
+        assert_eq!(
+            summary_line(&summary, Some("HEAD")),
+            "\u{2713} 1 succeeded \u{b7} 4.1s"
         );
     }
 

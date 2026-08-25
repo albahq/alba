@@ -138,6 +138,42 @@ fn watch_project() -> tempfile::TempDir {
     dir
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// [`watch_project`]'s tree, committed, with a second beam that reacts to a
+/// `docs/**` change nothing has made yet — the file `--affected` sessions
+/// pick up once it moves.
+fn git_watch_project() -> tempfile::TempDir {
+    let dir = watch_project();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "default hello\n\
+         beam hello { inputs [\"src/**\"] run \"echo greeting-ran\" }\n\
+         beam other { inputs [\"docs/**\"] run \"echo other-ran\" }\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/a"), "one").unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+    dir
+}
+
 /// The full cycle: initial run, waiting, a real file change, a
 /// triggered second run.
 #[test]
@@ -217,4 +253,32 @@ fn sigint_ends_the_session_with_code_0() {
 
     let status = alba.wait_for_exit();
     assert_eq!(status.code(), Some(0));
+}
+
+/// `--affected` composes with `--watch`: the reference is fixed, and every
+/// run in the session recomputes its targets against the moving working
+/// tree.
+#[test]
+fn an_affected_session_picks_up_a_beam_once_its_input_changes() {
+    let dir = git_watch_project();
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &[
+            "run",
+            "--affected",
+            "HEAD",
+            "--watch",
+            "--log-format",
+            "json",
+            "--no-ui",
+        ],
+    );
+    let started = session.wait_for("run_started");
+    assert!(started.contains("\"targets\":[]"), "{started}");
+    session.wait_for("watch_waiting");
+    std::fs::write(dir.path().join("docs/a"), "v2").unwrap();
+    session.wait_for("watch_triggered");
+    let started = session.wait_for("run_started");
+    assert!(started.contains("\"targets\":[\"other\"]"), "{started}");
+    session.wait_for("other-ran");
 }

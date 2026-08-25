@@ -15,6 +15,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use alba_core::{CoreError, SourceMap};
+use alba_engine::Selection;
 use clap::Parser;
 
 use args::{Cli, Command, RunFlags};
@@ -67,6 +68,10 @@ fn run(cli: Cli) -> i32 {
         Some(Command::Cache { .. }) => unreachable!("cache is dispatched before loading"),
         Some(Command::Plugin { .. }) => unreachable!("plugin is dispatched before loading"),
         Some(Command::Check) => commands::check::run(&project),
+        Some(Command::Affected {
+            reference,
+            log_format,
+        }) => commands::affected::run(&project, &sources, &beamfile, &reference, log_format),
         // A named beam is taken as-is; an omitted one falls back to the
         // declared `default`, the same target bare `alba` would have run —
         // so `alba run` gains the run flags without losing that shortcut.
@@ -74,23 +79,30 @@ fn run(cli: Cli) -> i32 {
             beam,
             params,
             flags,
-        }) => match beam.map(alba_core::BeamId).or_else(|| {
-            project
-                .default
-                .as_ref()
-                .map(|default| default.value.clone())
-        }) {
-            Some(target) => {
-                commands::run::run(&project, &sources, &beamfile, &target, params, &flags)
-            }
-            None => {
-                LineSink::stderr().line(
-                    "no beam named and this Beamfile declares no `default`; \
-                     run `alba` to list the available beams",
-                );
-                EXIT_ALBA_ERROR
-            }
-        },
+        }) => {
+            let selection = match flags.affected.clone() {
+                Some(reference) => Selection::Affected {
+                    reference,
+                    within: beam.map(alba_core::BeamId),
+                },
+                None => match beam.map(alba_core::BeamId).or_else(|| {
+                    project
+                        .default
+                        .as_ref()
+                        .map(|default| default.value.clone())
+                }) {
+                    Some(target) => Selection::Beam(target),
+                    None => {
+                        LineSink::stderr().line(
+                            "no beam named and this Beamfile declares no `default`; \
+                             run `alba` to list the available beams",
+                        );
+                        return EXIT_ALBA_ERROR;
+                    }
+                },
+            };
+            commands::run::run(&project, &sources, &beamfile, &selection, params, &flags)
+        }
         // Bare `alba`: run the declared `default` with every run flag left
         // at its default, or fall back to listing when none is declared.
         None => match &project.default {
@@ -98,7 +110,7 @@ fn run(cli: Cli) -> i32 {
                 &project,
                 &sources,
                 &beamfile,
-                &target.value,
+                &Selection::Beam(target.value.clone()),
                 Vec::new(),
                 &RunFlags::default(),
             ),

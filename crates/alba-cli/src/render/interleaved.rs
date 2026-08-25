@@ -33,6 +33,10 @@ pub struct InterleavedRenderer {
     /// [`InterleavedRenderer::new`] — and never `true` outside a watch
     /// session, since a plain `alba run` has no session to clear between.
     clear_between_runs: bool,
+    /// The reference the current run's targets were computed against, set
+    /// from each `RunStarted` and read back at `RunFinished` — `None` for
+    /// an ordinary run.
+    affected_by: Option<String>,
     out: LineSink<io::Stdout>,
     err: LineSink<io::Stderr>,
 }
@@ -45,6 +49,7 @@ impl InterleavedRenderer {
         Self {
             color,
             clear_between_runs,
+            affected_by: None,
             out: LineSink::stdout(),
             err: LineSink::stderr(),
         }
@@ -88,8 +93,10 @@ impl Renderer for InterleavedRenderer {
                 };
                 self.line(&id.0, &text);
             }
-            RunEvent::RunFinished { summary } => print_summary(&mut self.err, summary),
-            RunEvent::RunStarted { .. } => {}
+            RunEvent::RunFinished { summary } => {
+                print_summary(&mut self.err, summary, self.affected_by.as_deref());
+            }
+            RunEvent::RunStarted { affected_by, .. } => self.affected_by = affected_by.clone(),
             RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
             // Alba commentary, not the run's output — stderr, like every
             // other diagnostic this module prints (see the module doc).
