@@ -220,11 +220,21 @@ pub fn print_summary<W: Write>(
     sink.line(&summary_line(summary, affected_by));
 }
 
+/// The exact `--affected` empty-run line, verbatim wherever a reference
+/// found nothing to run: the headless short-circuit in
+/// [`crate::commands::run`] prints it before a renderer even exists, and
+/// [`summary_line`] prints the same text for a run that reaches its
+/// summary with no beam in any bucket. One definition, so the two call
+/// sites cannot drift apart.
+pub fn nothing_affected_line(reference: &str) -> String {
+    format!("\u{2713} nothing affected by {reference}")
+}
+
 /// The summary's text, split out from the writing so it can be asserted
 /// directly rather than through a captured stream.
 ///
 /// An `--affected` run with nothing to show for it — no bucket holds a
-/// single beam — reports `✓ nothing affected by <ref>` instead of an empty
+/// single beam — reports [`nothing_affected_line`] instead of an empty
 /// count line: every bucket empty is what an ordinary run's summary would
 /// print as a bare duration, which would read as "a run happened and
 /// nothing came of it" rather than "there was nothing to run".
@@ -236,7 +246,7 @@ fn summary_line(summary: &RunSummary, affected_by: Option<&str>) -> String {
         && summary.failed_allowed.is_empty()
         && summary.cancelled.is_empty()
     {
-        return format!("\u{2713} nothing affected by {reference}");
+        return nothing_affected_line(reference);
     }
 
     let counts = [

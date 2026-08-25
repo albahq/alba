@@ -187,7 +187,7 @@ async fn execute(
     if let Some(reference) = &targets.affected_by
         && targets.beams.is_empty()
     {
-        LineSink::stderr().line(&format!("\u{2713} nothing affected by {reference}"));
+        LineSink::stderr().line(&crate::render::nothing_affected_line(reference));
         return 0;
     }
 
@@ -458,7 +458,15 @@ async fn tui_execute(
         }
     };
 
-    replay(&mut err, &outcome);
+    // The session's own fixed reference — `TuiOutcome` carries none of its
+    // own, and a mid-session retarget to a plain beam (`SessionCommand::Run`)
+    // is not reflected here, same as `selection_label` above: both read the
+    // selection this call started with, not whatever the session moved to.
+    let affected_by = match selection {
+        Selection::Affected { reference, .. } => Some(reference.as_str()),
+        Selection::Beam(_) => None,
+    };
+    replay(&mut err, &outcome, affected_by);
 
     match failure {
         // A session that did not end on its own terms is an Alba failure,
@@ -526,15 +534,18 @@ fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'
 /// [`crate::render::print_summary`] is: the caller hands it the real
 /// stderr, while a test hands it a buffer and reads back exactly what
 /// the user would have been left looking at.
-fn replay<W: std::io::Write>(err: &mut LineSink<W>, outcome: &alba_tui::TuiOutcome) {
+///
+/// `affected_by` is the caller's own selection, not anything read back off
+/// `outcome` — `TuiOutcome` carries no reference of its own — so an
+/// `--affected` session that ends on an empty run still owes the same
+/// `nothing affected` line the headless and watch sessions print.
+fn replay<W: std::io::Write>(
+    err: &mut LineSink<W>,
+    outcome: &alba_tui::TuiOutcome,
+    affected_by: Option<&str>,
+) {
     if let Some(summary) = &outcome.last_summary {
-        // The interface tracks its own `affected_by` for the header it
-        // draws live; `TuiOutcome` does not carry it back out, so the
-        // replay reports plain counts rather than the `nothing affected`
-        // line. Out of scope here: no failed beam's replay can be empty in
-        // the first place, since a run with a failed beam is never one
-        // `--affected` found nothing for.
-        crate::render::print_summary(err, summary, None);
+        crate::render::print_summary(err, summary, affected_by);
     }
 
     for (beam, lines) in &outcome.failed_logs {
@@ -1001,11 +1012,11 @@ mod tests {
 
     /// What `replay` wrote, as lines — the interface is gone by the time
     /// it runs, so this is literally what the user is left looking at.
-    fn replayed(outcome: &alba_tui::TuiOutcome) -> Vec<String> {
+    fn replayed(outcome: &alba_tui::TuiOutcome, affected_by: Option<&str>) -> Vec<String> {
         let mut buffer: Vec<u8> = Vec::new();
         {
             let mut sink = LineSink::new(&mut buffer);
-            replay(&mut sink, outcome);
+            replay(&mut sink, outcome, affected_by);
         }
         String::from_utf8(buffer)
             .expect("the replay writes UTF-8")
@@ -1034,7 +1045,7 @@ mod tests {
             ..RunSummary::default()
         };
 
-        let lines = replayed(&outcome(Some(summary), Vec::new()));
+        let lines = replayed(&outcome(Some(summary), Vec::new()), None);
 
         assert_eq!(lines.len(), 1, "got: {lines:?}");
         assert!(
@@ -1057,7 +1068,7 @@ mod tests {
             vec!["boom 1".to_string(), "boom 2".to_string()],
         )];
 
-        let lines = replayed(&outcome(Some(summary), logs));
+        let lines = replayed(&outcome(Some(summary), logs), None);
 
         assert!(lines[0].contains("1 failed"), "got: {lines:?}");
         assert_eq!(
@@ -1083,7 +1094,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         )];
 
-        let lines = replayed(&outcome(Some(summary), logs));
+        let lines = replayed(&outcome(Some(summary), logs), None);
 
         assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
         assert!(
@@ -1099,7 +1110,21 @@ mod tests {
     /// no summary, no beams, and so not a single line.
     #[test]
     fn a_session_with_no_finished_run_replays_nothing() {
-        assert!(replayed(&outcome(None, Vec::new())).is_empty());
+        assert!(replayed(&outcome(None, Vec::new()), None).is_empty());
+    }
+
+    /// The reviewer's finding: `TuiOutcome` carries no `affected_by` of its
+    /// own, but the caller's selection does, and an `--affected` session
+    /// that ends right after an empty run must still say so on the way
+    /// out — not fall back to a bare, misleading duration.
+    #[test]
+    fn the_replay_of_an_empty_affected_run_says_nothing_was_affected() {
+        let lines = replayed(
+            &outcome(Some(RunSummary::default()), Vec::new()),
+            Some("HEAD"),
+        );
+
+        assert_eq!(lines, ["\u{2713} nothing affected by HEAD"]);
     }
 
     /// An orderly goodbye is not a failure and owes no line.
