@@ -15,12 +15,14 @@
 //! session that re-runs the target whenever the files its `inputs` declare
 //! change; see the `session` module for the loop's shape.
 
+mod affected;
 mod cache;
 mod event;
 mod scheduler;
 mod session;
 mod watch;
 
+pub use affected::{Selection, affected, select};
 pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
 pub use scheduler::{Executors, RunOptions, Targets, run};
@@ -55,4 +57,8 @@ pub enum EngineError {
     /// one broken beam cannot take the whole run down silently.
     #[error("beam `{}` panicked while running", beam.0)]
     Panicked { beam: BeamId },
+    /// Git could not answer the question an affected run asked it: git is
+    /// missing, this is not a repository, the reference does not exist.
+    #[error("{0}")]
+    Git(#[from] alba_core::git::GitError),
 }

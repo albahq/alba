@@ -12,11 +12,12 @@ pub(crate) mod set;
 
 use std::path::{Path, PathBuf};
 
-use alba_core::{BeamId, Project, SourceMap};
+use alba_core::{Project, SourceMap};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
+use crate::affected::Selection;
 use crate::event::RunEvent;
 use crate::scheduler::{Executors, RunOptions};
 use crate::session::session;
@@ -82,7 +83,7 @@ pub enum SessionError {
     },
 }
 
-/// Runs `target` and keeps re-running it as long as `watcher` reports
+/// Runs `selection` and keeps re-running it as long as `watcher` reports
 /// relevant changes, until `cancel` fires or the watcher dies.
 ///
 /// A [`crate::session`] nobody drives: watching is on for its whole life,
@@ -93,7 +94,7 @@ pub async fn watch(
     beamfile: &Path,
     project: Project,
     sources: SourceMap,
-    target: BeamId,
+    selection: Selection,
     options: RunOptions,
     executors: Executors,
     events: UnboundedSender<RunEvent>,
@@ -105,7 +106,7 @@ pub async fn watch(
         beamfile,
         project,
         sources,
-        target,
+        selection,
         options,
         executors,
         events,

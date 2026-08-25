@@ -46,16 +46,18 @@ struct InputGroup {
 impl WatchSet {
     pub(crate) fn new(
         project: &Project,
-        target: &BeamId,
+        target: Option<&BeamId>,
         sources: &SourceMap,
     ) -> Result<Self, CoreError> {
-        let subgraph = execution_subgraph(project, target)?;
+        let subgraph = target
+            .map(|id| execution_subgraph(project, id))
+            .transpose()?;
         let mut groups: Vec<InputGroup> = Vec::new();
-        for beam in project
-            .beams
-            .iter()
-            .filter(|beam| subgraph.contains(&beam.id))
-        {
+        for beam in project.beams.iter().filter(|beam| {
+            subgraph
+                .as_ref()
+                .is_none_or(|subgraph| subgraph.contains(&beam.id))
+        }) {
             if beam.inputs.is_empty() {
                 continue;
             }
@@ -207,7 +209,7 @@ mod tests {
         .unwrap();
 
         let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
-        let set = WatchSet::new(&project, &BeamId("build".to_string()), &sources).unwrap();
+        let set = WatchSet::new(&project, Some(&BeamId("build".to_string())), &sources).unwrap();
         (dir, set)
     }
 
@@ -307,6 +309,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Beamfile"), "beam a { run \"echo a\" }\n").unwrap();
         let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
-        assert!(WatchSet::new(&project, &BeamId("missing".to_string()), &sources).is_err());
+        assert!(WatchSet::new(&project, Some(&BeamId("missing".to_string())), &sources).is_err());
     }
 }

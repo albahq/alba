@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, SessionCommand, SessionError,
-    WatchBatch, WatchExit, Watcher, session, watch,
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, Selection, SessionCommand,
+    SessionError, WatchBatch, WatchExit, Watcher, session, watch,
 };
 use alba_executors::{FakeBehavior, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -227,7 +227,7 @@ fn spawn(
                         &beamfile_path,
                         project,
                         sources,
-                        target,
+                        Selection::Beam(target),
                         options,
                         Executors::uniform(executor),
                         events_tx,
@@ -242,7 +242,7 @@ fn spawn(
                         &beamfile_path,
                         project,
                         sources,
-                        target,
+                        Selection::Beam(target),
                         options,
                         Executors::uniform(executor),
                         events_tx,
@@ -1069,5 +1069,103 @@ async fn a_run_beam_command_unparks_a_session_onto_the_renamed_beam() {
             .any(|call| call.command.contains("compile-renamed"))
     );
 
+    session.finish().await;
+}
+
+/// `--affected` in a session: the reference is fixed, the targets are
+/// recomputed for every run, and a beam that was not affected at startup
+/// joins once its input changes.
+#[tokio::test]
+async fn an_affected_session_recomputes_its_targets_on_every_run() {
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/index.md"), "v1").unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam docs { inputs [\"docs/**\"] run \"docs\" }\nbeam free { run \"free\" }\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+
+    let beamfile_path = dir.path().join("Beamfile");
+    let (project, sources) = load_project(&beamfile_path).unwrap();
+    let executor = Arc::new(FakeExecutor::new());
+    let (batches_tx, batches_rx) = unbounded_channel();
+    let (events_tx, events_rx) = unbounded_channel();
+    let cancel = CancellationToken::new();
+    let options = RunOptions {
+        jobs: 4,
+        keep_going: false,
+        params: Vec::new(),
+        cache: None,
+    };
+    let handle = tokio::spawn({
+        let executor = Arc::clone(&executor);
+        let cancel = cancel.clone();
+        async move {
+            let watcher = Box::new(ScriptedWatcher {
+                batches: batches_rx,
+            });
+            watch(
+                &beamfile_path,
+                project,
+                sources,
+                Selection::Affected {
+                    reference: "HEAD".to_string(),
+                    within: None,
+                },
+                options,
+                Executors::uniform(executor),
+                events_tx,
+                cancel,
+                watcher,
+                &mut |_| String::new(),
+            )
+            .await
+        }
+    });
+    let mut session = Session {
+        dir,
+        executor,
+        batches: batches_tx,
+        events: events_rx,
+        cancel,
+        handle,
+    };
+
+    let RunEvent::RunStarted { targets, .. } = session.event_matching(is_run_started).await else {
+        unreachable!()
+    };
+    assert!(targets.is_empty(), "nothing has changed yet");
+    session
+        .event_matching(|event| matches!(event, RunEvent::WatchWaiting { .. }))
+        .await;
+
+    let touched = session.touch("docs/index.md", "v2");
+    session.send(vec![touched]);
+    let RunEvent::RunStarted { targets, .. } = session.event_matching(is_run_started).await else {
+        unreachable!()
+    };
+    assert_eq!(
+        targets.iter().map(|id| id.0.as_str()).collect::<Vec<_>>(),
+        ["docs"]
+    );
     session.finish().await;
 }

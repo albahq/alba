@@ -43,8 +43,8 @@ use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, SessionError, Targets,
-    WatchExit,
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection,
+    SessionError, Targets, WatchExit,
 };
 use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -279,7 +279,7 @@ async fn watch_execute(
         beamfile,
         project.clone(),
         sources.clone(),
-        target.clone(),
+        Selection::Beam(target.clone()),
         options,
         executors(beamfile),
         events,
@@ -389,7 +389,7 @@ async fn tui_execute(
                 &beamfile,
                 project,
                 sources,
-                target,
+                Selection::Beam(target),
                 options,
                 executors(&beamfile),
                 events,
