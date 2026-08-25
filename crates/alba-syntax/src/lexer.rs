@@ -90,10 +90,13 @@ impl<'src> Lexer<'src> {
         }
     }
 
+    /// Hyphens are identifier characters after the first one (git hook names
+    /// are spelled `pre-commit`); the DSL has no subtraction, so nothing
+    /// else could claim them.
     fn scan_ident(&mut self, start: usize) -> Token {
         let mut end = start;
         while let Some(&(idx, c)) = self.chars.peek() {
-            if c.is_alphanumeric() || c == '_' {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
                 end = idx + c.len_utf8();
                 self.chars.next();
             } else {
@@ -165,6 +168,7 @@ impl<'src> Lexer<'src> {
             ',' => single(TokenKind::Comma),
             ':' => single(TokenKind::Colon),
             '+' => single(TokenKind::Plus),
+            '.' => single(TokenKind::Dot),
             '=' => {
                 if self.peek_char() == Some('=') {
                     self.chars.next();
@@ -223,6 +227,7 @@ fn keyword_kind(text: &str) -> Option<TokenKind> {
         "let" => TokenKind::KwLet,
         "default" => TokenKind::KwDefault,
         "beam" => TokenKind::KwBeam,
+        "hook" => TokenKind::KwHook,
         "if" => TokenKind::KwIf,
         "then" => TokenKind::KwThen,
         "else" => TokenKind::KwElse,
@@ -334,7 +339,7 @@ mod tests {
 
     #[test]
     fn lexes_all_keywords() {
-        let tokens = lex_kinds("version import as let default beam if then else true false");
+        let tokens = lex_kinds("version import as let default beam if then else true false hook");
         assert_eq!(
             tokens,
             vec![
@@ -349,6 +354,7 @@ mod tests {
                 TokenKind::KwElse,
                 TokenKind::KwTrue,
                 TokenKind::KwFalse,
+                TokenKind::KwHook,
                 TokenKind::Eof,
             ]
         );

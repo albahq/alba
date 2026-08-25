@@ -40,6 +40,7 @@ pub enum TokenKind {
     KwElse,
     KwTrue,
     KwFalse,
+    KwHook,
 
     // Punctuation and operators.
     LBrace,
@@ -61,6 +62,8 @@ pub enum TokenKind {
     /// `||`
     OrOr,
     Plus,
+    /// `.`, member access (`git.branch`).
+    Dot,
 
     /// A statement separator. Emitted only strictly between two other
     /// tokens: leading and trailing newline trivia (including blank lines

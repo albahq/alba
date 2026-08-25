@@ -1,0 +1,12 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "duplicate field `beam`",
+    span: Span {
+        start: 25,
+        end: 29,
+    },
+    help: None,
+}

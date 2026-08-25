@@ -1,0 +1,12 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "expected an identifier, found end of input",
+    span: Span {
+        start: 12,
+        end: 12,
+    },
+    help: None,
+}

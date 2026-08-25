@@ -36,6 +36,7 @@ pub struct File {
     pub lets: Vec<LetBinding>,
     pub default: Option<Spanned<String>>,
     pub beams: Vec<BeamDecl>,
+    pub hooks: Vec<HookDecl>,
 }
 
 /// `import "path" as alias`.
@@ -105,5 +106,15 @@ pub struct BeamDecl {
     pub cwd: Option<StringTemplate>,
     pub executor: Option<ExecutorDecl>,
     pub allow_failure: bool,
+    pub span: Span,
+}
+
+/// `hook <name> { beam <ref> }`: a git hook bound to the beam it runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookDecl {
+    /// The git hook name as written (`pre-commit`); whether git knows it
+    /// is `alba-core`'s check.
+    pub name: Spanned<String>,
+    pub beam: Spanned<BeamRef>,
     pub span: Span,
 }

@@ -144,7 +144,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Str(t) => Some(t.span),
         Expr::Var(name) => Some(name.span),
         Expr::Call { name, .. } => Some(name.span),
-        Expr::Bool(_) | Expr::Binary { .. } | Expr::If { .. } => None,
+        Expr::Bool(_) | Expr::Binary { .. } | Expr::If { .. } | Expr::Field { .. } => None,
     }
 }
 
@@ -285,6 +285,10 @@ fn eval_with_fallback(expr: &Expr, scope: &Scope, fallback: Span) -> Result<Valu
                 )),
             }
         }
+        Expr::Field { object, .. } => Err(CoreError::new(
+            "member access is not supported yet",
+            object.span,
+        )),
     }
 }
 
@@ -590,6 +594,10 @@ fn check_expr(
                 }
             }
         }
+        Expr::Field { object, .. } => Err(CoreError::new(
+            "member access is not supported yet",
+            object.span,
+        )),
     }
 }
 
@@ -712,6 +720,7 @@ fn reject_param_references(expr: &Expr, params: &[String], field: &str) -> Resul
             reject_param_references(then, params, field)?;
             reject_param_references(otherwise, params, field)
         }
+        Expr::Field { .. } => Ok(()),
     }
 }
 
