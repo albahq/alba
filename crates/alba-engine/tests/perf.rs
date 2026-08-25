@@ -85,3 +85,47 @@ async fn a_fully_cached_run_stays_imperceptible() {
         "a fully cached 100-file run took a median of {median:?}, budget 10ms"
     );
 }
+
+/// Startup guard for the watcher: arming it must cost the same whether
+/// the root holds nothing or holds a build directory. A session builds
+/// its watcher before it draws anything, so a cost proportional to the
+/// tree is dead time the user reads as a freeze — and a project root
+/// with a Rust `target/` in it reaches hundreds of thousands of files.
+///
+/// Measured as the *difference* between an empty root and a populated
+/// one, never as an absolute: starting the OS watcher has a fixed cost
+/// (on macOS, most of a second for an FSEvents stream) that this guard
+/// has no business policing. One warm-up first, because the very first
+/// stream of a process pays extra.
+#[tokio::test]
+async fn arming_the_watcher_does_not_scan_the_tree() {
+    fn arm(root: &Path) -> Duration {
+        let started = Instant::now();
+        let watcher =
+            alba_engine::NotifyWatcher::new(&[root.to_path_buf()]).expect("the watcher must start");
+        let elapsed = started.elapsed();
+        drop(watcher);
+        elapsed
+    }
+
+    const FILES: usize = 20_000;
+
+    let empty = tempfile::tempdir().unwrap();
+    let populated = tempfile::tempdir().unwrap();
+    let artifacts = populated.path().join("target").join("debug");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    for i in 0..FILES {
+        std::fs::write(artifacts.join(format!("artifact_{i:05}.o")), "x").unwrap();
+    }
+
+    arm(empty.path());
+    let baseline = arm(empty.path());
+    let loaded = arm(populated.path());
+
+    let overhead = loaded.saturating_sub(baseline);
+    assert!(
+        overhead < Duration::from_millis(300),
+        "arming over {FILES} files cost {overhead:?} more than over an empty \
+         root ({loaded:?} against {baseline:?}), budget 300ms"
+    );
+}
