@@ -72,7 +72,7 @@ use alba_syntax::{
 
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
 use crate::git::{GitError, GitHead};
-use crate::model::{Beam, BeamId, ExecutorKind, OptionValue, Project, Value};
+use crate::model::{Beam, BeamId, ExecutorKind, Hook, OptionValue, Project, Value};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
 const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
@@ -963,7 +963,41 @@ pub(crate) fn build_project(
         .as_ref()
         .map(|d| Spanned::new(BeamId(d.value.clone()), d.span));
 
-    Ok(Project { beams, default })
+    let mut hooks: Vec<Hook> = Vec::new();
+    for decl in &file.hooks {
+        let Some(known) = crate::git::known_hook(&decl.name.value) else {
+            let mut err = CoreError::new(
+                format!("unknown git hook `{}`", decl.name.value),
+                decl.name.span,
+            );
+            if let Some(candidate) = suggest(
+                &decl.name.value,
+                crate::git::KNOWN_HOOKS.iter().map(|hook| hook.name),
+            ) {
+                err = err.with_help(format!("did you mean `{candidate}`?"));
+            }
+            return Err(err);
+        };
+        if hooks.iter().any(|hook| hook.name == decl.name.value) {
+            return Err(CoreError::new(
+                format!("duplicate hook `{}`", decl.name.value),
+                decl.name.span,
+            ));
+        }
+        hooks.push(Hook {
+            name: decl.name.value.clone(),
+            beam: Spanned::new(beam_ref_to_id(&decl.beam.value), decl.beam.span),
+            arity: known.arity,
+            span: decl.span,
+            source: current_source_id(),
+        });
+    }
+
+    Ok(Project {
+        beams,
+        default,
+        hooks,
+    })
 }
 
 fn beam_ref_to_id(r: &BeamRef) -> BeamId {

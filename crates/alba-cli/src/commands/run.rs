@@ -786,6 +786,7 @@ mod tests {
         Project {
             beams,
             default: None,
+            hooks: Vec::new(),
         }
     }
 

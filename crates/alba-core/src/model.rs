@@ -142,6 +142,24 @@ pub struct Beam {
     pub scope: Scope,
 }
 
+/// A git hook bound to a beam: `hook pre-commit { beam check }`. Only the
+/// root Beamfile's hooks make it here; an import's are ignored, as its
+/// `default` is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hook {
+    /// The git hook name (`pre-commit`), already checked against
+    /// [`crate::git::KNOWN_HOOKS`].
+    pub name: String,
+    /// The beam the hook runs, with the span of the reference that named
+    /// it, for pointing at an unresolved one.
+    pub beam: Spanned<BeamId>,
+    /// How many arguments git passes to this hook; the beam may declare at
+    /// most that many parameters.
+    pub arity: usize,
+    pub span: Span,
+    pub source: SourceId,
+}
+
 /// A fully evaluated Beamfile (single-file loading only; see the module
 /// doc comment): every beam it declares, and which one runs by default.
 #[derive(Debug, Clone)]
@@ -151,4 +169,6 @@ pub struct Project {
     /// declaration that named it — [`crate::validate_graph`] checks it
     /// resolves and points at that span when it does not.
     pub default: Option<Spanned<BeamId>>,
+    /// The root Beamfile's hook declarations, in source order.
+    pub hooks: Vec<Hook>,
 }

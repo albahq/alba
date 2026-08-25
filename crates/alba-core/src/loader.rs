@@ -96,7 +96,7 @@ use alba_syntax::{File, Span, Spanned};
 
 use crate::error::{CoreError, SourceIdScope};
 use crate::eval::{LazyGit, build_project, parse_error_to_core_error};
-use crate::model::{Beam, BeamId, Project, SourceId};
+use crate::model::{Beam, BeamId, Hook, Project, SourceId};
 
 /// The path and source text of every file [`load_project`] read, indexed
 /// by [`SourceId`], so a [`CoreError`]'s `source_id` can be turned back
@@ -175,8 +175,12 @@ pub struct LoadError {
 pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
     let mut loader = Loader::default();
     match loader.load_file(root, Span::new(0, 0)) {
-        Ok((beams, default)) => {
-            let project = Project { beams, default };
+        Ok((beams, default, hooks)) => {
+            let project = Project {
+                beams,
+                default,
+                hooks,
+            };
             match crate::graph::validate_graph(&project) {
                 Ok(()) => Ok((project, loader.sources)),
                 Err(error) => Err(LoadError {
@@ -194,8 +198,8 @@ pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
 
 /// What one file's load produced: its own beams and everything it
 /// imports, ids and `needs` namespaced relative to that file itself, plus
-/// its own `default`.
-type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>);
+/// its own `default` and `hooks`.
+type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>, Vec<Hook>);
 
 #[derive(Default)]
 struct Loader {
@@ -352,7 +356,7 @@ impl Loader {
 
         for import in &file.imports {
             let import_path = import_base.join(&import.path.value);
-            let (mut child_beams, _child_default) =
+            let (mut child_beams, _child_default, _child_hooks) =
                 self.load_file(&import_path, import.path.span)?;
             let alias = &import.alias.value;
             for beam in &mut child_beams {
@@ -364,7 +368,7 @@ impl Loader {
             beams.extend(child_beams);
         }
 
-        Ok((beams, local.default))
+        Ok((beams, local.default, local.hooks))
     }
 }
 

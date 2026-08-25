@@ -480,3 +480,107 @@ fn git_dirty_is_a_boolean_usable_in_a_condition() {
         alba_core::render_template(&project.beams[0].run[0], &project.beams[0].scope).unwrap();
     assert_eq!(rendered, "echo true");
 }
+
+#[test]
+fn hooks_load_with_their_target_and_arity() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\n\
+         hook pre-commit { beam check }\n\
+         hook commit-msg { beam api:lint_message }\n\
+         beam check { run \"x\" }",
+    );
+    write(
+        dir.path().join("api/Beamfile"),
+        "hook pre-push { beam lint_message }\n\
+         beam lint_message(path) { run \"lint {path}\" }",
+    );
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let hooks: Vec<(&str, &str, usize)> = project
+        .hooks
+        .iter()
+        .map(|hook| (hook.name.as_str(), hook.beam.value.0.as_str(), hook.arity))
+        .collect();
+    // The import's own `pre-push` is ignored: only the root declares hooks.
+    assert_eq!(
+        hooks,
+        [
+            ("pre-commit", "check", 0),
+            ("commit-msg", "api:lint_message", 1)
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_hook_name_is_rejected_with_a_suggestion() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-comit { beam check }\nbeam check { run \"x\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("unknown git hook `pre-comit`"),
+        "{}",
+        err.error.message
+    );
+    assert!(err.error.help.as_deref().unwrap().contains("pre-commit"));
+}
+
+#[test]
+fn a_duplicate_hook_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-commit { beam a }\nhook pre-commit { beam b }\nbeam a { run \"x\" }\nbeam b { run \"x\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("duplicate hook `pre-commit`"),
+        "{}",
+        err.error.message
+    );
+}
+
+#[test]
+fn a_hook_naming_an_unknown_beam_is_rejected_at_the_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-commit { beam chekc }\nbeam check { run \"x\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("unknown beam `chekc`"),
+        "{}",
+        err.error.message
+    );
+    let source = std::fs::read_to_string(dir.path().join("Beamfile")).unwrap();
+    let span = err.error.span.unwrap();
+    assert_eq!(&source[span.start..span.end], "chekc");
+}
+
+#[test]
+fn a_hook_target_with_too_many_parameters_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook commit-msg { beam lint }\nbeam lint(path, extra) { run \"x {path} {extra}\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert_eq!(
+        err.error.message,
+        "hook `commit-msg` passes 1 argument, but beam `lint` declares 2 parameters"
+    );
+}
+
+#[test]
+fn a_hook_target_with_fewer_parameters_than_arguments_is_fine() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-push { beam lint }\nbeam lint { run \"x\" }",
+    );
+    load_project(&dir.path().join("Beamfile")).unwrap();
+}
