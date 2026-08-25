@@ -584,3 +584,27 @@ fn a_hook_target_with_fewer_parameters_than_arguments_is_fine() {
     );
     load_project(&dir.path().join("Beamfile")).unwrap();
 }
+
+#[test]
+fn an_invalid_hook_in_an_imported_file_is_ignored_not_rejected() {
+    // An import's `hook` declarations are ignored exactly like its
+    // `default` — including when they would themselves be load errors
+    // (an unknown name, a duplicate). The root here declares no hooks at
+    // all, so the load must still succeed with an empty `Project::hooks`.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\nbeam all { run \"echo ok\" }",
+    );
+    write(
+        dir.path().join("api/Beamfile"),
+        "hook pre-comit { beam build }\n\
+         hook pre-commit { beam build }\n\
+         hook pre-commit { beam build }\n\
+         beam build { run \"echo b\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    assert!(project.hooks.is_empty());
+}

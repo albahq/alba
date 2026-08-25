@@ -924,6 +924,7 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
         &file,
         Path::new("."),
         Arc::new(LazyGit::new(PathBuf::from("."))),
+        true,
     )?;
     crate::graph::validate_graph(&project)?;
     Ok(project)
@@ -939,6 +940,7 @@ pub(crate) fn build_project(
     file: &File,
     dir: &Path,
     git: Arc<LazyGit>,
+    is_root: bool,
 ) -> Result<Project, CoreError> {
     let mut lets = Scope::with_git(git);
     for binding in &file.lets {
@@ -963,34 +965,41 @@ pub(crate) fn build_project(
         .as_ref()
         .map(|d| Spanned::new(BeamId(d.value.clone()), d.span));
 
+    // An import's own `hook` declarations are ignored, exactly as its
+    // `default` is (see `crate::loader::Loader::load_file_body`) — so the
+    // unknown-name and duplicate checks below must only ever run for the
+    // root Beamfile. Running them unconditionally would fail the *whole*
+    // load over a hook problem in a file whose hooks are never even kept.
     let mut hooks: Vec<Hook> = Vec::new();
-    for decl in &file.hooks {
-        let Some(known) = crate::git::known_hook(&decl.name.value) else {
-            let mut err = CoreError::new(
-                format!("unknown git hook `{}`", decl.name.value),
-                decl.name.span,
-            );
-            if let Some(candidate) = suggest(
-                &decl.name.value,
-                crate::git::KNOWN_HOOKS.iter().map(|hook| hook.name),
-            ) {
-                err = err.with_help(format!("did you mean `{candidate}`?"));
+    if is_root {
+        for decl in &file.hooks {
+            let Some(known) = crate::git::known_hook(&decl.name.value) else {
+                let mut err = CoreError::new(
+                    format!("unknown git hook `{}`", decl.name.value),
+                    decl.name.span,
+                );
+                if let Some(candidate) = suggest(
+                    &decl.name.value,
+                    crate::git::KNOWN_HOOKS.iter().map(|hook| hook.name),
+                ) {
+                    err = err.with_help(format!("did you mean `{candidate}`?"));
+                }
+                return Err(err);
+            };
+            if hooks.iter().any(|hook| hook.name == decl.name.value) {
+                return Err(CoreError::new(
+                    format!("duplicate hook `{}`", decl.name.value),
+                    decl.name.span,
+                ));
             }
-            return Err(err);
-        };
-        if hooks.iter().any(|hook| hook.name == decl.name.value) {
-            return Err(CoreError::new(
-                format!("duplicate hook `{}`", decl.name.value),
-                decl.name.span,
-            ));
+            hooks.push(Hook {
+                name: decl.name.value.clone(),
+                beam: Spanned::new(beam_ref_to_id(&decl.beam.value), decl.beam.span),
+                arity: known.arity,
+                span: decl.span,
+                source: current_source_id(),
+            });
         }
-        hooks.push(Hook {
-            name: decl.name.value.clone(),
-            beam: Spanned::new(beam_ref_to_id(&decl.beam.value), decl.beam.span),
-            arity: known.arity,
-            span: decl.span,
-            source: current_source_id(),
-        });
     }
 
     Ok(Project {
