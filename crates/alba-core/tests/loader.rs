@@ -5,7 +5,7 @@
 //! resolving `import` paths relative to the importing file's directory is
 //! the behavior under test.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alba_core::{SourceId, load_project};
 
@@ -335,4 +335,120 @@ fn source_map_tracks_path_and_text_per_source_id() {
     let (path, text) = sources.get(all.source).unwrap();
     assert_eq!(text, root_src);
     assert!(path.ends_with("Beamfile"));
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A repository with one commit holding `src/lib.rs` and `README.md`.
+fn repository() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}").unwrap();
+    std::fs::write(dir.path().join("README.md"), "# x").unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+    dir
+}
+
+#[test]
+fn git_fields_evaluate_from_the_repository_holding_the_beamfile() {
+    let dir = repository();
+    write(
+        dir.path().join("Beamfile"),
+        "let tag = git.branch + \"-\" + git.short_sha\n\
+         beam b { description \"{tag} {if git.dirty then 'dirty' else 'clean'}\" run \"echo {git.sha}\" }",
+    );
+    // The Beamfile itself is untracked, so the tree is dirty.
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let description = project.beams[0].description.as_deref().unwrap();
+    assert!(description.starts_with("main-"), "{description}");
+    assert!(description.ends_with(" dirty"), "{description}");
+    let sha =
+        alba_core::render_template(&project.beams[0].run[0], &project.beams[0].scope).unwrap();
+    assert_eq!(sha.len(), "echo ".len() + 40, "{sha}");
+}
+
+#[test]
+fn git_is_only_spawned_when_an_expression_reads_it() {
+    // Not a repository at all: loading must still succeed.
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path().join("Beamfile"), "beam b { run \"echo plain\" }");
+    load_project(&dir.path().join("Beamfile")).unwrap();
+}
+
+#[test]
+fn reading_git_outside_a_repository_points_at_the_expression() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "let b = git.branch\nbeam x { run \"echo\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("cannot read `git.branch`"),
+        "{}",
+        err.error.message
+    );
+    let source = "let b = git.branch";
+    let span = err.error.span.unwrap();
+    assert_eq!(&source[span.start..span.end], "git.branch");
+}
+
+#[test]
+fn an_unknown_git_field_is_rejected_without_spawning_git() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "let b = git.tag\nbeam x { run \"echo\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("unknown git field `tag`"),
+        "{}",
+        err.error.message
+    );
+    assert!(err.error.help.as_deref().unwrap().contains("short_sha"));
+}
+
+#[test]
+fn only_git_has_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "let a = \"x\"\nlet b = a.len\nbeam x { run \"echo\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("`a` has no fields"),
+        "{}",
+        err.error.message
+    );
+}
+
+#[test]
+fn git_dirty_is_a_boolean_usable_in_a_condition() {
+    let dir = repository();
+    write(
+        dir.path().join("Beamfile"),
+        "let flag = git.dirty == true\nbeam x { run \"echo {flag}\" }",
+    );
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let rendered =
+        alba_core::render_template(&project.beams[0].run[0], &project.beams[0].scope).unwrap();
+    assert_eq!(rendered, "echo true");
 }

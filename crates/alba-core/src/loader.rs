@@ -90,11 +90,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use alba_syntax::{File, Span, Spanned};
 
 use crate::error::{CoreError, SourceIdScope};
-use crate::eval::{build_project, parse_error_to_core_error};
+use crate::eval::{LazyGit, build_project, parse_error_to_core_error};
 use crate::model::{Beam, BeamId, Project, SourceId};
 
 /// The path and source text of every file [`load_project`] read, indexed
@@ -224,6 +225,12 @@ struct Loader {
     /// first — the display path the *other* site would have produced names
     /// the same file, so both point a reader at the same text.
     loaded: HashMap<PathBuf, LoadedFile>,
+    /// The one `LazyGit` shared by every file this load reads, rooted at
+    /// the first Beamfile's directory (the root, since it is the first
+    /// file [`Loader::load_file`] ever sees). Lazily created on that first
+    /// call so a `load_project` that never even opens a file spawns
+    /// nothing.
+    git: Option<Arc<LazyGit>>,
 }
 
 impl Loader {
@@ -305,11 +312,15 @@ impl Loader {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let beam_dir = beam_dir_for(path, error_span)?;
+        let git = Arc::clone(
+            self.git
+                .get_or_insert_with(|| Arc::new(LazyGit::new(beam_dir.clone()))),
+        );
 
         let source_id = self.sources.push(path.to_path_buf(), source.clone());
 
         self.stack.push((canonical.clone(), path.to_path_buf()));
-        let result = self.load_file_body(&source, &import_base, &beam_dir, source_id);
+        let result = self.load_file_body(&source, &import_base, &beam_dir, source_id, git);
         self.stack.pop();
 
         let loaded = result?;
@@ -330,12 +341,13 @@ impl Loader {
         import_base: &Path,
         beam_dir: &Path,
         source_id: SourceId,
+        git: Arc<LazyGit>,
     ) -> Result<LoadedFile, CoreError> {
         let _scope = SourceIdScope::enter(source_id);
         let file: File = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
         check_duplicate_aliases(&file)?;
 
-        let local = build_project(&file, beam_dir)?;
+        let local = build_project(&file, beam_dir, git)?;
         let mut beams = local.beams;
 
         for import in &file.imports {
