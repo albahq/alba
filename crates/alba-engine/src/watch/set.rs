@@ -44,6 +44,9 @@ struct InputGroup {
 }
 
 impl WatchSet {
+    /// `target` narrows the watched inputs to that beam's execution
+    /// subgraph; `None` watches the whole project instead, as an affected
+    /// session with no `within` beam does.
     pub(crate) fn new(
         project: &Project,
         target: Option<&BeamId>,
@@ -192,6 +195,10 @@ mod tests {
     /// pattern's shape, so rejecting it depends on `.gitignore` handling
     /// — only reachable once `classify` falls through to re-running
     /// `expand_globs`.
+    ///
+    /// Built with `Some("build")` rather than `None`, so only `build`'s
+    /// subgraph is watched: `free`, which has no `inputs` at all, sits
+    /// outside it and must not blank the set.
     fn project_on_disk() -> (tempfile::TempDir, WatchSet) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "target/\nsrc/generated/\n").unwrap();
@@ -302,8 +309,8 @@ mod tests {
         assert_eq!(set.file_count(), 1);
     }
 
-    /// Only the target's subgraph is watched: `free`'s absence of inputs
-    /// must not blank the set, and an unknown target is a `CoreError`.
+    /// A `Some` target that names no beam in the project is a `CoreError`,
+    /// not a silently empty set.
     #[test]
     fn an_unknown_target_is_a_core_error() {
         let dir = tempfile::tempdir().unwrap();
