@@ -184,12 +184,6 @@ async fn execute(
             return EXIT_ALBA_ERROR;
         }
     };
-    if let Some(reference) = &targets.affected_by
-        && targets.beams.is_empty()
-    {
-        LineSink::stderr().line(&crate::render::nothing_affected_line(reference));
-        return 0;
-    }
 
     let (events, incoming) = unbounded_channel();
     let cancel = CancellationToken::new();

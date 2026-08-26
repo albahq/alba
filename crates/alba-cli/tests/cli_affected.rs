@@ -146,6 +146,25 @@ fn run_affected_json_carries_the_reference_and_targets() {
     assert_eq!(first["targets"], serde_json::json!(["docs"]));
 }
 
+/// The JSON counterpart of `run_affected_within_a_beam_runs_it_only_when_affected`'s
+/// nothing-affected case: the stream still opens with `run_started` even
+/// though no beam is affected, mirroring the watch session's equivalent
+/// assertion in `cli_watch.rs`.
+#[test]
+fn run_affected_with_nothing_affected_still_opens_the_json_stream() {
+    let dir = repository();
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "--affected", "HEAD", "--log-format", "json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let first: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(first["event"], "run_started");
+    assert_eq!(first["affected_by"], "HEAD");
+    assert_eq!(first["targets"], serde_json::json!([]));
+}
+
 #[test]
 fn run_affected_against_an_unknown_reference_exits_2() {
     let dir = repository();
