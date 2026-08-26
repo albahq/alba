@@ -8,6 +8,14 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
+/// A green, one-beam project: the fixture the original smoke test drives.
+const GREEN: &str = "version \"1\"\n\nbeam ok {\n  run \"echo hello-from-the-beam\"\n}\n";
+
+/// A beam that fails after printing a coloured line, for the replay's own
+/// colour test.
+const RED: &str = "version \"1\"\n\nbeam red {\n  run \"sh red.sh\"\n}\n";
+const RED_SCRIPT: &str = "printf '\\033[31mred\\033[0m\\n'\nexit 1\n";
+
 /// Entering and leaving the alternate screen: the two escape sequences a
 /// real terminal session must produce and, on quit, retract.
 const ALTERNATE_SCREEN_ENTER: &str = "\u{1b}[?1049h";
@@ -70,14 +78,31 @@ impl Drop for KillOnDrop {
     }
 }
 
-#[test]
-fn the_tui_opens_restores_and_replays_on_q() {
+/// Runs `alba run <beam>` on a pty against `beamfile`, with `env` added
+/// to the child's environment, waits for the run to finish, sends `q`,
+/// and returns what the interface drew, what followed the quit, and the
+/// exit status.
+fn drive(
+    beamfile: &str,
+    beam: &str,
+    env: &[(&str, &str)],
+) -> (String, String, portable_pty::ExitStatus) {
+    drive_with_script(beamfile, beam, "", env)
+}
+
+/// Same as [`drive`], but also writes `script` to `red.sh` next to the
+/// Beamfile when it is not empty, for a beam whose `run` shells out to it.
+fn drive_with_script(
+    beamfile: &str,
+    beam: &str,
+    script: &str,
+    env: &[(&str, &str)],
+) -> (String, String, portable_pty::ExitStatus) {
     let project = tempfile::tempdir().unwrap();
-    std::fs::write(
-        project.path().join("Beamfile"),
-        "version \"1\"\n\nbeam ok {\n  run \"echo hello-from-the-beam\"\n}\n",
-    )
-    .unwrap();
+    std::fs::write(project.path().join("Beamfile"), beamfile).unwrap();
+    if !script.is_empty() {
+        std::fs::write(project.path().join("red.sh"), script).unwrap();
+    }
 
     let pty = native_pty_system()
         .openpty(PtySize {
@@ -88,8 +113,11 @@ fn the_tui_opens_restores_and_replays_on_q() {
         })
         .unwrap();
     let mut command = CommandBuilder::new(assert_cmd::cargo::cargo_bin("alba"));
-    command.args(["run", "ok"]);
+    command.args(["run", beam]);
     command.cwd(project.path());
+    for (name, value) in env {
+        command.env(name, value);
+    }
     let mut child = KillOnDrop(pty.slave.spawn_command(command).unwrap());
     // The slave's own handle is not needed once the child holds it; drop
     // it so the master sees EOF once the child's copy closes too, rather
@@ -197,6 +225,14 @@ fn the_tui_opens_restores_and_replays_on_q() {
         after_quit.contains(ALTERNATE_SCREEN_LEAVE),
         "the alternate screen was never left; got after q: {after_quit:?}"
     );
+
+    (seen, after_quit, status)
+}
+
+#[test]
+fn the_tui_opens_restores_and_replays_on_q() {
+    let (seen, after_quit, status) = drive(GREEN, "ok", &[]);
+
     assert!(
         seen.contains("hello-from-the-beam"),
         "the beam's output never reached the screen; got tail: {:?}",
@@ -211,4 +247,34 @@ fn the_tui_opens_restores_and_replays_on_q() {
         "the exit replay never printed the run's summary; got after q: {after_quit:?}"
     );
     assert_eq!(status.exit_code(), 0, "a green run quit with q exits 0");
+}
+
+/// A failing beam that printed colour is replayed with that colour on a
+/// terminal, and without it under NO_COLOR. The script prints colour
+/// unconditionally, so this pins the replay's choice, not the forcing.
+#[cfg(unix)]
+#[test]
+fn the_replay_keeps_colour_on_a_terminal_and_drops_it_under_no_color() {
+    let (_, after_quit, status) = drive_with_script(RED, "red", RED_SCRIPT, &[]);
+    assert_eq!(status.exit_code(), 1);
+    assert!(
+        after_quit.contains("\u{1b}[31mred"),
+        "got after q: {after_quit:?}"
+    );
+
+    let (_, after_quit, status) = drive_with_script(RED, "red", RED_SCRIPT, &[("NO_COLOR", "1")]);
+    assert_eq!(status.exit_code(), 1);
+    assert!(
+        after_quit.contains("── red ──"),
+        "got after q: {after_quit:?}"
+    );
+    let replay = &after_quit[after_quit.find("── red ──").unwrap()..];
+    assert!(
+        replay.contains("red\r\n") || replay.contains("red\n"),
+        "got: {replay:?}"
+    );
+    assert!(
+        !replay.contains("\u{1b}[31m"),
+        "colour leaked under NO_COLOR: {replay:?}"
+    );
 }

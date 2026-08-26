@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::{AppState, Mode};
@@ -24,6 +24,7 @@ mod graphpane;
 mod header;
 mod help;
 mod logpane;
+mod theme;
 mod tree;
 
 /// Below this floor, the tree and log panes have no room left to mean
@@ -53,11 +54,17 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // The outer frame carries the header and the bottom bar inside its
     // own border, exactly as the spec's mockup draws them
     // (`┌─ alba · run build ── ... ─┐` / `└─ q quit · ... ─┘`): a
-    // leading `─ ` and trailing ` ` are baked into the title text itself
-    // so the block's own border fill supplies the rest of the dashes.
+    // leading `─ ` and trailing ` ` are baked into the title itself so
+    // the block's own border fill supplies the rest of the dashes,
+    // wrapped around the header's and the bar's own spans rather than
+    // their plain text, so the colour underneath survives into the
+    // border's title.
     let outer = Block::bordered()
-        .title_top(Line::from(format!("─ {} ", header::text(state, now))))
-        .title_bottom(Line::from(format!("─ {} ", bottom_bar(state, now))));
+        .title_top(framed_title(header::line(state, now)))
+        .title_bottom(framed_title(theme::bar_line(
+            &bottom_bar(state, now),
+            state.colour,
+        )));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -89,6 +96,17 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     }
 }
 
+/// Wraps a header or bottom-bar line in the border's own `─ ... ` frame,
+/// spans and all, so a coloured span inside it (the progress bar, the
+/// outcome, a bold key) survives into the block's title rather than
+/// being flattened to plain text first.
+fn framed_title(content: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw("─ ")];
+    spans.extend(content.spans);
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
 /// The always-available actions for the current mode.
 ///
 /// A copy just made (`AppState::last_copy_result`) takes over the bar
@@ -100,17 +118,10 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 /// give it: at the 80ms tick, or with a beam still flooding output, a
 /// one-draw message would be gone well under a blink.
 ///
-/// `n`/`N` live in the Normal-mode bar rather than Search's: they step
-/// the *committed* search (`AppState::last_search`), a Normal-mode
-/// binding (`input.rs`) the same way `j`/`k` are — advertising them
-/// while still composing a query would claim a key that, at that point,
-/// only ever types a character into it.
-///
-/// The Normal bar is the keymap condensed to what an 80-column frame
-/// can hold, not the whole of it: `t` earns a place because it is the
-/// only way back from an `r` that retargeted the session, while the log
-/// pane's own scrolling keys are left to the help overlay, which lists
-/// every binding there is.
+/// The Normal bar names the six actions a first-time reader needs, not
+/// the whole keymap: `f`, `t`, `n`/`N`, `g`, and `v` live in the help
+/// overlay (`?`) instead, which the bar itself points at. `help.rs`'s
+/// `keymap_lines` is where all of them are listed.
 fn bottom_bar(state: &AppState, now: Instant) -> String {
     if let Some(result) = &state.last_copy_result
         && result.is_visible(now)
@@ -118,9 +129,7 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
         return format!("{} · q quit", result.message);
     }
     match &state.mode {
-        Mode::Normal => {
-            "q quit · r rerun · f force · t target · c cancel · w watch · n/N step".to_string()
-        }
+        Mode::Normal => "q quit · r rerun · c cancel · w watch · / search · ? help".to_string(),
         Mode::Search(search) => {
             let total = search.matches.len();
             let current = if total == 0 { 0 } else { search.current + 1 };
@@ -214,7 +223,7 @@ mod tests {
         );
         assert_eq!(
             bottom_bar(&state, now + Duration::from_secs(3)),
-            "q quit · r rerun · f force · t target · c cancel · w watch · n/N step",
+            "q quit · r rerun · c cancel · w watch · / search · ? help",
             "falls back to the mode's own bar once the result has expired"
         );
     }

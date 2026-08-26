@@ -58,6 +58,7 @@ fn options(dir: &Path, force: bool) -> RunOptions {
             dir: dir.join(".alba").join("cache"),
             force,
         }),
+        extra_env: Vec::new(),
     }
 }
 
@@ -337,6 +338,7 @@ async fn no_cache_configuration_disables_caching() {
         keep_going: false,
         params: Vec::new(),
         cache: None,
+        extra_env: Vec::new(),
     };
 
     run_once(GEN, "gen", dir.path(), disabled(), FakeExecutor::new()).await;
@@ -1202,4 +1204,33 @@ async fn an_unreadable_input_runs_the_beam_uncached_with_a_notice() {
         1,
         "an unhashable input leaves nothing to hit on"
     );
+}
+
+/// The TUI and a pipe run the same beam with different `extra_env`; the
+/// second must still be a hit, or switching front ends would rebuild the
+/// world.
+#[tokio::test]
+async fn extra_env_does_not_change_the_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+
+    let first = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+    assert_eq!(first.executed(), vec!["generate"]);
+
+    let mut forced = options(dir.path(), false);
+    forced.extra_env = vec![("FORCE_COLOR".to_string(), "1".to_string())];
+    let second = run_once(GEN, "gen", dir.path(), forced, FakeExecutor::new()).await;
+    assert_eq!(
+        second.executed(),
+        Vec::<String>::new(),
+        "a hit runs nothing"
+    );
+    assert_eq!(ids(&second.summary.cached), vec!["gen"]);
 }

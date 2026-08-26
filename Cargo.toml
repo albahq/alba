@@ -9,6 +9,7 @@ license = "MIT"
 repository = "https://github.com/jdevelop-io/alba"
 
 [workspace.dependencies]
+ansi-to-tui = "7"
 arboard = "3"
 assert_cmd = "2"
 async-trait = "0.1"
@@ -36,3 +37,4 @@ tokio-util = "0.7"
 which = "7"
 insta = "1"
 tempfile = "3"
+unicode-width = "0.2"

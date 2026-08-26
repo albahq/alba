@@ -174,6 +174,7 @@ async fn execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        extra_env: Vec::new(),
     };
 
     let root = alba_engine::beamfile_dir(beamfile);
@@ -278,6 +279,7 @@ async fn watch_execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        extra_env: Vec::new(),
     };
 
     let (events, incoming) = unbounded_channel();
@@ -374,6 +376,7 @@ async fn tui_execute(
         }
     };
 
+    let colour = crate::color_enabled();
     let options = RunOptions {
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
@@ -382,6 +385,16 @@ async fn tui_execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        // The interface renders ANSI, and commands on a pipe emit none
+        // unless told to; a monochrome interface asks for none.
+        extra_env: if colour {
+            vec![
+                ("FORCE_COLOR".to_string(), "1".to_string()),
+                ("CLICOLOR_FORCE".to_string(), "1".to_string()),
+            ]
+        } else {
+            Vec::new()
+        },
     };
 
     let (events, incoming) = unbounded_channel();
@@ -427,6 +440,7 @@ async fn tui_execute(
         alba_tui::TuiOptions {
             target: selection_label(selection),
             watch: flags.watch,
+            colour,
         },
     )
     .await;
@@ -460,7 +474,7 @@ async fn tui_execute(
         Selection::Affected { reference, .. } => Some(reference.as_str()),
         Selection::Beam(_) => None,
     };
-    replay(&mut err, &outcome, affected_by);
+    replay(&mut err, &outcome, affected_by, colour);
 
     match failure {
         // A session that did not end on its own terms is an Alba failure,
@@ -522,7 +536,9 @@ fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'
 /// The logs come from the interface's per-beam ring buffers, which are
 /// capped: a beam that produced more than [`alba_tui::logs::MAX_LINES`]
 /// lines is replayed from wherever the buffer starts, and says so rather
-/// than passing a partial log off as the whole one.
+/// than passing a partial log off as the whole one. `colour` picks which
+/// side of each buffered [`alba_tui::ReplayLine`] gets printed: `raw` on a
+/// terminal, `text` (already stripped) under `NO_COLOR`.
 ///
 /// Generic over the sink's writer for the same reason
 /// [`crate::render::print_summary`] is: the caller hands it the real
@@ -537,6 +553,7 @@ fn replay<W: std::io::Write>(
     err: &mut LineSink<W>,
     outcome: &alba_tui::TuiOutcome,
     affected_by: Option<&str>,
+    colour: bool,
 ) {
     if let Some(summary) = &outcome.last_summary {
         crate::render::print_summary(err, summary, affected_by);
@@ -551,7 +568,7 @@ fn replay<W: std::io::Write>(
             ));
         }
         for line in lines {
-            err.line(line);
+            err.line(if colour { &line.raw } else { &line.text });
         }
     }
 }
@@ -1004,13 +1021,25 @@ mod tests {
         assert_eq!(ui_enabled(&flags, false), UiDecision::Headless);
     }
 
-    /// What `replay` wrote, as lines — the interface is gone by the time
-    /// it runs, so this is literally what the user is left looking at.
+    /// What `replay` wrote, as lines under `NO_COLOR`: the interface is
+    /// gone by the time it runs, so this is literally what the user is
+    /// left looking at.
     fn replayed(outcome: &alba_tui::TuiOutcome, affected_by: Option<&str>) -> Vec<String> {
+        replayed_with(outcome, affected_by, false)
+    }
+
+    /// Same as [`replayed`], but choosing whether the replay keeps the
+    /// compiler's own colour (`colour: true`, `line.raw`) or strips it
+    /// (`colour: false`, `line.text`).
+    fn replayed_with(
+        outcome: &alba_tui::TuiOutcome,
+        affected_by: Option<&str>,
+        colour: bool,
+    ) -> Vec<String> {
         let mut buffer: Vec<u8> = Vec::new();
         {
             let mut sink = LineSink::new(&mut buffer);
-            replay(&mut sink, outcome, affected_by);
+            replay(&mut sink, outcome, affected_by, colour);
         }
         String::from_utf8(buffer)
             .expect("the replay writes UTF-8")
@@ -1019,9 +1048,21 @@ mod tests {
             .collect()
     }
 
+    /// Wraps plain strings into escape-free `ReplayLine`s (`raw` and `text`
+    /// the same), for tests that do not care about the colour distinction.
+    fn plain_lines(lines: Vec<String>) -> Vec<alba_tui::ReplayLine> {
+        lines
+            .into_iter()
+            .map(|line| alba_tui::ReplayLine {
+                raw: line.clone(),
+                text: line,
+            })
+            .collect()
+    }
+
     fn outcome(
         summary: Option<RunSummary>,
-        failed_logs: Vec<(String, Vec<String>)>,
+        failed_logs: Vec<(String, Vec<alba_tui::ReplayLine>)>,
     ) -> alba_tui::TuiOutcome {
         alba_tui::TuiOutcome {
             last_run_code: summary.as_ref().map(RunSummary::exit_code),
@@ -1059,7 +1100,7 @@ mod tests {
         };
         let logs = vec![(
             "bad".to_string(),
-            vec!["boom 1".to_string(), "boom 2".to_string()],
+            plain_lines(vec!["boom 1".to_string(), "boom 2".to_string()]),
         )];
 
         let lines = replayed(&outcome(Some(summary), logs), None);
@@ -1083,9 +1124,11 @@ mod tests {
         };
         let logs = vec![(
             "chatty".to_string(),
-            (0..alba_tui::logs::MAX_LINES)
-                .map(|index| format!("line {index}"))
-                .collect::<Vec<_>>(),
+            plain_lines(
+                (0..alba_tui::logs::MAX_LINES)
+                    .map(|index| format!("line {index}"))
+                    .collect::<Vec<_>>(),
+            ),
         )];
 
         let lines = replayed(&outcome(Some(summary), logs), None);
@@ -1119,6 +1162,30 @@ mod tests {
         );
 
         assert_eq!(lines, ["\u{2713} nothing affected by HEAD"]);
+    }
+
+    /// The replay keeps the compiler's colours on a terminal and drops
+    /// them under NO_COLOR.
+    #[test]
+    fn the_replay_prints_raw_lines_with_colour_and_plain_lines_without() {
+        let summary = RunSummary {
+            failed: vec![BeamId("red".to_string())],
+            ..RunSummary::default()
+        };
+        let line = alba_tui::ReplayLine {
+            raw: "\u{1b}[31mred\u{1b}[0m".to_string(),
+            text: "red".to_string(),
+        };
+        let outcome = outcome(Some(summary), vec![("red".to_string(), vec![line])]);
+
+        let coloured = replayed_with(&outcome, None, true);
+        assert!(
+            coloured.iter().any(|l| l == "\u{1b}[31mred\u{1b}[0m"),
+            "{coloured:?}"
+        );
+        let plain = replayed_with(&outcome, None, false);
+        assert!(plain.iter().any(|l| l == "red"), "{plain:?}");
+        assert!(plain.iter().all(|l| !l.contains('\u{1b}')), "{plain:?}");
     }
 
     /// An orderly goodbye is not a failure and owes no line.

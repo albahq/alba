@@ -79,6 +79,13 @@ pub struct RunOptions {
     /// Where the cache lives and how this run treats it. `None` disables
     /// caching entirely — `alba check` and most tests want that.
     pub cache: Option<CacheOptions>,
+    /// Ambient variables the caller adds to every command of the run, on
+    /// top of the process environment and under the beam's own `env`
+    /// (a name both set keeps the beam's value). Reaches the executors
+    /// only, never the cache fingerprint: the interactive front end uses
+    /// it to force colour, and a beam must hit the same cache entry
+    /// whether a terminal or a pipe ran it.
+    pub extra_env: Vec<(String, String)>,
 }
 
 /// The executors a run can dispatch to, chosen per beam.
@@ -352,6 +359,7 @@ pub async fn run(
             keep_going: options.keep_going,
             cache: cache.clone(),
             force,
+            extra_env: options.extra_env.clone(),
         };
         tasks.push((beam.id.clone(), tokio::spawn(run_beam(task))));
     }
@@ -548,6 +556,9 @@ struct BeamTask {
     cache: Option<Arc<CacheStore>>,
     /// Ignore any stored entry when reading, but still write one.
     force: bool,
+    /// The run's ambient environment, added to every command under the
+    /// beam's own `env`. Never reaches the cache fingerprint.
+    extra_env: Vec<(String, String)>,
 }
 
 /// One beam's whole life: wait, run (or not), report, release dependents.
@@ -977,6 +988,22 @@ fn failure_status(task: &BeamTask) -> BeamStatus {
     }
 }
 
+/// The environment a command receives: the run's ambient `extra_env`
+/// first, then the beam's own `env`, with a name both set kept once
+/// with the beam's value. One entry per name, so no executor has to
+/// decide which duplicate wins (docker's repeated `-e` would take the
+/// last, the embedded shell overwrites in place: same answer, but only
+/// because nothing is duplicated here).
+fn command_env(extra: &[(String, String)], beam: &[(String, String)]) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = extra
+        .iter()
+        .filter(|(name, _)| !beam.iter().any(|(own, _)| own == name))
+        .cloned()
+        .collect();
+    env.extend(beam.iter().cloned());
+    env
+}
+
 /// A beam's commands and the environment they run in, all rendered.
 struct RenderedBeam {
     commands: Vec<String>,
@@ -1076,7 +1103,7 @@ async fn run_commands(
 
         let spec = CommandSpec {
             command: command.clone(),
-            env: plan.env.clone(),
+            env: command_env(&task.extra_env, &plan.env),
             cwd: plan.cwd.clone(),
         };
         let context = ExecContext {

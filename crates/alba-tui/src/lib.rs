@@ -49,6 +49,14 @@ const MAX_BATCH: usize = 256;
 pub struct TuiOptions {
     pub target: String,
     pub watch: bool,
+    pub colour: bool,
+}
+
+/// One replayed line, both ways the CLI may print it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayLine {
+    pub raw: String,
+    pub text: String,
 }
 
 #[derive(Debug)]
@@ -58,7 +66,7 @@ pub struct TuiOutcome {
     pub last_summary: Option<RunSummary>,
     /// `(beam id, its buffered lines)` for the last summary's failed
     /// beams, for the CLI's exit replay.
-    pub failed_logs: Vec<(String, Vec<String>)>,
+    pub failed_logs: Vec<(String, Vec<ReplayLine>)>,
 }
 
 /// Drives the interface until the user quits or the session ends.
@@ -71,7 +79,7 @@ pub async fn run(
     options: TuiOptions,
 ) -> io::Result<TuiOutcome> {
     let mut guard = terminal::TerminalGuard::enter()?;
-    let mut state = AppState::new(&options.target, options.watch);
+    let mut state = AppState::new(&options.target, options.watch).with_colour(options.colour);
     let mut input = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     // A loop that fell behind owes the user one fresh frame, not a burst
@@ -237,9 +245,13 @@ fn dispatch(
 ) {
     // Refreshed before every action: `EnterCopy`'s anchor and copy
     // mode's keyboard-driven scroll-follow both need to know the log
-    // pane's current content height, and this is the one place that
+    // pane's current content geometry, and this is the one place that
     // reaches the terminal size to compute it.
-    state.set_pane_height(log_pane_height(terminal_size));
+    let pane = ui::log_pane_content_area(terminal_size.width, terminal_size.height);
+    let (height, width) = pane
+        .map(|area| (area.height as usize, area.width as usize))
+        .unwrap_or((0, 0));
+    state.set_pane_size(height, width);
     match action {
         Action::Quit => {
             // Quitting on a run in flight abandons it: its summary,
@@ -293,26 +305,26 @@ fn dispatch(
         }
         Action::SelectNext => state.select_next(),
         Action::SelectPrevious => state.select_previous(),
-        Action::ScrollUp(lines) => {
+        Action::ScrollUp(rows) => {
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up(lines);
+                buffer.scroll_up_rows(rows, width);
             }
         }
-        Action::ScrollDown(lines) => {
+        Action::ScrollDown(rows) => {
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down(lines);
+                buffer.scroll_down_rows(rows, width);
             }
         }
         Action::ScrollHalfPageUp => {
-            let lines = half_pane(terminal_size);
+            let rows = half_pane(height);
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up(lines);
+                buffer.scroll_up_rows(rows, width);
             }
         }
         Action::ScrollHalfPageDown => {
-            let lines = half_pane(terminal_size);
+            let rows = half_pane(height);
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down(lines);
+                buffer.scroll_down_rows(rows, width);
             }
         }
         Action::FollowTail => {
@@ -331,6 +343,17 @@ fn dispatch(
         Action::Mouse(mouse_event) => dispatch_mouse(state, mouse_event, terminal_size),
         Action::None => {}
     }
+}
+
+/// How far `PageUp`/`PageDown` (and `Ctrl-u`/`Ctrl-d`) move the log
+/// pane: half of what it shows, the same distance `less` and vim move
+/// for the same keys, enough to turn a page, little enough to keep a
+/// few lines of context either side of the jump. At least one line, so
+/// a pane too short to halve (or with no pane at all, below the
+/// terminal's own floor) still moves rather than turning the key into a
+/// no-op.
+fn half_pane(height: usize) -> usize {
+    (height / 2).max(1)
 }
 
 /// Copy mode's own hit testing: a click or a drag only means something
@@ -361,22 +384,13 @@ fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) 
     }
     let pane_row = (mouse.row - area.y) as usize;
     let pane_col = (mouse.column - area.x) as usize;
-    state.handle_mouse(mouse.kind, area.height as usize, pane_row, pane_col);
-}
-
-/// How far `PageUp`/`PageDown` (and `Ctrl-u`/`Ctrl-d`) move the log
-/// pane: half of what it shows, the same distance `less` and vim move
-/// for the same keys — enough to turn a page, little enough to keep a
-/// few lines of context either side of the jump. At least one line, so
-/// a pane too short to halve still moves.
-fn half_pane(terminal_size: Size) -> usize {
-    (log_pane_height(terminal_size) / 2).max(1)
-}
-
-fn log_pane_height(terminal_size: Size) -> usize {
-    ui::log_pane_content_area(terminal_size.width, terminal_size.height)
-        .map(|area| area.height as usize)
-        .unwrap_or(0)
+    state.handle_mouse(
+        mouse.kind,
+        area.height as usize,
+        area.width as usize,
+        pane_row,
+        pane_col,
+    );
 }
 
 /// The selected beam's buffer, created on demand — scrolling a beam that
@@ -403,11 +417,19 @@ fn outcome(state: &AppState) -> TuiOutcome {
     }
 }
 
-fn buffered_lines(state: &AppState, beam: &str) -> Vec<String> {
+fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
     state
         .logs
         .get(beam)
-        .map(|buffer| buffer.lines().map(|line| line.text.clone()).collect())
+        .map(|buffer| {
+            buffer
+                .lines()
+                .map(|line| ReplayLine {
+                    raw: line.raw.clone(),
+                    text: line.text.clone(),
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -438,6 +460,14 @@ mod tests {
                 text: text.to_string(),
             },
             replayed: false,
+        }
+    }
+
+    /// A plain, escape-free replayed line: `raw` and `text` are the same.
+    fn replay_line(text: &str) -> ReplayLine {
+        ReplayLine {
+            raw: text.to_string(),
+            text: text.to_string(),
         }
     }
 
@@ -567,7 +597,7 @@ mod tests {
             outcome.failed_logs,
             vec![(
                 "bad".to_string(),
-                vec!["boom 1".to_string(), "boom 2".to_string()]
+                vec![replay_line("boom 1"), replay_line("boom 2")]
             )],
             "only the failed beam's lines, and all of them"
         );
@@ -625,7 +655,7 @@ mod tests {
         assert_eq!(outcome.last_run_code, None, "an abandoned run cannot vouch");
         assert_eq!(
             outcome.failed_logs,
-            vec![("bad".to_string(), vec!["boom".to_string()])],
+            vec![("bad".to_string(), vec![replay_line("boom")])],
             "the drain still collects the replay's material"
         );
         assert!(outcome.last_summary.is_some());
@@ -1090,20 +1120,17 @@ mod tests {
         );
     }
 
-    /// The distance follows the pane it moves — half of whatever the log
-    /// pane actually shows — and never falls to zero, which would make
-    /// the key a no-op on a terminal below the too-small floor (no pane
-    /// at all, so no height to halve).
+    /// `half_pane` is exercised end to end above at the 80x24 default; this
+    /// pins its floor directly, at the two sizes that actually reach it: a
+    /// terminal just past the minimum, whose 6 content rows halve to 3, and
+    /// one below the minimum, whose content area is empty (no pane at all)
+    /// but never falls to zero, which would make the key a no-op.
     #[test]
     fn the_page_distance_is_half_the_panes_own_height() {
-        assert_eq!(half_pane(size()), 10, "20 content rows at 80x24");
+        assert_eq!(half_pane(20), 10, "20 content rows at 80x24");
+        assert_eq!(half_pane(6), 3, "6 content rows at the floor");
         assert_eq!(
-            half_pane(Size::new(40, 10)),
-            3,
-            "6 content rows at the floor"
-        );
-        assert_eq!(
-            half_pane(Size::new(10, 4)),
+            half_pane(0),
             1,
             "below the floor there is no pane; the key still moves a line"
         );

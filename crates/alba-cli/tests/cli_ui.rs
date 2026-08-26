@@ -91,8 +91,15 @@ fn forcing_the_ui_without_a_terminal_exits_2() {
 fn ui_and_no_ui_together_are_rejected() {
     let dir = project("beam ok { run \"echo hello-from-the-beam\" }\n");
 
+    // This asserts on clap's own conflict text as plain, uncoloured
+    // output, so the child's colour has to be pinned off regardless of
+    // what the parent test process's own environment carries: a `test`
+    // beam run under the interface sets `FORCE_COLOR`/`CLICOLOR_FORCE` on
+    // this process (see `commands/run.rs`), and clap honours those over a
+    // piped, non-terminal stderr unless `NO_COLOR` says otherwise.
     alba()
         .current_dir(&dir)
+        .env("NO_COLOR", "1")
         .args(["run", "ok", "--ui", "--no-ui"])
         .assert()
         .failure()

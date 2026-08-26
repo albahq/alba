@@ -113,6 +113,12 @@ pub struct AppState {
     pub logs: HashMap<String, LogBuffer>,
     pub phase: Phase,
     pub watch_enabled: bool,
+    /// Whether the interface draws colour at all: the CLI's own gate
+    /// (`stdout` is a terminal, `NO_COLOR` unset), decided once via
+    /// `with_colour`. Every function in `ui/theme.rs` answers
+    /// `Style::default()` when this is `false`, so the interface renders
+    /// exactly as it always did.
+    pub colour: bool,
     pub mode: Mode,
     /// The most recently *committed* search. `Mode::Search` carries the
     /// one being typed; this is where it lands when `Enter` commits it,
@@ -142,6 +148,13 @@ pub struct AppState {
     /// watch trigger that follows a completed run is told apart from one
     /// that superseded a run still going.
     waiting_seen: bool,
+    /// `j`/`k`/the graph's `Enter` moved the selection since the run
+    /// started: the reader chose a place, so a failure must not pull
+    /// them off it.
+    selection_moved: bool,
+    /// A failure already pulled the selection once this run; the second
+    /// one leaves the reader on the first.
+    jumped_to_failure: bool,
     /// The log pane's current content height — refreshed by
     /// `lib::dispatch` before every action, since it is the one piece of
     /// screen geometry copy mode's keyboard flow needs (`v`'s anchor,
@@ -149,6 +162,10 @@ pub struct AppState {
     /// and `AppState` otherwise has no way to learn, never touching the
     /// terminal itself.
     pane_height: usize,
+    /// The log pane's current content width, refreshed alongside
+    /// `pane_height`, since wrapping needs it for the same reason the
+    /// height does: it decides which rows a line actually renders as.
+    pane_width: usize,
 }
 
 /// How long a copy result stays in the bottom bar once shown — long
@@ -209,6 +226,7 @@ impl AppState {
             // session that never ran one.
             phase: Phase::Finished,
             watch_enabled,
+            colour: false,
             mode: Mode::Normal,
             last_search: None,
             pending_copy: None,
@@ -218,8 +236,18 @@ impl AppState {
             outcome: None,
             user_cancelled: false,
             waiting_seen: false,
+            selection_moved: false,
+            jumped_to_failure: false,
             pane_height: 0,
+            pane_width: 0,
         }
+    }
+
+    /// Whether the interface draws colour at all: the CLI's own gate
+    /// (`stdout` is a terminal, `NO_COLOR` unset), decided once.
+    pub fn with_colour(mut self, colour: bool) -> Self {
+        self.colour = colour;
+        self
     }
 
     /// Folds one event in. `now` is passed, not sampled — the state stays
@@ -258,10 +286,11 @@ impl AppState {
                 }
             }
             RunEvent::BeamOutput { id, line, replayed } => {
-                self.logs
-                    .entry(id.0.clone())
-                    .or_default()
-                    .push(line.text.clone(), *replayed);
+                self.logs.entry(id.0.clone()).or_default().push(
+                    line.text.as_str(),
+                    line.stream,
+                    *replayed,
+                );
                 // A still-running beam's search must not go stale while
                 // the user is not typing: a keystroke is not the only
                 // way the match set can change, the buffer gaining a
@@ -282,6 +311,15 @@ impl AppState {
                     status: status.clone(),
                     duration: *duration,
                 };
+                let real_failure = matches!(status, BeamStatus::Failed { .. });
+                if real_failure
+                    && !self.selection_moved
+                    && !self.jumped_to_failure
+                    && let Some(index) = self.index_of(&id.0)
+                {
+                    self.select(index);
+                    self.jumped_to_failure = true;
+                }
                 if let Phase::Running { done, total, .. } = &mut self.phase {
                     *done = (*done + 1).min(*total);
                 }
@@ -327,7 +365,7 @@ impl AppState {
                 self.outcome = None;
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
                 for line in diagnostic.lines() {
-                    buffer.push(line.to_string(), false);
+                    buffer.push(line, alba_executors::Stream::Stdout, false);
                 }
             }
         }
@@ -394,8 +432,9 @@ impl AppState {
     /// Refreshed by `lib::dispatch` before every action — the one piece
     /// of screen geometry copy mode's keyboard flow needs and `AppState`
     /// has no other way to learn, since it never touches the terminal.
-    pub fn set_pane_height(&mut self, height: usize) {
+    pub fn set_pane_size(&mut self, height: usize, width: usize) {
         self.pane_height = height;
+        self.pane_width = width;
     }
 
     /// Where a copy attempt's result lands once the composition root
@@ -408,10 +447,12 @@ impl AppState {
     }
 
     pub fn select_next(&mut self) {
+        self.selection_moved = true;
         self.select(self.selected + 1);
     }
 
     pub fn select_previous(&mut self) {
+        self.selection_moved = true;
         self.select(self.selected.saturating_sub(1));
     }
 
@@ -443,7 +484,7 @@ impl AppState {
         let top_line = self
             .logs
             .get(&beam)
-            .map(|buffer| crate::copy::top_visible_line(buffer, self.pane_height))
+            .map(|buffer| crate::copy::top_visible_line(buffer, self.pane_height, self.pane_width))
             .unwrap_or(0);
         self.mode = Mode::Copy(CopyState::new_at(top_line));
     }
@@ -587,6 +628,7 @@ impl AppState {
         };
         match key.code {
             KeyCode::Enter => {
+                self.selection_moved = true;
                 self.select(graph.focused);
                 return; // stays Mode::Normal, already replaced above
             }
@@ -617,6 +659,7 @@ impl AppState {
     /// from.
     fn sync_copy_scroll(&mut self, cursor_line: usize) {
         let pane_height = self.pane_height;
+        let width = self.pane_width;
         if pane_height == 0 {
             return;
         }
@@ -628,27 +671,49 @@ impl AppState {
             return;
         }
         let len = buffer.len();
-        let (start, end) = crate::copy::scroll_window(buffer, pane_height);
+        let (start, end) = crate::copy::scroll_window(buffer, pane_height, width);
         if cursor_line < start {
-            // Bring the cursor to the top of the view.
-            let target_offset = len.saturating_sub(cursor_line + pane_height);
-            buffer.follow_tail();
-            // `scroll_up` unconditionally switches to `Paused` even for
-            // `by: 0` (`LogBuffer::scroll_up`), so calling it with an
-            // offset of exactly 0 would leave the buffer `Paused {
-            // offset: 0 }` — indistinguishable from `Following` right
-            // now, but *not* auto-following: `push` only increments a
+            // Why this is a search and the downward branch below is a
+            // closed form: `Scroll::Paused`'s offset counts lines from
+            // the tail, so placing `cursor_line` as the window's newest
+            // line (the downward case) is direct line arithmetic, no
+            // rendering involved. Placing it as the window's oldest
+            // visible line (this case) is not: that depends on how many
+            // rows the lines between the offset and `cursor_line` wrap
+            // into, which is exactly what `view` computes and nothing
+            // upstream of it knows in closed form. A single wide line
+            // can occupy the whole pane by itself, so the window's start
+            // can sit still for several `scroll_up` steps while that
+            // line's own rows scroll past, then jump back several lines
+            // at once once it finally drops out; only walking it one
+            // line of offset at a time and re-checking the real window
+            // gets this right under wrapping.
+            //
+            // Bounded by `end - cursor_line` rather than `len`: by the
+            // time `end` (one past the window's newest line) reaches
+            // `cursor_line + 1`, `cursor_line` is the newest line in the
+            // window, so the window's start is certainly at or before
+            // it, well short of walking the whole buffer.
+            let bound = end.saturating_sub(cursor_line);
+            for _ in 0..bound {
+                buffer.scroll_up(1);
+                if crate::copy::scroll_window(buffer, pane_height, width).0 <= cursor_line {
+                    break;
+                }
+            }
+        } else if cursor_line >= end {
+            // Bring the cursor to the bottom of the view: an offset of
+            // exactly 0 here means the cursor reached the true tail,
+            // which must render as `Following`, not `Paused { offset: 0
+            // }`. `scroll_up` unconditionally switches to `Paused` even
+            // for `by: 0` (`LogBuffer::scroll_up`), so calling it with a
+            // target offset of exactly 0 would leave the buffer
+            // indistinguishable from `Following` right now but not
+            // actually auto-following: `push` only increments a
             // `Paused` offset, so a beam that keeps producing output
             // after the cursor reaches the tail would drift one line
             // behind it per pushed line. `follow_tail` alone already is
             // the offset-0 case; skip the redundant (and harmful) call.
-            if target_offset > 0 {
-                buffer.scroll_up(target_offset);
-            }
-        } else if cursor_line >= end {
-            // Bring the cursor to the bottom of the view — same
-            // reasoning as above: an offset of 0 here means the cursor
-            // reached the true tail, which must stay `Following`.
             let target_offset = len.saturating_sub(cursor_line + 1);
             buffer.follow_tail();
             if target_offset > 0 {
@@ -679,6 +744,7 @@ impl AppState {
         &mut self,
         kind: MouseEventKind,
         pane_height: usize,
+        pane_width: usize,
         pane_row: usize,
         pane_col: usize,
     ) {
@@ -689,19 +755,19 @@ impl AppState {
             return;
         }
         let beam = self.displayed_log_key();
-        let Some(line) = self
+        let Some((line, column_offset)) = self
             .logs
             .get(&beam)
-            .and_then(|buffer| crate::copy::line_for_pane_row(buffer, pane_height, pane_row))
+            .and_then(|buffer| crate::copy::row_at(buffer, pane_height, pane_width, pane_row))
         else {
             return;
         };
         let Mode::Copy(mut copy) = std::mem::replace(&mut self.mode, Mode::Normal) else {
             unreachable!("checked above")
         };
-        copy.cursor = (line, pane_col);
+        copy.cursor = (line, column_offset + pane_col);
         if matches!(kind, MouseEventKind::Down(_)) {
-            copy.anchor = (line, pane_col);
+            copy.anchor = (line, column_offset + pane_col);
         }
         self.mode = Mode::Copy(copy);
     }
@@ -872,6 +938,8 @@ impl AppState {
         self.outcome = None;
         self.user_cancelled = false;
         self.waiting_seen = false;
+        self.selection_moved = false;
+        self.jumped_to_failure = false;
         // A run starting is the project loading again: the diagnostic
         // that parked the session describes a Beamfile that no longer is.
         if let Some(buffer) = self.logs.get_mut(DIAGNOSTIC_LOG) {
@@ -1236,6 +1304,88 @@ mod tests {
         state.select_next();
         state.select_next();
         assert_eq!(state.selected, 1);
+    }
+
+    fn three_beams() -> AppState {
+        let mut state = AppState::new("build", false);
+        state.apply(&run_started("build", &["a", "b", "c"], &[]), Instant::now());
+        state
+    }
+
+    /// The first failure of a run pulls the selection onto itself.
+    #[test]
+    fn the_first_failure_selects_its_beam() {
+        let mut state = three_beams();
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "c");
+    }
+
+    /// A second failure leaves the reader on the first one.
+    #[test]
+    fn a_second_failure_does_not_move_the_selection_again() {
+        let mut state = three_beams();
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "b"),
+            Instant::now(),
+        );
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "b");
+    }
+
+    /// A reader who moved since the run started is not interrupted.
+    #[test]
+    fn a_moved_selection_is_not_hijacked_by_a_failure() {
+        let mut state = three_beams();
+        state.select_next(); // b
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "b");
+    }
+
+    /// An allowed failure is not the failure the reader needs to see.
+    #[test]
+    fn an_allowed_failure_does_not_jump() {
+        let mut state = three_beams();
+        state.apply(
+            &finished(BeamStatus::FailedAllowed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "a");
+    }
+
+    /// A new run starts the rule afresh: the earlier jump and the
+    /// earlier movement are both forgotten.
+    #[test]
+    fn a_new_run_resets_the_jump_rule() {
+        let mut state = three_beams();
+        state.select_next();
+        state.apply(&run_started("build", &["a", "b", "c"], &[]), Instant::now());
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "c");
+    }
+
+    /// Choosing a beam in the graph counts as moving.
+    #[test]
+    fn selecting_in_the_graph_counts_as_moving() {
+        let mut state = three_beams();
+        state.enter_graph();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "a");
     }
 
     /// A parked session still watches, and resolves no file: the header
@@ -1854,9 +2004,9 @@ mod tests {
 
         assert_eq!(search_state(&state).current_line(), Some(0));
         let buffer = state.logs.get("build").unwrap();
-        let view = buffer.view(5);
+        let view = buffer.view(5, 80);
         assert_eq!(
-            view.last().map(String::as_str),
+            view.last().map(|row| row.text.as_str()),
             Some("ERROR here"),
             "the match is scrolled to the bottom of its view"
         );
@@ -1925,7 +2075,7 @@ mod tests {
         for line in ["alpha", "bravo", "charlie"] {
             state.apply(&output("build", line), now);
         }
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
         state.enter_copy(); // anchors at (0, 0): all 3 lines fit, following
 
         state.handle_modal_key(char_key('l'));
@@ -1958,7 +2108,7 @@ mod tests {
         for line in ["alpha", "bravo", "charlie"] {
             state.apply(&output("build", line), now);
         }
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
         state.enter_copy();
         state.handle_modal_key(char_key('j'));
         state.handle_modal_key(char_key('l'));
@@ -1987,7 +2137,7 @@ mod tests {
         state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
         state.apply(&output("build", "alpha"), now);
         state.apply(&output("build", "bravo"), now);
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
         state.enter_copy(); // anchors at (0, 0)
         state.handle_modal_key(char_key('l')); // cursor -> (0, 1)
 
@@ -2016,7 +2166,7 @@ mod tests {
         for index in 0..30 {
             state.apply(&output("build", &format!("line {index}")), now);
         }
-        state.set_pane_height(5);
+        state.set_pane_size(5, 80);
 
         state.enter_copy();
         assert_eq!(
@@ -2030,7 +2180,7 @@ mod tests {
         state.handle_modal_key(char_key('k'));
         assert_eq!(cursor(&state), (24, 0));
         assert_eq!(
-            state.logs.get("build").unwrap().view(5)[0],
+            state.logs.get("build").unwrap().view(5, 80)[0].text,
             "line 24",
             "the cursor's line is now the top of the view"
         );
@@ -2042,9 +2192,9 @@ mod tests {
         }
         assert_eq!(cursor(&state), (29, 0), "clamped to the last line");
         let buffer = state.logs.get("build").unwrap();
-        let view = buffer.view(5);
+        let view = buffer.view(5, 80);
         assert_eq!(
-            view.last().map(String::as_str),
+            view.last().map(|row| row.text.as_str()),
             Some("line 29"),
             "the view follows the cursor back down to the tail"
         );
@@ -2061,9 +2211,9 @@ mod tests {
         // the cursor reaches the tail must have the pane keep following
         // it, not silently drift one line behind per pushed line.
         state.apply(&output("build", "line 30"), Instant::now());
-        let view_after_push = state.logs.get("build").unwrap().view(5);
+        let view_after_push = state.logs.get("build").unwrap().view(5, 80);
         assert_eq!(
-            view_after_push.last().map(String::as_str),
+            view_after_push.last().map(|row| row.text.as_str()),
             Some("line 30"),
             "the view keeps following the tail after the cursor reached it"
         );
@@ -2085,7 +2235,7 @@ mod tests {
             },
             now,
         );
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
 
         state.enter_copy();
         assert_eq!(cursor(&state), (0, 0));
