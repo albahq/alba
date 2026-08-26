@@ -3,7 +3,7 @@
 //! follow state.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -15,9 +15,8 @@ use crate::state::{AppState, Mode, Phase};
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     let rows = Layout::vertical([
-        Constraint::Length(1), // "logs · {beam}" title
+        Constraint::Length(1), // "LOGS" / "DIAGNOSTIC", follow state at the right
         Constraint::Min(0),    // output
-        Constraint::Length(1), // follow state
     ])
     .split(area);
 
@@ -29,14 +28,17 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     // the selection highlight below and what `y` actually copies can
     // never disagree about what is on screen.
     let key = state.displayed_log_key();
-    let title = if matches!(state.phase, Phase::Parked) {
-        "diagnostic".to_string()
-    } else {
-        format!("logs · {key}")
-    };
-    frame.render_widget(Paragraph::new(title), rows[0]);
-
     let buffer = state.logs.get(&key);
+
+    // Two paragraphs on the one title row: the pane's name at the left
+    // edge, the follow state at the right. Neither clears the row, so
+    // the second does not paint over the first.
+    frame.render_widget(Paragraph::new(title(state)), rows[0]);
+    frame.render_widget(
+        Paragraph::new(follow_text(buffer)).alignment(Alignment::Right),
+        rows[0],
+    );
+
     let body_height = rows[1].height as usize;
     // The query that should still be marked in the pane: the one being
     // typed while search is active, or the last completed one — kept
@@ -62,19 +64,29 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         None => Vec::new(),
     };
     frame.render_widget(Paragraph::new(lines), rows[1]);
+}
 
-    let following = match buffer {
-        Some(buffer) => matches!(buffer.scroll(), Scroll::Following),
-        // No buffer yet (nothing has run) reads the same as following:
-        // there is nothing to be paused partway through.
-        None => true,
-    };
-    let footer = if following {
+/// The pane's name. The selected beam is not repeated here: the tree's
+/// reversed row already names it. Parked, the pane shows the diagnostic
+/// that parked the project instead of any beam's output.
+pub(crate) fn title(state: &AppState) -> &'static str {
+    if matches!(state.phase, Phase::Parked) {
+        "DIAGNOSTIC"
+    } else {
+        "LOGS"
+    }
+}
+
+/// The follow state, right-aligned on the title row. No buffer yet
+/// (nothing has run) reads the same as following: there is nothing to
+/// be paused partway through.
+pub(crate) fn follow_text(buffer: Option<&LogBuffer>) -> &'static str {
+    let following = buffer.is_none_or(|buffer| matches!(buffer.scroll(), Scroll::Following));
+    if following {
         "● following"
     } else {
         "↑ paused"
-    };
-    frame.render_widget(Paragraph::new(footer), rows[2]);
+    }
 }
 
 /// The whole logical `LogLine` a row belongs to (`None` for the
@@ -240,7 +252,26 @@ mod tests {
     use super::*;
     use crate::copy::CopyState;
     use crate::logs::LogBuffer;
+    use alba_engine::RunEvent;
     use alba_executors::Stream;
+
+    #[test]
+    fn the_title_names_the_pane_not_the_beam() {
+        let mut state = AppState::new("build", false);
+        assert_eq!(title(&state), "LOGS");
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: unknown target `nope`\n".to_string(),
+            },
+            std::time::Instant::now(),
+        );
+        assert_eq!(title(&state), "DIAGNOSTIC");
+    }
+
+    #[test]
+    fn the_follow_text_reads_following_without_a_buffer() {
+        assert_eq!(follow_text(None), "● following");
+    }
 
     /// The composition `draw` actually relies on: each row already
     /// names its own buffer-absolute line (`row.line`), and

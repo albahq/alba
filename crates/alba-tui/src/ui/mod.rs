@@ -162,7 +162,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 /// The log pane's own content rectangle — inside the outer border, past
-/// the tree pane and its divider, and inside the title/footer rows
+/// the tree pane and its divider, and inside the title row
 /// `logpane::draw` reserves — for a terminal of `width` × `height`
 /// cells. `None` below the too-small floor, where `draw` paints nothing
 /// but its one message and there is no pane to hit-test against.
@@ -179,9 +179,8 @@ pub fn log_pane_content_area(width: u16, height: u16) -> Option<Rect> {
     let panes =
         Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(inner);
     let rows = Layout::vertical([
-        Constraint::Length(1), // "logs · {beam}" title
+        Constraint::Length(1), // "LOGS" title row
         Constraint::Min(0),    // output
-        Constraint::Length(1), // follow state
     ])
     .split(panes[1]);
     Some(rows[1])
@@ -194,9 +193,9 @@ mod tests {
     #[test]
     fn log_pane_content_area_sits_past_the_tree_and_its_borders() {
         // Outer border: 1 cell each side. Tree pane + divider: 31
-        // columns. Title row: 1 line. Footer row: 1 line.
+        // columns. Title row: 1 line.
         let area = log_pane_content_area(80, 24).expect("80x24 clears the floor");
-        assert_eq!(area, Rect::new(32, 2, 47, 20));
+        assert_eq!(area, Rect::new(32, 2, 47, 21));
     }
 
     #[test]

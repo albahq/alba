@@ -3,7 +3,7 @@ source: crates/alba-tui/tests/render.rs
 expression: "drawn(&state, 80, 24)"
 ---
 "┌─ alba · run build ── ▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 0/1 · 0.0s ──────────────────────────────┐"
-"│BEAMS                         │logs · build                                   │"
+"│BEAMS                         │LOGS                                   ↑ paused│"
 "│ ▶ build                 0.0s…│line 0                                         │"
 "│                              │line 1                                         │"
 "│                              │line 2                                         │"
@@ -24,5 +24,5 @@ expression: "drawn(&state, 80, 24)"
 "│                              │                                               │"
 "│                              │                                               │"
 "│                              │                                               │"
-"│✔ 0  ⚡ 0  ✖ 0  ○ 0           │↑ paused                                       │" Hidden by multi-width symbols: [(7, " ")]
+"│✔ 0  ⚡ 0  ✖ 0  ○ 0           │                                               │" Hidden by multi-width symbols: [(7, " ")]
 "└─ q quit · r rerun · c cancel · w watch · / search · ? help ──────────────────┘"
