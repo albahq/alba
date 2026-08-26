@@ -98,19 +98,20 @@ beams and a few log lines.
 | Counts              | Footer, left; removed from the tree                                                            |
 | Follow state        | Right-aligned on the `LOGS` title row; removed from the log pane's last row                    |
 | Junction            | A real `├ ┴ ┤` line, one row, rather than a footer that cuts the divider short                 |
-| Bar width           | Footer width minus counts and right text, capped at 30, omitted under 14; `ui/mod.rs` decides  |
+| Bar width           | Footer width minus counts and right text, capped at 30, omitted under 14; `ui/footer.rs` decides |
 | Outcome word        | `ok` / `failed`; the pty smoke test synchronizes on it (see Testing)                           |
 | Floor               | `MIN_HEIGHT` 10 to 12                                                                          |
 
 ## Where it lives
 
-- `alba-tui/src/ui/mod.rs`: the layout (body, junction, footer), the junction glyphs (a custom border set
-  for the body block's bottom corners plus the `┴` cell at the divider's foot), the bar width, and
+- `alba-tui/src/ui/mod.rs`: the layout (body, junction, footer), the junction's three hand-written cells
+  (`├`, `┴` at the divider's foot, `┤`), and
   `log_pane_content_area`, which now excludes the junction and the footer rows and no longer reserves a
   follow-state row. The copy mode's mouse handling reads that function, so its hit-testing follows.
 - `alba-tui/src/ui/header.rs`: `line` becomes the identity title; a new `session` returns the optional
   right-hand title. The bar, the outcome, and `finished_line` leave this module.
-- `alba-tui/src/ui/footer.rs` (new): the counts line (moved from `tree.rs`), the run text, and the bar.
+- `alba-tui/src/ui/footer.rs` (new): the counts line (moved from `tree.rs`), the run text, and the bar's
+  sizing.
 - `alba-tui/src/ui/tree.rs`: loses its counts row.
 - `alba-tui/src/ui/logpane.rs`: the title row carries `LOGS`/`DIAGNOSTIC` and the follow state; the last
   row is gone.
@@ -134,7 +135,8 @@ and the longest bar-less right text (`failed · 12.3s`, 14 cells) still fits bes
   `idle`; the counts line matches what `tree.rs` produced.
 - `ui/header.rs`: identity only on the left; `session` is `None` when idle or finished, names the watched
   files while waiting, and carries the parked colour while parked.
-- `ui/mod.rs`: the bar width at 40, 60, 80 columns is omitted, 14 or more, and the 30-cell cap;
+- `ui/footer.rs`: the bar width for the room left is omitted under 14 cells, as is up to 30, and capped past it;
+- `ui/mod.rs`:
   `log_pane_content_area` at `80x24` returns the content rectangle one row shorter than today and starting
   on the same row; `None` below the new floor.
 - `ui/logpane.rs`: the title row reads `LOGS` with `● following` at its right edge, `↑ paused` once
