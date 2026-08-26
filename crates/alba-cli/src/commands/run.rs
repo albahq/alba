@@ -174,6 +174,7 @@ async fn execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        extra_env: Vec::new(),
     };
 
     let root = alba_engine::beamfile_dir(beamfile);
@@ -278,6 +279,7 @@ async fn watch_execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        extra_env: Vec::new(),
     };
 
     let (events, incoming) = unbounded_channel();
@@ -382,6 +384,7 @@ async fn tui_execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        extra_env: Vec::new(),
     };
 
     let (events, incoming) = unbounded_channel();

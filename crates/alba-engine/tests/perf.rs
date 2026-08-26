@@ -34,6 +34,7 @@ fn options(dir: &Path) -> RunOptions {
             dir: dir.join(".alba").join("cache"),
             force: false,
         }),
+        extra_env: Vec::new(),
     }
 }
 

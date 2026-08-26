@@ -50,6 +50,7 @@ fn options(jobs: usize, keep_going: bool) -> RunOptions {
         keep_going,
         params: Vec::new(),
         cache: None,
+        extra_env: Vec::new(),
     }
 }
 
@@ -785,6 +786,7 @@ beam deploy(target) {
         keep_going: false,
         params: vec!["staging".to_string()],
         cache: None,
+        extra_env: Vec::new(),
     };
     let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
 
@@ -810,6 +812,7 @@ async fn parameter_count_must_match_the_target() {
             keep_going: false,
             params: vec!["extra".to_string()],
             cache: None,
+            extra_env: Vec::new(),
         },
         Arc::new(FakeExecutor::new()),
     )
@@ -1281,4 +1284,58 @@ beam build { run "echo a" }
             .any(|event| matches!(event, FakeEvent::Closed { .. })),
         "there is no session to close: {fake_events:?}"
     );
+}
+
+/// `extra_env` is the session's ambient environment (the TUI forcing
+/// colour): it reaches every command, and a beam's own `env` wins on a
+/// name both set.
+#[tokio::test]
+async fn extra_env_reaches_the_executor_and_the_beam_env_wins() {
+    let source = r#"
+beam plain {
+  run "echo plain"
+}
+
+beam own {
+  env { FORCE_COLOR = "0" }
+  needs [plain]
+  run "echo own"
+}
+"#;
+    let executor = Arc::new(FakeExecutor::new());
+    let mut options = options(1, false);
+    options.extra_env = vec![
+        ("FORCE_COLOR".to_string(), "1".to_string()),
+        ("CLICOLOR_FORCE".to_string(), "1".to_string()),
+    ];
+    let outcome = run_target(source, "own", options, executor.clone()).await;
+    outcome.summary();
+
+    let calls = executor.calls();
+    let env_of = |command: &str| -> Vec<(String, String)> {
+        calls
+            .iter()
+            .find(|call| call.command == command)
+            .unwrap_or_else(|| panic!("no call for {command}"))
+            .env
+            .clone()
+    };
+    assert_eq!(
+        env_of("echo plain"),
+        vec![
+            ("FORCE_COLOR".to_string(), "1".to_string()),
+            ("CLICOLOR_FORCE".to_string(), "1".to_string()),
+        ]
+    );
+    let own = env_of("echo own");
+    assert_eq!(
+        own.iter().filter(|(name, _)| name == "FORCE_COLOR").count(),
+        1,
+        "one entry per name, never a duplicate the executor would have to arbitrate: {own:?}"
+    );
+    assert!(
+        own.contains(&("FORCE_COLOR".to_string(), "0".to_string())),
+        "the beam's own value wins: {own:?}"
+    );
+    assert!(own.contains(&("CLICOLOR_FORCE".to_string(), "1".to_string())));
 }
