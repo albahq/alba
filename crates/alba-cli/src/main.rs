@@ -39,6 +39,13 @@ fn run(cli: Cli) -> i32 {
     let beamfile = match resolve_beamfile(cli.file.as_deref()) {
         Ok(path) => path,
         Err(message) => {
+            // `alba hook` backs every script `hooks install` writes,
+            // written for every hook git knows whether or not a Beamfile
+            // declares (or even has) one: no Beamfile is the same silent
+            // no-op as an undeclared hook, not a failure to report.
+            if matches!(cli.command, Some(Command::Hook { .. })) {
+                return 0;
+            }
             LineSink::stderr().line(&message);
             return EXIT_ALBA_ERROR;
         }
@@ -67,7 +74,11 @@ fn run(cli: Cli) -> i32 {
         // even loaded — see the `if let` there for why.
         Some(Command::Cache { .. }) => unreachable!("cache is dispatched before loading"),
         Some(Command::Plugin { .. }) => unreachable!("plugin is dispatched before loading"),
-        Some(Command::Check) => commands::check::run(&project),
+        Some(Command::Check) => commands::check::run(&project, &beamfile),
+        Some(Command::Hook { name, args }) => {
+            commands::hook::run(&project, &sources, &beamfile, &name, args)
+        }
+        Some(Command::Hooks { command }) => commands::hooks::run(&beamfile, &command),
         Some(Command::Affected {
             reference,
             log_format,

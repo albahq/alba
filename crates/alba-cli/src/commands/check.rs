@@ -9,15 +9,24 @@
 //! schedule time, so unsupported syntax is caught here instead of first
 //! showing up mid-run.
 
+use std::path::Path;
+
 use alba_core::{ExecutorKind, Project, render_template};
 
 use crate::exit::EXIT_ALBA_ERROR;
 use crate::render::LineSink;
 
 /// Validates every beam that can be validated statically, then prints
-/// `✓ Beamfile: N beam(s)` and returns `0` — or, if any beam's embedded
+/// `✓ Beamfile: N beam(s)` (or `✓ Beamfile: N beam(s), M hook(s)` when the
+/// Beamfile declares hooks) and returns `0` — or, if any beam's embedded
 /// shell command failed to parse, prints that beam's diagnostic instead
 /// and returns [`EXIT_ALBA_ERROR`] without the success line.
+///
+/// When hooks are declared but `core.hooksPath` does not point at
+/// `.alba/hooks`, a warning goes to stderr suggesting `alba hooks
+/// install`. This is the one place `check` may spawn git — a project with
+/// no hooks never does, keeping the laziness the rest of the binary holds
+/// to.
 ///
 /// Only beams running on the embedded shell (`ExecutorKind::Shell`, the
 /// default) with no parameters are checked: a parameterized beam's `run`
@@ -32,7 +41,7 @@ use crate::render::LineSink;
 /// `alba check | head -1` (or any consumer that closes its end without
 /// reading) closes the stream before every line lands, and the macros
 /// panic on a closed pipe.
-pub fn run(project: &Project) -> i32 {
+pub fn run(project: &Project, beamfile: &Path) -> i32 {
     let mut err = LineSink::stderr();
     let mut failed = false;
 
@@ -61,8 +70,30 @@ pub fn run(project: &Project) -> i32 {
         return EXIT_ALBA_ERROR;
     }
 
-    let count = project.beams.len();
-    let noun = if count == 1 { "beam" } else { "beams" };
-    LineSink::stdout().line(&format!("\u{2713} Beamfile: {count} {noun}"));
+    if !project.hooks.is_empty() {
+        let root = alba_engine::beamfile_dir(beamfile);
+        let installed = super::hooks::expected_hooks_path(beamfile)
+            .ok()
+            .zip(alba_core::git::hooks_path(&root).ok().flatten())
+            .is_some_and(|(expected, current)| expected == current);
+        if !installed {
+            let count = project.hooks.len();
+            let noun = if count == 1 { "hook" } else { "hooks" };
+            err.line(&format!(
+                "\u{26a0} {count} {noun} declared, run 'alba hooks install'"
+            ));
+        }
+    }
+
+    let beam_count = project.beams.len();
+    let beam_noun = if beam_count == 1 { "beam" } else { "beams" };
+    let summary = if project.hooks.is_empty() {
+        format!("\u{2713} Beamfile: {beam_count} {beam_noun}")
+    } else {
+        let hook_count = project.hooks.len();
+        let hook_noun = if hook_count == 1 { "hook" } else { "hooks" };
+        format!("\u{2713} Beamfile: {beam_count} {beam_noun}, {hook_count} {hook_noun}")
+    };
+    LineSink::stdout().line(&summary);
     0
 }

@@ -61,6 +61,35 @@ pub enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Run the beam a declared git hook points at. Called by the scripts
+    /// `alba hooks install` writes; usable by hand to debug a hook.
+    #[command(hide = true)]
+    Hook {
+        /// The git hook name (`pre-commit`, `commit-msg`, ...).
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The arguments git passed to the hook.
+        #[arg(
+            value_name = "ARG",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<String>,
+    },
+    /// Install or remove the git hooks this Beamfile declares.
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
+}
+
+/// A subcommand of `alba hooks`.
+#[derive(Debug, Subcommand)]
+pub enum HooksCommand {
+    /// Point `core.hooksPath` at `.alba/hooks` and write the hook scripts.
+    Install,
+    /// Remove the scripts and the `core.hooksPath` setting, if Alba set it.
+    Uninstall,
 }
 
 /// A subcommand of `alba cache`. `clean` is deliberately the only one for
