@@ -177,6 +177,22 @@ fn an_undeclared_hook_is_silent_and_succeeds() {
         .stderr("");
 }
 
+/// The silent-zero exit is only for the default `./Beamfile` lookup an
+/// installed script relies on. An explicit `--file` naming a path that
+/// does not exist is a typo the caller must hear about, not a second way
+/// to spell "no Beamfile here".
+#[test]
+fn an_explicit_missing_file_fails_the_hook_loudly() {
+    let empty = tempfile::tempdir().unwrap();
+    alba()
+        .current_dir(&empty)
+        .args(["--file", "no-such-Beamfile", "hook", "pre-commit"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(predicates::str::contains("no-such-Beamfile"));
+}
+
 #[test]
 fn a_broken_beamfile_fails_the_hook_loudly() {
     let dir = repository("beam x { descriptoin \"t\" }");

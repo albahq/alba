@@ -42,8 +42,12 @@ fn run(cli: Cli) -> i32 {
             // `alba hook` backs every script `hooks install` writes,
             // written for every hook git knows whether or not a Beamfile
             // declares (or even has) one: no Beamfile is the same silent
-            // no-op as an undeclared hook, not a failure to report.
-            if matches!(cli.command, Some(Command::Hook { .. })) {
+            // no-op as an undeclared hook, not a failure to report. That
+            // only holds for the default `./Beamfile` lookup, though: an
+            // explicit `--file` is the caller asserting the file exists,
+            // and a typo there must not vanish into the same silent exit
+            // 0 as a repository with no Beamfile at all.
+            if cli.file.is_none() && matches!(cli.command, Some(Command::Hook { .. })) {
                 return 0;
             }
             LineSink::stderr().line(&message);
