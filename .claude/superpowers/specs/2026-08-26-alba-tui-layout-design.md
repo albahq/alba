@@ -1,6 +1,6 @@
 # Alba - TUI Layout
 
-Date: 2026-08-26 Status: draft
+Date: 2026-08-26 Status: approved
 
 ## Overview
 
