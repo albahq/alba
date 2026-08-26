@@ -16,6 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Style, Stylize};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use crate::graph::{self, GraphState};
 use crate::state::{AppState, BeamState};
@@ -102,7 +103,7 @@ fn node_style(state: &BeamState, beam: usize, focused: usize, colour: bool) -> S
 /// widgets clip *within* the rectangle they are given.
 fn draw_label(frame: &mut Frame, area: Rect, fraction: f64, label: &str, style: Style) {
     let center_x = fraction_to_x(area, fraction);
-    let width = label.chars().count() as u16;
+    let width = label.width() as u16;
     let start_x = center_x.saturating_sub(width / 2).max(area.x);
     let right_edge = area.x + area.width;
     if start_x >= right_edge {
