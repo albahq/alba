@@ -673,16 +673,47 @@ impl AppState {
         let len = buffer.len();
         let (start, end) = crate::copy::scroll_window(buffer, pane_height, width);
         if cursor_line < start {
-            for _ in 0..len {
+            // Why this is a search and the downward branch below is a
+            // closed form: `Scroll::Paused`'s offset counts lines from
+            // the tail, so placing `cursor_line` as the window's newest
+            // line (the downward case) is direct line arithmetic, no
+            // rendering involved. Placing it as the window's oldest
+            // visible line (this case) is not: that depends on how many
+            // rows the lines between the offset and `cursor_line` wrap
+            // into, which is exactly what `view` computes and nothing
+            // upstream of it knows in closed form. A single wide line
+            // can occupy the whole pane by itself, so the window's start
+            // can sit still for several `scroll_up` steps while that
+            // line's own rows scroll past, then jump back several lines
+            // at once once it finally drops out; only walking it one
+            // line of offset at a time and re-checking the real window
+            // gets this right under wrapping.
+            //
+            // Bounded by `end - cursor_line` rather than `len`: by the
+            // time `end` (one past the window's newest line) reaches
+            // `cursor_line + 1`, `cursor_line` is the newest line in the
+            // window, so the window's start is certainly at or before
+            // it, well short of walking the whole buffer.
+            let bound = end.saturating_sub(cursor_line);
+            for _ in 0..bound {
                 buffer.scroll_up(1);
                 if crate::copy::scroll_window(buffer, pane_height, width).0 <= cursor_line {
                     break;
                 }
             }
         } else if cursor_line >= end {
-            // Bring the cursor to the bottom of the view — same
-            // reasoning as above: an offset of 0 here means the cursor
-            // reached the true tail, which must stay `Following`.
+            // Bring the cursor to the bottom of the view: an offset of
+            // exactly 0 here means the cursor reached the true tail,
+            // which must render as `Following`, not `Paused { offset: 0
+            // }`. `scroll_up` unconditionally switches to `Paused` even
+            // for `by: 0` (`LogBuffer::scroll_up`), so calling it with a
+            // target offset of exactly 0 would leave the buffer
+            // indistinguishable from `Following` right now but not
+            // actually auto-following: `push` only increments a
+            // `Paused` offset, so a beam that keeps producing output
+            // after the cursor reaches the tail would drift one line
+            // behind it per pushed line. `follow_tail` alone already is
+            // the offset-0 case; skip the redundant (and harmful) call.
             let target_offset = len.saturating_sub(cursor_line + 1);
             buffer.follow_tail();
             if target_offset > 0 {
