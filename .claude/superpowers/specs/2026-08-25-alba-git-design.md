@@ -132,7 +132,8 @@ without git:
 - `alba run --affected <ref> <beam> [args]`: the targets are the affected beams inside `<beam>`'s subgraph. When
   `<beam>` itself is not affected, neither is anything in its subgraph (rule 2), so the run is empty.
 - `alba run --affected <ref>`: the targets are every affected beam in the project. An affected beam that declares
-  parameters is reported and skipped (nothing can bind them); the others run.
+  parameters is skipped (nothing can bind its arguments); `alba affected` still lists it, marked
+  `(takes parameters)`. The others run.
 - The scheduler receives a set of targets instead of one: `plan(project, targets: &[BeamId], params)`. The needs
   of a target run as they always have (the cache skips the unchanged ones); a beam that is neither a target nor a
   need of one is absent from the plan. This is the only change to the scheduler's contract, and the single-target
@@ -140,8 +141,9 @@ without git:
 - An empty run prints `✓ nothing affected by <ref>`, exits `0`, and emits no beam event.
 - `alba affected <ref>`: lists the affected beams without running, one per line, or `{"beams": [...]}` under
   `--log-format json`. Exits `0` even when the list is empty. The dry run of `--affected`, meant for CI.
-- The run's JSON stream gains an `affected` field on the run-started event, carrying `ref` and the retained
-  `beams`. Nothing else in the stream changes.
+- The run's JSON stream gains two fields on the run-started event: `targets` (the beams asked for; empty when an
+  affected run found nothing) replaces the single-beam `target`, and `affected_by` (the git reference) is present
+  only for an affected run, omitted otherwise. Nothing else in the stream changes.
 
 ### With `--watch`
 
@@ -188,8 +190,8 @@ touched.
 The entry point the scripts call, usable by hand for debugging.
 
 - No Beamfile, or no `hook <name>` declared: exit `0`, silent. This is what makes the blanket install harmless.
-- Beamfile present but invalid: the diagnostic on stderr, exit `1`, the git operation blocked. A broken Beamfile
-  must not let a hook through silently.
+- Beamfile present but invalid: the diagnostic on stderr, exit `2` (the binary's Alba-error code; git blocks on
+  any non-zero exit), the git operation blocked. A broken Beamfile must not let a hook through silently.
 - Otherwise the strict equivalent of `alba run <beam> <args...>` with the text renderers forced (`--no-ui`),
   `grouped` output, the cache active, default `--jobs`. The exit code is the run's, so git refuses the operation
   when the beam fails.
