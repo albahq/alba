@@ -169,7 +169,7 @@ rule between `bottom_bar` and `help::keymap_lines`.
 - `alba-engine`: `RunOptions.extra_env` and its two uses in `scheduler.rs` (executor environment, not the
   cache facts).
 - `alba-tui`: `logs.rs` (parsing, `Row`, `view`), `copy.rs` (`row_at`), `state.rs` (the two flags and the
-  jump), `ui/theme.rs` (new: `status_style` and `bar_line`, the bold key style), `ui/tree.rs`,
+  jump), `ui/theme.rs` (new: `status_style`, `bar_line`, and the bold key style), `ui/tree.rs`,
   `ui/header.rs`, `ui/logpane.rs`, `ui/graphpane.rs`, `ui/mod.rs`.
 - `alba-cli`: the colour gate passed to the TUI, `extra_env` set on the TUI path, the replay choosing raw or
   plain.
