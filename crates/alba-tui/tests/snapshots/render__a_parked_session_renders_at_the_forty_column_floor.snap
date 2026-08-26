@@ -1,0 +1,16 @@
+---
+source: crates/alba-tui/tests/render.rs
+expression: "drawn(&state, 40, 12)"
+---
+"┌─ alba · build ───────────────────────┐"
+"│BEAMS                         │DIAGNOS│"
+"│                              │error: │"
+"│                              │unknown│"
+"│                              │ target│"
+"│                              │ `nope`│"
+"│                              │       │"
+"│                              │       │"
+"│                              │       │"
+"├──────────────────────────────┴───────┤"
+"│ ✔ 0  ⚡ 0  ✖ 0  ○ 0             idle │" Hidden by multi-width symbols: [(8, " ")]
+"└─ q quit · r rerun · c cancel · w watc┘"

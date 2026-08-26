@@ -1,15 +1,17 @@
 //! The whole-frame layout: an outer border carrying the header and
-//! bottom bar, a vertical divider between the tree and log panes — the
-//! interactive mirror of the CLI's headless renderers (see
-//! `alba-cli/src/render/`), but a pure function of [`AppState`] rather
-//! than a stream consumer.
+//! bottom bar, a vertical divider between the tree and log panes, the
+//! junction line that closes both columns, and the footer carrying the
+//! run beneath it — the interactive mirror of the CLI's headless
+//! renderers (see `alba-cli/src/render/`), but a pure function of
+//! [`AppState`] rather than a stream consumer.
 //!
 //! Nothing here samples a clock or touches the terminal: `now` arrives
 //! as an argument, so a redraw is a deterministic function of its
 //! inputs and a snapshot test owns the clock. See the spec's Layout
 //! section for the mockup this module renders — the outer frame, the
-//! divider, and the header/bottom-bar text sitting in the border are
-//! all drawn exactly as that mockup shows them.
+//! divider, the junction, the footer, and the header/bottom-bar text
+//! sitting in the border are all drawn exactly as that mockup shows
+//! them.
 
 use std::time::{Duration, Instant};
 
@@ -62,14 +64,25 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // so the colour underneath survives into the border's title. The
     // session state is a second, right-aligned title on the same edge,
     // so it never displaces the identity.
+    let identity = framed_title(header::line(state));
     let mut outer = Block::bordered()
-        .title_top(framed_title(header::line(state)))
+        .title_top(identity.clone())
         .title_bottom(framed_title(theme::bar_line(
             &bottom_bar(state, now),
             state.colour,
         )));
     if let Some(session) = header::session(state) {
-        outer = outer.title_top(framed_title_right(session).right_aligned());
+        // `Block` draws a right-aligned title first and a left-aligned
+        // one second, so past a certain width the identity would
+        // silently repaint over the session title rather than the two
+        // visibly colliding. Attach the session title only when both
+        // fit on the edge side by side; the identity always wins the
+        // arbitration and is drawn whole either way, since the run's
+        // own target name is the one thing this edge cannot drop.
+        let session_title = framed_title_right(session);
+        if titles_fit(&identity, &session_title, area.width) {
+            outer = outer.title_top(session_title.right_aligned());
+        }
     }
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
@@ -156,6 +169,14 @@ fn framed_title_right(content: Line<'static>) -> Line<'static> {
     spans.extend(content.spans);
     spans.push(Span::raw(" ─"));
     Line::from(spans)
+}
+
+/// Whether `left` and `right`, already framed by [`framed_title`] and
+/// [`framed_title_right`], both have room on one edge of `area_width`
+/// cells: the corners take one cell each, and past that the two titles
+/// must not need more room than what is left between them.
+fn titles_fit(left: &Line<'_>, right: &Line<'_>, area_width: u16) -> bool {
+    left.width() + right.width() <= area_width.saturating_sub(2) as usize
 }
 
 /// The always-available actions for the current mode.
@@ -260,6 +281,61 @@ mod tests {
     fn log_pane_content_area_is_none_below_the_floor() {
         assert_eq!(log_pane_content_area(MIN_WIDTH - 1, 24), None);
         assert_eq!(log_pane_content_area(80, MIN_HEIGHT - 1), None);
+    }
+
+    /// `titles_fit` pins the exact width the identity and the parked
+    /// session title need side by side: `alba · build` framed is 15
+    /// cells, `parked · waiting for a valid Beamfile` framed is 40, the
+    /// corners take 2, so 57 is the narrowest edge that has room for
+    /// both and 56 does not.
+    #[test]
+    fn titles_fit_needs_room_for_both_titles_and_the_corners() {
+        let identity = framed_title(Line::from("alba · build"));
+        let session = framed_title_right(Line::from("parked · waiting for a valid Beamfile"));
+        assert!(!titles_fit(&identity, &session, 56));
+        assert!(titles_fit(&identity, &session, 57));
+    }
+
+    /// The arbitration this pins: below the width both titles need, the
+    /// session title is dropped and the identity is drawn whole rather
+    /// than the two overlapping.
+    #[test]
+    fn the_session_title_is_dropped_when_it_would_overlap_the_identity() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = AppState::new("build", true);
+        state.apply(
+            &alba_engine::RunEvent::ProjectBroken {
+                diagnostic: "error: unknown target `nope`\n".to_string(),
+            },
+            Instant::now(),
+        );
+
+        let mut narrow = Terminal::new(TestBackend::new(56, 12)).unwrap();
+        narrow
+            .draw(|frame| draw(frame, &state, Instant::now()))
+            .unwrap();
+        let top_row = narrow.backend().buffer().content()[..56]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            top_row.starts_with("┌─ alba · build ─") && !top_row.contains("parked"),
+            "the session title is dropped at 56 columns: {top_row}"
+        );
+
+        let mut wide = Terminal::new(TestBackend::new(57, 12)).unwrap();
+        wide.draw(|frame| draw(frame, &state, Instant::now()))
+            .unwrap();
+        let top_row = wide.backend().buffer().content()[..57]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            top_row.ends_with("parked · waiting for a valid Beamfile ─┐"),
+            "both titles fit at 57 columns: {top_row}"
+        );
     }
 
     /// The junction row is where three block edges meet, and its three

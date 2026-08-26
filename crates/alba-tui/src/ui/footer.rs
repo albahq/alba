@@ -40,18 +40,27 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
     };
     let counts = counts_line(state);
     // What is left for the run's text once the counts and a two-cell
-    // gap are placed.
+    // gap are placed. A vanished status bucket misreports how many
+    // beams actually landed in it, which is worse than the run's own
+    // text reading incomplete, so the counts win: the run's paragraph
+    // is confined to this room instead of the whole row, and is
+    // visibly clipped rather than drawn over the counts' own cells.
     let room = (row.width as usize).saturating_sub(counts.width() + 2);
     let run = run_line(state, now, room);
+    let run_area = Rect {
+        x: row.x + (row.width as usize).saturating_sub(room) as u16,
+        width: room as u16,
+        ..row
+    };
     // Two paragraphs on the one row: neither clears it, so the second
     // does not paint over the first.
     frame.render_widget(Paragraph::new(counts), row);
-    frame.render_widget(Paragraph::new(run).alignment(Alignment::Right), row);
+    frame.render_widget(Paragraph::new(run).alignment(Alignment::Right), run_area);
 }
 
 /// The run's own text, fitted into `room` cells: the bar only when it
 /// has at least `BAR_MIN` cells to itself after the count and the time.
-pub(crate) fn run_line(state: &AppState, now: Instant, room: usize) -> Line<'static> {
+fn run_line(state: &AppState, now: Instant, room: usize) -> Line<'static> {
     match &state.phase {
         Phase::Running { done, total, since } => {
             let elapsed = now.saturating_duration_since(*since);
@@ -79,7 +88,7 @@ pub(crate) fn run_line(state: &AppState, now: Instant, room: usize) -> Line<'sta
 
 /// The bar's width for `room` free cells: `None` under `BAR_MIN`,
 /// capped at `BAR_MAX`.
-pub(crate) fn bar_width(room: usize) -> Option<usize> {
+fn bar_width(room: usize) -> Option<usize> {
     (room >= BAR_MIN).then(|| room.min(BAR_MAX))
 }
 
@@ -87,7 +96,7 @@ pub(crate) fn bar_width(room: usize) -> Option<usize> {
 /// same state always draws the same bar and no clock is involved in
 /// deciding how full it looks — only in how long the run has taken,
 /// which `run_line` prints separately.
-pub(crate) fn filled_cells(done: usize, total: usize, width: usize) -> usize {
+fn filled_cells(done: usize, total: usize, width: usize) -> usize {
     if total == 0 {
         0
     } else {
@@ -122,7 +131,7 @@ fn outcome_line(summary: &RunSummary, colour: bool) -> Line<'static> {
 /// The four buckets a beam can settle into, each `glyph count` pair
 /// styled by `status_style` of a representative state for that bucket:
 /// the same colour the tree's own rows would show that status in.
-pub(crate) fn counts_line(state: &AppState) -> Line<'static> {
+fn counts_line(state: &AppState) -> Line<'static> {
     let mut succeeded = 0;
     let mut cached = 0;
     let mut failed = 0;
@@ -310,6 +319,63 @@ mod tests {
         assert_eq!(
             run_line(&finished, now, 55).spans[0].style,
             Style::new().fg(Color::Red)
+        );
+    }
+
+    /// Wide counts (many beams) must never lose a bucket to the run's
+    /// own text: at 40 columns, 100 beams in each of the four buckets
+    /// leaves no room for `failed · 12.0s` beside them, so the run's
+    /// text is the one that gives way, clipped rather than drawn over
+    /// the counts.
+    #[test]
+    fn wide_counts_are_never_overwritten_by_the_run_text() {
+        use crate::state::BeamRow;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = state_with_phase(Phase::Finished);
+        state.last_summary = Some(RunSummary {
+            failed: vec![BeamId("a".into())],
+            duration: Duration::from_secs(12),
+            ..RunSummary::default()
+        });
+        let mut beams = Vec::new();
+        for bucket in 0..4 {
+            let status = match bucket {
+                0 => BeamState::Done {
+                    status: BeamStatus::Succeeded,
+                    duration: Duration::from_secs(0),
+                },
+                1 => BeamState::Done {
+                    status: BeamStatus::Cached,
+                    duration: Duration::from_secs(0),
+                },
+                2 => BeamState::Done {
+                    status: BeamStatus::Failed { exit_code: 1 },
+                    duration: Duration::from_secs(0),
+                },
+                _ => BeamState::Pending,
+            };
+            for index in 0..100 {
+                beams.push(BeamRow {
+                    id: format!("beam-{bucket}-{index}"),
+                    state: status.clone(),
+                });
+            }
+        }
+        state.beams = beams;
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &state, Instant::now()))
+            .unwrap();
+        let row = terminal.backend().to_string();
+        assert!(
+            row.contains("✔ 100")
+                && row.contains("⚡ 100")
+                && row.contains("✖ 100")
+                && row.contains("○ 100"),
+            "every bucket survives the run's own text: {row}"
         );
     }
 }

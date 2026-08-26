@@ -7,6 +7,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use alba_executors::Stream;
 
@@ -32,12 +33,16 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Two paragraphs on the one title row: the pane's name at the left
     // edge, the follow state at the right. Neither clears the row, so
-    // the second does not paint over the first.
-    frame.render_widget(Paragraph::new(title(state)), rows[0]);
-    frame.render_widget(
-        Paragraph::new(follow_text(buffer)).alignment(Alignment::Right),
-        rows[0],
-    );
+    // the second does not paint over the first. The pane's name is the
+    // load-bearing text on this row (the beam's own name lives in the
+    // tree instead), so it always wins: the follow state is drawn only
+    // when at least one blank cell still separates it from the name.
+    let name = title(state);
+    let follow = follow_text(buffer);
+    frame.render_widget(Paragraph::new(name), rows[0]);
+    if fits_beside(name, follow, rows[0].width) {
+        frame.render_widget(Paragraph::new(follow).alignment(Alignment::Right), rows[0]);
+    }
 
     let body_height = rows[1].height as usize;
     // The query that should still be marked in the pane: the one being
@@ -69,7 +74,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
 /// The pane's name. The selected beam is not repeated here: the tree's
 /// reversed row already names it. Parked, the pane shows the diagnostic
 /// that parked the project instead of any beam's output.
-pub(crate) fn title(state: &AppState) -> &'static str {
+fn title(state: &AppState) -> &'static str {
     if matches!(state.phase, Phase::Parked) {
         "DIAGNOSTIC"
     } else {
@@ -80,13 +85,19 @@ pub(crate) fn title(state: &AppState) -> &'static str {
 /// The follow state, right-aligned on the title row. No buffer yet
 /// (nothing has run) reads the same as following: there is nothing to
 /// be paused partway through.
-pub(crate) fn follow_text(buffer: Option<&LogBuffer>) -> &'static str {
+fn follow_text(buffer: Option<&LogBuffer>) -> &'static str {
     let following = buffer.is_none_or(|buffer| matches!(buffer.scroll(), Scroll::Following));
     if following {
         "● following"
     } else {
         "↑ paused"
     }
+}
+
+/// Whether `follow` still has room beside `name` on a row `width` cells
+/// wide, with at least one blank cell separating the two.
+fn fits_beside(name: &str, follow: &str, width: u16) -> bool {
+    name.width() + 1 + follow.width() <= width as usize
 }
 
 /// The whole logical `LogLine` a row belongs to (`None` for the
@@ -271,6 +282,56 @@ mod tests {
     #[test]
     fn the_follow_text_reads_following_without_a_buffer() {
         assert_eq!(follow_text(None), "● following");
+    }
+
+    #[test]
+    fn the_follow_text_reads_paused_once_scrolled_away_from_the_tail() {
+        let mut buffer = LogBuffer::new();
+        for text in ["alpha", "bravo", "charlie"] {
+            buffer.push(text, Stream::Stdout, false);
+        }
+        buffer.scroll_up(1);
+        assert_eq!(follow_text(Some(&buffer)), "↑ paused");
+    }
+
+    /// `fits_beside` pins the exact width `LOGS` and `● following` need
+    /// side by side: 4 cells, a blank separator, 11 cells, 16 in total.
+    #[test]
+    fn fits_beside_needs_room_for_the_name_the_gap_and_the_follow_state() {
+        assert!(!fits_beside("LOGS", "● following", 15));
+        assert!(fits_beside("LOGS", "● following", 16));
+    }
+
+    /// The arbitration this pins: below the width both need, the follow
+    /// state is dropped and the title is drawn whole rather than the
+    /// two overlapping or the separating space disappearing.
+    #[test]
+    fn the_follow_state_is_dropped_when_it_would_crowd_the_title() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let state = AppState::new("build", false);
+
+        let mut narrow = Terminal::new(TestBackend::new(15, 3)).unwrap();
+        narrow
+            .draw(|frame| draw(frame, frame.area(), &state))
+            .unwrap();
+        let top_row = narrow.backend().to_string();
+        let title_row = top_row.lines().next().unwrap();
+        assert!(
+            title_row.contains("LOGS") && !title_row.contains("following"),
+            "the follow state is dropped at 15 columns: {title_row}"
+        );
+
+        let mut wide = Terminal::new(TestBackend::new(16, 3)).unwrap();
+        wide.draw(|frame| draw(frame, frame.area(), &state))
+            .unwrap();
+        let top_row = wide.backend().to_string();
+        let title_row = top_row.lines().next().unwrap();
+        assert!(
+            title_row.contains("LOGS") && title_row.contains("● following"),
+            "both fit at 16 columns: {title_row}"
+        );
     }
 
     /// The composition `draw` actually relies on: each row already
