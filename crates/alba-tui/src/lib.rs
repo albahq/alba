@@ -316,13 +316,13 @@ fn dispatch(
             }
         }
         Action::ScrollHalfPageUp => {
-            let rows = (height / 2).max(1);
+            let rows = half_pane(height);
             if let Some(buffer) = selected_buffer_mut(state) {
                 buffer.scroll_up_rows(rows, width);
             }
         }
         Action::ScrollHalfPageDown => {
-            let rows = (height / 2).max(1);
+            let rows = half_pane(height);
             if let Some(buffer) = selected_buffer_mut(state) {
                 buffer.scroll_down_rows(rows, width);
             }
@@ -343,6 +343,17 @@ fn dispatch(
         Action::Mouse(mouse_event) => dispatch_mouse(state, mouse_event, terminal_size),
         Action::None => {}
     }
+}
+
+/// How far `PageUp`/`PageDown` (and `Ctrl-u`/`Ctrl-d`) move the log
+/// pane: half of what it shows, the same distance `less` and vim move
+/// for the same keys, enough to turn a page, little enough to keep a
+/// few lines of context either side of the jump. At least one line, so
+/// a pane too short to halve (or with no pane at all, below the
+/// terminal's own floor) still moves rather than turning the key into a
+/// no-op.
+fn half_pane(height: usize) -> usize {
+    (height / 2).max(1)
 }
 
 /// Copy mode's own hit testing: a click or a drag only means something
@@ -1106,6 +1117,22 @@ mod tests {
         assert!(
             matches!(state.logs["build"].scroll(), logs::Scroll::Following),
             "reaching the tail resumes following"
+        );
+    }
+
+    /// `half_pane` is exercised end to end above at the 80x24 default; this
+    /// pins its floor directly, at the two sizes that actually reach it: a
+    /// terminal just past the minimum, whose 6 content rows halve to 3, and
+    /// one below the minimum, whose content area is empty (no pane at all)
+    /// but never falls to zero, which would make the key a no-op.
+    #[test]
+    fn the_page_distance_is_half_the_panes_own_height() {
+        assert_eq!(half_pane(20), 10, "20 content rows at 80x24");
+        assert_eq!(half_pane(6), 3, "6 content rows at the floor");
+        assert_eq!(
+            half_pane(0),
+            1,
+            "below the floor there is no pane; the key still moves a line"
         );
     }
 
