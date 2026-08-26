@@ -16,7 +16,7 @@
 //! the slicing below goes through [`char`] iteration for exactly that
 //! reason.
 
-use crate::logs::{LogBuffer, Scroll};
+use crate::logs::LogBuffer;
 
 /// A selection over the selected beam's buffer. `anchor` is where the
 /// selection started (`v`, or a mouse-down); `cursor` is where it
@@ -147,60 +147,42 @@ fn slice_chars(text: &str, from: usize, to: usize) -> String {
     text.chars().skip(from).take(to - from).collect()
 }
 
-/// The buffer-absolute index of the first real line the pane's current
-/// scroll window shows for a pane `pane_height` rows tall — the same
-/// `start` [`LogBuffer::view`] computes internally. Used to anchor a
-/// fresh copy-mode selection (`v`) at whatever line is actually on
-/// screen right now, following or paused. Clamped to the buffer's own
-/// last line: a `pane_height` of 0 (the terminal's size could not be
-/// read, or it is below the too-small floor) would otherwise put
-/// `scroll_window`'s `start` one line past the end, anchoring on a line
-/// that does not exist rather than the last one that does.
-pub fn top_visible_line(buffer: &LogBuffer, pane_height: usize) -> usize {
-    scroll_window(buffer, pane_height)
+/// The buffer-absolute index of the first line with a row on screen
+/// (possibly a partial one: the top line cut to its last rows).
+/// Clamped to the buffer's own last line for a zero-height pane.
+pub fn top_visible_line(buffer: &LogBuffer, height: usize, width: usize) -> usize {
+    scroll_window(buffer, height, width)
         .0
         .min(buffer.len().saturating_sub(1))
 }
 
-/// Translates a row inside the log pane's content area (0 at the pane's
-/// own top, growing downward — the same indexing `LogBuffer::view`'s
-/// returned `Vec` uses) into the buffer-absolute line index it shows.
-/// `None` when the row lands on the prepended truncation-marker row
-/// itself (it names no buffer line), or past however many rows the view
-/// actually rendered (a short buffer leaves blank rows below its own
-/// last line). Mouse hit-testing and the selection highlight both go
-/// through this, rather than each re-deriving the scroll window its own
-/// way, so a click always lands on the same line the highlight would
-/// mark there.
-pub fn line_for_pane_row(buffer: &LogBuffer, pane_height: usize, row: usize) -> Option<usize> {
-    let (start, end) = scroll_window(buffer, pane_height);
-    if start == 0 && buffer.truncated() > 0 {
-        if row == 0 {
-            return None;
-        }
-        let real_count = pane_height.saturating_sub(1).min(end);
-        let index = row - 1;
-        (index < real_count).then_some(index)
-    } else {
-        let visible = end - start;
-        (row < visible).then_some(start + row)
-    }
+/// Translates a row of the log pane's content area into the buffer
+/// line it shows and the char index that row starts at, or `None` on
+/// the marker row or below the last rendered row. The mouse hit test
+/// and the highlights both go through this, so a click always lands
+/// on the line the highlight would mark.
+pub fn row_at(
+    buffer: &LogBuffer,
+    height: usize,
+    width: usize,
+    pane_row: usize,
+) -> Option<(usize, usize)> {
+    let rows = buffer.view(height, width);
+    let row = rows.get(pane_row)?;
+    Some((row.line?, row.chars.start))
 }
 
-/// The `(start, end)` line-index window `LogBuffer::view(pane_height)`
-/// draws from, mirroring its private computation exactly — shared by
-/// `top_visible_line`, `line_for_pane_row`, and `state.rs`'s
-/// `sync_copy_scroll` so none of the three can ever disagree about what
-/// is on screen.
-pub fn scroll_window(buffer: &LogBuffer, pane_height: usize) -> (usize, usize) {
-    let offset = match buffer.scroll() {
-        Scroll::Following => 0,
-        Scroll::Paused { offset } => *offset,
-    };
-    let len = buffer.len();
-    let end = len.saturating_sub(offset);
-    let start = end.saturating_sub(pane_height);
-    (start, end)
+/// The `(start, end)` line window `LogBuffer::view` currently draws
+/// from: `start` is the first line with a visible row, `end` one past
+/// the last. `(0, 0)` for an empty view.
+pub fn scroll_window(buffer: &LogBuffer, height: usize, width: usize) -> (usize, usize) {
+    let rows = buffer.view(height, width);
+    let mut lines = rows.iter().filter_map(|row| row.line);
+    match (lines.next(), lines.next_back()) {
+        (Some(first), Some(last)) => (first, last + 1),
+        (Some(only), None) => (only, only + 1),
+        (None, _) => (0, 0),
+    }
 }
 
 const BASE64_ALPHABET: &[u8; 64] =
@@ -418,7 +400,7 @@ mod tests {
                 false,
             );
         }
-        assert_eq!(top_visible_line(&buffer, 3), 7);
+        assert_eq!(top_visible_line(&buffer, 3, 80), 7);
     }
 
     #[test]
@@ -432,11 +414,11 @@ mod tests {
             );
         }
         buffer.scroll_up(4);
-        assert_eq!(top_visible_line(&buffer, 3), 3);
+        assert_eq!(top_visible_line(&buffer, 3, 80), 3);
     }
 
     #[test]
-    fn line_for_pane_row_maps_rows_to_buffer_lines() {
+    fn row_at_maps_rows_to_buffer_lines() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
             buffer.push(
@@ -446,10 +428,10 @@ mod tests {
             );
         }
         // Following, height 3: rows show lines 7, 8, 9.
-        assert_eq!(line_for_pane_row(&buffer, 3, 0), Some(7));
-        assert_eq!(line_for_pane_row(&buffer, 3, 2), Some(9));
+        assert_eq!(row_at(&buffer, 3, 80, 0), Some((7, 0)));
+        assert_eq!(row_at(&buffer, 3, 80, 2), Some((9, 0)));
         assert_eq!(
-            line_for_pane_row(&buffer, 3, 3),
+            row_at(&buffer, 3, 80, 3),
             None,
             "past what the view actually rendered"
         );
@@ -459,7 +441,7 @@ mod tests {
     /// old lines and the view reaches the very top) names no buffer
     /// line: row 0 is the marker, row 1 is the first real line.
     #[test]
-    fn line_for_pane_row_skips_the_truncation_marker() {
+    fn row_at_skips_the_truncation_marker() {
         let mut buffer = LogBuffer::new();
         for index in 0..(crate::logs::MAX_LINES + 5) {
             buffer.push(
@@ -470,7 +452,7 @@ mod tests {
         }
         buffer.scroll_up(crate::logs::MAX_LINES); // paused at the very top
         assert_eq!(
-            line_for_pane_row(&buffer, 4, 0),
+            row_at(&buffer, 4, 80, 0),
             None,
             "row 0 is the marker, not a line"
         );
@@ -479,9 +461,45 @@ mod tests {
         // text, which is why this is 0 rather than 5 (`buffer.lines()`
         // itself starts over at 0 once the oldest 5 lines are dropped).
         assert_eq!(
-            line_for_pane_row(&buffer, 4, 1),
-            Some(0),
+            row_at(&buffer, 4, 80, 1),
+            Some((0, 0)),
             "the first surviving line"
         );
+    }
+
+    /// A wrapped line's second row reports the line and the char it
+    /// starts at, so a click on it lands on the right column.
+    #[test]
+    fn row_at_reports_the_line_and_its_first_char() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("abcdefgh", alba_executors::Stream::Stdout, false);
+        buffer.push("x", alba_executors::Stream::Stdout, false);
+        assert_eq!(row_at(&buffer, 5, 4, 0), Some((0, 0)));
+        assert_eq!(row_at(&buffer, 5, 4, 1), Some((0, 4)));
+        assert_eq!(row_at(&buffer, 5, 4, 2), Some((1, 0)));
+        assert_eq!(row_at(&buffer, 5, 4, 3), None);
+    }
+
+    /// A selection across a wrap boundary is the same text as unwrapped.
+    #[test]
+    fn a_selection_across_a_wrap_boundary_reads_the_logical_line() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("abcdefgh", alba_executors::Stream::Stdout, false);
+        let selection = CopyState {
+            anchor: (0, 2),
+            cursor: (0, 5),
+        };
+        assert_eq!(selection.selected_text(&buffer), "cdef");
+    }
+
+    /// The window is in lines, its top the first line with a visible row.
+    #[test]
+    fn scroll_window_starts_at_the_first_partly_visible_line() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("aaaaaaaa", alba_executors::Stream::Stdout, false);
+        buffer.push("bb", alba_executors::Stream::Stdout, false);
+        assert_eq!(scroll_window(&buffer, 2, 4), (0, 2));
+        assert_eq!(top_visible_line(&buffer, 2, 4), 0);
+        assert_eq!(scroll_window(&buffer, 1, 4), (1, 2));
     }
 }

@@ -149,6 +149,10 @@ pub struct AppState {
     /// and `AppState` otherwise has no way to learn, never touching the
     /// terminal itself.
     pane_height: usize,
+    /// The log pane's current content width, refreshed alongside
+    /// `pane_height` — wrapping needs it for the same reason the height
+    /// does: it decides which rows a line actually renders as.
+    pane_width: usize,
 }
 
 /// How long a copy result stays in the bottom bar once shown — long
@@ -219,6 +223,7 @@ impl AppState {
             user_cancelled: false,
             waiting_seen: false,
             pane_height: 0,
+            pane_width: 0,
         }
     }
 
@@ -395,8 +400,9 @@ impl AppState {
     /// Refreshed by `lib::dispatch` before every action — the one piece
     /// of screen geometry copy mode's keyboard flow needs and `AppState`
     /// has no other way to learn, since it never touches the terminal.
-    pub fn set_pane_height(&mut self, height: usize) {
+    pub fn set_pane_size(&mut self, height: usize, width: usize) {
         self.pane_height = height;
+        self.pane_width = width;
     }
 
     /// Where a copy attempt's result lands once the composition root
@@ -444,7 +450,7 @@ impl AppState {
         let top_line = self
             .logs
             .get(&beam)
-            .map(|buffer| crate::copy::top_visible_line(buffer, self.pane_height))
+            .map(|buffer| crate::copy::top_visible_line(buffer, self.pane_height, self.pane_width))
             .unwrap_or(0);
         self.mode = Mode::Copy(CopyState::new_at(top_line));
     }
@@ -618,6 +624,7 @@ impl AppState {
     /// from.
     fn sync_copy_scroll(&mut self, cursor_line: usize) {
         let pane_height = self.pane_height;
+        let width = self.pane_width;
         if pane_height == 0 {
             return;
         }
@@ -629,22 +636,13 @@ impl AppState {
             return;
         }
         let len = buffer.len();
-        let (start, end) = crate::copy::scroll_window(buffer, pane_height);
+        let (start, end) = crate::copy::scroll_window(buffer, pane_height, width);
         if cursor_line < start {
-            // Bring the cursor to the top of the view.
-            let target_offset = len.saturating_sub(cursor_line + pane_height);
-            buffer.follow_tail();
-            // `scroll_up` unconditionally switches to `Paused` even for
-            // `by: 0` (`LogBuffer::scroll_up`), so calling it with an
-            // offset of exactly 0 would leave the buffer `Paused {
-            // offset: 0 }` — indistinguishable from `Following` right
-            // now, but *not* auto-following: `push` only increments a
-            // `Paused` offset, so a beam that keeps producing output
-            // after the cursor reaches the tail would drift one line
-            // behind it per pushed line. `follow_tail` alone already is
-            // the offset-0 case; skip the redundant (and harmful) call.
-            if target_offset > 0 {
-                buffer.scroll_up(target_offset);
+            for _ in 0..len {
+                buffer.scroll_up(1);
+                if crate::copy::scroll_window(buffer, pane_height, width).0 <= cursor_line {
+                    break;
+                }
             }
         } else if cursor_line >= end {
             // Bring the cursor to the bottom of the view — same
@@ -680,6 +678,7 @@ impl AppState {
         &mut self,
         kind: MouseEventKind,
         pane_height: usize,
+        pane_width: usize,
         pane_row: usize,
         pane_col: usize,
     ) {
@@ -690,19 +689,19 @@ impl AppState {
             return;
         }
         let beam = self.displayed_log_key();
-        let Some(line) = self
+        let Some((line, column_offset)) = self
             .logs
             .get(&beam)
-            .and_then(|buffer| crate::copy::line_for_pane_row(buffer, pane_height, pane_row))
+            .and_then(|buffer| crate::copy::row_at(buffer, pane_height, pane_width, pane_row))
         else {
             return;
         };
         let Mode::Copy(mut copy) = std::mem::replace(&mut self.mode, Mode::Normal) else {
             unreachable!("checked above")
         };
-        copy.cursor = (line, pane_col);
+        copy.cursor = (line, column_offset + pane_col);
         if matches!(kind, MouseEventKind::Down(_)) {
-            copy.anchor = (line, pane_col);
+            copy.anchor = (line, column_offset + pane_col);
         }
         self.mode = Mode::Copy(copy);
     }
@@ -1855,7 +1854,7 @@ mod tests {
 
         assert_eq!(search_state(&state).current_line(), Some(0));
         let buffer = state.logs.get("build").unwrap();
-        let view = buffer.view(5);
+        let view = buffer.view(5, 80);
         assert_eq!(
             view.last().map(|row| row.text.as_str()),
             Some("ERROR here"),
@@ -1926,7 +1925,7 @@ mod tests {
         for line in ["alpha", "bravo", "charlie"] {
             state.apply(&output("build", line), now);
         }
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
         state.enter_copy(); // anchors at (0, 0): all 3 lines fit, following
 
         state.handle_modal_key(char_key('l'));
@@ -1959,7 +1958,7 @@ mod tests {
         for line in ["alpha", "bravo", "charlie"] {
             state.apply(&output("build", line), now);
         }
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
         state.enter_copy();
         state.handle_modal_key(char_key('j'));
         state.handle_modal_key(char_key('l'));
@@ -1988,7 +1987,7 @@ mod tests {
         state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
         state.apply(&output("build", "alpha"), now);
         state.apply(&output("build", "bravo"), now);
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
         state.enter_copy(); // anchors at (0, 0)
         state.handle_modal_key(char_key('l')); // cursor -> (0, 1)
 
@@ -2017,7 +2016,7 @@ mod tests {
         for index in 0..30 {
             state.apply(&output("build", &format!("line {index}")), now);
         }
-        state.set_pane_height(5);
+        state.set_pane_size(5, 80);
 
         state.enter_copy();
         assert_eq!(
@@ -2031,7 +2030,7 @@ mod tests {
         state.handle_modal_key(char_key('k'));
         assert_eq!(cursor(&state), (24, 0));
         assert_eq!(
-            state.logs.get("build").unwrap().view(5)[0].text,
+            state.logs.get("build").unwrap().view(5, 80)[0].text,
             "line 24",
             "the cursor's line is now the top of the view"
         );
@@ -2043,7 +2042,7 @@ mod tests {
         }
         assert_eq!(cursor(&state), (29, 0), "clamped to the last line");
         let buffer = state.logs.get("build").unwrap();
-        let view = buffer.view(5);
+        let view = buffer.view(5, 80);
         assert_eq!(
             view.last().map(|row| row.text.as_str()),
             Some("line 29"),
@@ -2062,7 +2061,7 @@ mod tests {
         // the cursor reaches the tail must have the pane keep following
         // it, not silently drift one line behind per pushed line.
         state.apply(&output("build", "line 30"), Instant::now());
-        let view_after_push = state.logs.get("build").unwrap().view(5);
+        let view_after_push = state.logs.get("build").unwrap().view(5, 80);
         assert_eq!(
             view_after_push.last().map(|row| row.text.as_str()),
             Some("line 30"),
@@ -2086,7 +2085,7 @@ mod tests {
             },
             now,
         );
-        state.set_pane_height(10);
+        state.set_pane_size(10, 80);
 
         state.enter_copy();
         assert_eq!(cursor(&state), (0, 0));

@@ -8,7 +8,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::logs::{Row, Scroll};
+use crate::logs::{LogBuffer, Row, Scroll};
 use crate::state::{AppState, Mode, Phase};
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -48,11 +48,11 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
             .map(|committed| committed.search.query.as_str()),
     };
     let rows_shown = buffer
-        .map(|buffer| buffer.view(body_height))
+        .map(|buffer| buffer.view(body_height, rows[1].width as usize))
         .unwrap_or_default();
     let lines: Vec<Line> = rows_shown
         .iter()
-        .map(|row| styled_line(row, &state.mode, query))
+        .map(|row| styled_line(row, &state.mode, query, full_line_text(buffer, row.line)))
         .collect();
     frame.render_widget(Paragraph::new(lines), rows[1]);
 
@@ -70,12 +70,40 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(footer), rows[2]);
 }
 
+/// The whole logical line's plain text a row belongs to (`None` for the
+/// truncation marker, which names no line, or when there is no buffer
+/// to look it up in). Search and the copy highlight both need the full
+/// line rather than just this row's own slice, so a match or a
+/// selection is found in the line's own coordinates and then clipped to
+/// this row by `within` — the same line looked up the same way whether
+/// it wrapped into one row or several.
+fn full_line_text(buffer: Option<&LogBuffer>, line: Option<usize>) -> Option<&str> {
+    buffer
+        .zip(line)
+        .and_then(|(buffer, line)| buffer.lines().nth(line))
+        .map(|line| line.text.as_str())
+}
+
+/// A `(from, to)` inclusive char range of the whole line, as the same
+/// range inside `row`, or `None` when the two do not overlap.
+fn within(row: &Row, from: usize, to: usize) -> Option<(usize, usize)> {
+    let start = row.chars.start;
+    let end = row.chars.end; // exclusive
+    if end == 0 || to < start || from >= end {
+        return None;
+    }
+    Some((from.max(start) - start, to.min(end - 1) - start))
+}
+
 /// The style a single rendered row gets: copy mode's selection highlight
 /// when the row's own buffer-absolute line (`row.line`, `None` for the
 /// truncation marker) falls inside the selection's covered span
 /// (`covers_line`), the committed search's highlight otherwise. Copy
 /// mode takes priority on whichever rows it covers: the two are not
-/// meant to be shown blended.
+/// meant to be shown blended. Both spans are computed over the whole
+/// logical line (`full_line`) and clipped to this row by `within`, so a
+/// match or a selection that crosses a wrap boundary still lights up
+/// correctly on each of the rows it spans.
 ///
 /// Starts from the row's own spans — carrying whatever colour ANSI
 /// parsing already gave the line — and patches a reversed style over
@@ -88,21 +116,31 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
 /// styles entirely and so cannot tell a covered row from an uncovered
 /// one; an off-by-one in this wiring would pass every existing snapshot
 /// silently.
-fn styled_line(row: &Row, mode: &Mode, query: Option<&str>) -> Line<'static> {
+fn styled_line(
+    row: &Row,
+    mode: &Mode,
+    query: Option<&str>,
+    full_line: Option<&str>,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = row
         .spans
         .iter()
         .map(|(style, content)| Span::styled(content.clone(), *style))
         .collect();
+    let full_text = full_line.unwrap_or(&row.text);
     if let (Mode::Copy(selection), Some(line)) = (mode, row.line) {
-        let covered = selection.covers_line(line, row.text.chars().count());
+        let covered = selection
+            .covers_line(line, full_text.chars().count())
+            .and_then(|(from, to)| within(row, from, to));
         if let Some((from, to)) = covered {
             return Line::from(patch(spans, from, to, Style::new().reversed()));
         }
     }
     if let Some(query) = query.filter(|query| !query.is_empty()) {
-        for (from, to) in match_ranges(&row.text, query) {
-            spans = patch(spans, from, to, Style::new().reversed());
+        for (from, to) in match_ranges(full_text, query) {
+            if let Some((from, to)) = within(row, from, to) {
+                spans = patch(spans, from, to, Style::new().reversed());
+            }
         }
     }
     Line::from(spans)
@@ -193,9 +231,9 @@ mod tests {
         let body_height = 4; // all four lines fit: row index == line index
 
         let rows: Vec<Line> = buffer
-            .view(body_height)
+            .view(body_height, 80)
             .iter()
-            .map(|row| styled_line(row, &mode, None))
+            .map(|row| styled_line(row, &mode, None, full_line_text(Some(&buffer), row.line)))
             .collect();
 
         assert_eq!(rows[0], Line::from("alpha"), "before the span: unstyled");
@@ -227,7 +265,7 @@ mod tests {
             spans: vec![(Style::default(), "Compiling api".to_string())],
             text: "Compiling api".to_string(),
         };
-        let line = styled_line(&row, &Mode::Normal, Some("api"));
+        let line = styled_line(&row, &Mode::Normal, Some("api"), None);
         assert_eq!(
             line,
             Line::from(vec![

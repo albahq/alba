@@ -19,6 +19,7 @@ use std::ops::Range;
 use alba_executors::Stream;
 use ansi_to_tui::IntoText;
 use ratatui::style::Style;
+use unicode_width::UnicodeWidthChar;
 
 /// The memory bound a day-long watch session relies on.
 pub const MAX_LINES: usize = 10_000;
@@ -71,14 +72,68 @@ impl Row {
         }
     }
 
-    fn whole(index: usize, line: &LogLine) -> Self {
+    fn slice(index: usize, line: &LogLine, chars: Range<usize>) -> Self {
+        let text: String = line
+            .text
+            .chars()
+            .skip(chars.start)
+            .take(chars.len())
+            .collect();
+        let mut spans = Vec::new();
+        let mut at = 0;
+        for (style, content) in &line.spans {
+            let len = content.chars().count();
+            let (span_start, span_end) = (at, at + len);
+            at = span_end;
+            let from = chars.start.max(span_start);
+            let to = chars.end.min(span_end);
+            if from < to {
+                let piece: String = content
+                    .chars()
+                    .skip(from - span_start)
+                    .take(to - from)
+                    .collect();
+                spans.push((*style, piece));
+            }
+        }
+        if spans.is_empty() {
+            spans.push((Style::default(), String::new()));
+        }
         Self {
             line: Some(index),
-            chars: 0..line.text.chars().count(),
-            spans: line.spans.clone(),
-            text: line.text.clone(),
+            chars,
+            spans,
+            text,
         }
     }
+}
+
+/// The char ranges of `text` that fit `width` cells each, by rendered
+/// width (a `⚡` counts two). Width 0 means "do not wrap". An empty
+/// line is one empty row, so it still occupies a row on screen.
+// A single `0..count` here is a genuine one-row result, matching the
+// `Vec<Range<usize>>` every other branch returns — not the "meant to
+// collect the range's own values" case clippy's lint is meant to catch.
+#[allow(clippy::single_range_in_vec_init)]
+fn wrap_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
+    let count = text.chars().count();
+    if width == 0 || count == 0 {
+        return vec![0..count];
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut used = 0;
+    for (index, c) in text.chars().enumerate() {
+        let cells = c.width().unwrap_or(0).max(if c == '\t' { 1 } else { 0 });
+        if used + cells > width && index > start {
+            ranges.push(start..index);
+            start = index;
+            used = 0;
+        }
+        used += cells;
+    }
+    ranges.push(start..count);
+    ranges
 }
 
 /// Splits `raw` into plain text and styled spans. Only SGR sequences
@@ -277,41 +332,76 @@ impl LogBuffer {
         self.scroll = Scroll::Following;
     }
 
-    /// The window of lines a pane of `height` rows shows, honoring the
-    /// scroll state. When the window reaches the top of a truncated
-    /// buffer, the marker `"… N older lines truncated"` is prepended as
-    /// an extra row rather than substituted for one, so the reader is
-    /// told without a real line being lost: the window then carries
-    /// `height - 1` real lines plus the marker.
-    pub fn view(&self, height: usize) -> Vec<Row> {
-        let len = self.lines.len();
+    /// The rows a pane of `height` by `width` shows, honoring the scroll
+    /// state: the last `height` rows of the lines up to the tail minus
+    /// the paused offset, the top line cut to its last rows when it does
+    /// not fit whole. When line 0's first row is in view and lines were
+    /// dropped past the cap, the marker `"… N older lines truncated"`
+    /// is prepended as a row of its own, displacing the bottom row.
+    pub fn view(&self, height: usize, width: usize) -> Vec<Row> {
+        if height == 0 {
+            return Vec::new();
+        }
         let offset = match self.scroll {
             Scroll::Following => 0,
             Scroll::Paused { offset } => offset,
         };
-        let end = len.saturating_sub(offset);
-        let start = end.saturating_sub(height);
-
-        if start == 0 && self.truncated > 0 {
-            let real_count = height.saturating_sub(1).min(end);
-            std::iter::once(Row::marker(self.truncated))
-                .chain(
-                    self.lines
-                        .iter()
-                        .take(real_count)
-                        .enumerate()
-                        .map(|(index, line)| Row::whole(index, line)),
-                )
-                .collect()
-        } else {
-            self.lines
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(end - start)
-                .map(|(index, line)| Row::whole(index, line))
-                .collect()
+        let end = self.lines.len().saturating_sub(offset);
+        let mut rows: VecDeque<Row> = VecDeque::with_capacity(height);
+        let mut line = end;
+        while line > 0 && rows.len() < height {
+            line -= 1;
+            let text = &self.lines[line];
+            for range in wrap_ranges(&text.text, width).into_iter().rev() {
+                if rows.len() == height {
+                    break;
+                }
+                rows.push_front(Row::slice(line, text, range));
+            }
         }
+        let at_top = rows
+            .front()
+            .is_some_and(|row| row.line == Some(0) && row.chars.start == 0);
+        if at_top && self.truncated > 0 {
+            if rows.len() == height {
+                rows.pop_back();
+            }
+            rows.push_front(Row::marker(self.truncated));
+        }
+        rows.into()
+    }
+
+    /// `PgUp`, `Ctrl-u`, the wheel: moves the window up by whole lines
+    /// covering at least `rows` rendered rows, so a page never lands
+    /// mid-line and always travels at least as far as asked.
+    pub fn scroll_up_rows(&mut self, rows: usize, width: usize) {
+        let offset = match self.scroll {
+            Scroll::Following => 0,
+            Scroll::Paused { offset } => offset,
+        };
+        let end = self.lines.len().saturating_sub(offset);
+        let mut covered = 0;
+        let mut lines = 0;
+        while end > lines && covered < rows {
+            covered += wrap_ranges(&self.lines[end - lines - 1].text, width).len();
+            lines += 1;
+        }
+        self.scroll_up(lines.max(1));
+    }
+
+    /// The other way; reaching the tail resumes following, as `scroll_down` does.
+    pub fn scroll_down_rows(&mut self, rows: usize, width: usize) {
+        let Scroll::Paused { offset } = self.scroll else {
+            return;
+        };
+        let end = self.lines.len().saturating_sub(offset);
+        let mut covered = 0;
+        let mut lines = 0;
+        while end + lines < self.lines.len() && covered < rows {
+            covered += wrap_ranges(&self.lines[end + lines].text, width).len();
+            lines += 1;
+        }
+        self.scroll_down(lines.max(1));
     }
 }
 
@@ -398,7 +488,7 @@ mod tests {
         let mut buffer = LogBuffer::new();
         buffer.push("a", Stream::Stdout, false);
         buffer.push("\u{1b}[32mb\u{1b}[0m", Stream::Stdout, false);
-        let rows = buffer.view(5);
+        let rows = buffer.view(5, 80);
         assert_eq!(rows[0].line, Some(0));
         assert_eq!(rows[0].chars, 0..1);
         assert_eq!(rows[1].line, Some(1));
@@ -414,7 +504,7 @@ mod tests {
     fn the_marker_row_names_no_line() {
         let mut buffer = filled(MAX_LINES + 5);
         buffer.scroll_up(MAX_LINES);
-        let rows = buffer.view(4);
+        let rows = buffer.view(4, 80);
         assert_eq!(rows[0].line, None);
         assert_eq!(rows[0].text, "… 5 older lines truncated");
         assert_eq!(rows[1].line, Some(0));
@@ -435,7 +525,7 @@ mod tests {
     fn the_view_announces_truncation_at_the_top() {
         let mut buffer = filled(MAX_LINES + 5);
         buffer.scroll_up(MAX_LINES); // all the way to the top
-        let view = buffer.view(4);
+        let view = buffer.view(4, 80);
         assert_eq!(view[0].text, "… 5 older lines truncated");
         assert_eq!(view[1].text, "line 5");
     }
@@ -444,7 +534,7 @@ mod tests {
     #[test]
     fn a_following_buffer_shows_the_tail() {
         let buffer = filled(100);
-        let view = buffer.view(3);
+        let view = buffer.view(3, 80);
         assert_eq!(texts(&view), vec!["line 97", "line 98", "line 99"]);
     }
 
@@ -454,9 +544,9 @@ mod tests {
         let mut buffer = filled(100);
         buffer.scroll_up(10);
         assert!(matches!(buffer.scroll(), Scroll::Paused { offset: 10 }));
-        let pinned = buffer.view(3);
+        let pinned = buffer.view(3, 80);
         buffer.push("line 100".to_string(), Stream::Stdout, false);
-        assert_eq!(buffer.view(3), pinned, "a paused view does not move");
+        assert_eq!(buffer.view(3, 80), pinned, "a paused view does not move");
     }
 
     /// Scrolling back to the bottom resumes following, as does `G`.
@@ -491,7 +581,7 @@ mod tests {
         for index in 0..10 {
             buffer.push(format!("extra {index}"), Stream::Stdout, false);
         }
-        let view = buffer.view(2);
+        let view = buffer.view(2, 80);
         assert_eq!(view[0].text, "… 10 older lines truncated");
     }
 
@@ -508,12 +598,12 @@ mod tests {
         // deque-relative position (the same addressing `copy::CopyState`
         // already uses), so it legitimately shifts by one per truncating
         // push even while the pinned *content* does not move at all.
-        let pinned_rows = buffer.view(5);
+        let pinned_rows = buffer.view(5, 80);
         let pinned = texts(&pinned_rows);
         for index in 0..20 {
             buffer.push(format!("extra {index}"), Stream::Stdout, false); // every push truncates
         }
-        let after_rows = buffer.view(5);
+        let after_rows = buffer.view(5, 80);
         assert_eq!(
             texts(&after_rows),
             pinned,
@@ -524,25 +614,28 @@ mod tests {
     #[test]
     fn a_zero_height_view_shows_nothing() {
         let buffer = filled(10);
-        assert!(buffer.view(0).is_empty());
+        assert!(buffer.view(0, 80).is_empty());
     }
 
     #[test]
     fn a_view_taller_than_the_buffer_shows_only_what_exists() {
         let buffer = filled(3);
-        assert_eq!(texts(&buffer.view(10)), vec!["line 0", "line 1", "line 2"]);
+        assert_eq!(
+            texts(&buffer.view(10, 80)),
+            vec!["line 0", "line 1", "line 2"]
+        );
     }
 
     #[test]
     fn an_empty_buffer_has_an_empty_view() {
         let buffer = LogBuffer::new();
-        assert!(buffer.view(5).is_empty());
+        assert!(buffer.view(5, 80).is_empty());
     }
 
     #[test]
     fn a_single_line_buffer_shows_that_line() {
         let buffer = filled(1);
-        assert_eq!(texts(&buffer.view(3)), vec!["line 0"]);
+        assert_eq!(texts(&buffer.view(3, 80)), vec!["line 0"]);
     }
 
     /// `scroll_up` itself clamps the offset to the top, but `view` must
@@ -551,6 +644,94 @@ mod tests {
     fn a_window_wider_than_the_reachable_history_clamps_to_the_top() {
         let mut buffer = filled(100);
         buffer.scroll_up(1_000); // asks for more than exists above the tail
-        assert_eq!(texts(&buffer.view(200)), vec!["line 0"]);
+        assert_eq!(texts(&buffer.view(200, 80)), vec!["line 0"]);
+    }
+
+    /// A line wider than the pane wraps by character; the rows name the
+    /// same line and consecutive char ranges.
+    #[test]
+    fn a_long_line_wraps_into_consecutive_rows() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("abcdefghij", Stream::Stdout, false);
+        let rows = buffer.view(5, 4);
+        assert_eq!(texts(&rows), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(rows[1].line, Some(0));
+        assert_eq!(rows[1].chars, 4..8);
+        assert_eq!(rows[2].chars, 8..10);
+    }
+
+    /// A double-width char counts two cells, so it never straddles a row.
+    #[test]
+    fn wrapping_counts_rendered_width() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("ab⚡cd", Stream::Stdout, false);
+        assert_eq!(texts(&buffer.view(5, 3)), vec!["ab", "⚡c", "d"]);
+    }
+
+    /// Following shows the last `height` rows, cutting the top line if
+    /// it does not fit whole.
+    #[test]
+    fn following_shows_the_last_rows_even_mid_line() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("aaaaaaaa", Stream::Stdout, false);
+        buffer.push("bb", Stream::Stdout, false);
+        let rows = buffer.view(2, 4);
+        assert_eq!(texts(&rows), vec!["aaaa", "bb"]);
+        assert_eq!(rows[0].chars, 4..8);
+    }
+
+    /// The marker is never wrapped and still displaces the bottom row.
+    ///
+    /// Scrolling up by `MAX_LINES` itself clamps to the very top, where
+    /// only the single oldest surviving line is reachable (see
+    /// `a_window_wider_than_the_reachable_history_clamps_to_the_top`) —
+    /// too little to exercise displacement at all. This pins the offset
+    /// so exactly `height` real lines (indices 0..3) are reachable
+    /// instead, which is what makes the marker's insertion actually
+    /// have to evict the newest of them to keep the row count at
+    /// `height`.
+    #[test]
+    fn the_marker_stays_one_row_at_the_top() {
+        let mut buffer = filled(MAX_LINES + 5);
+        buffer.scroll_up(MAX_LINES - 3);
+        let rows = buffer.view(3, 6);
+        assert_eq!(rows[0].line, None);
+        assert_eq!(texts(&rows)[1..], ["line 5", "line 6"]);
+    }
+
+    /// The offset is in lines: the same line stays pinned at two widths.
+    #[test]
+    fn a_paused_offset_pins_the_same_line_at_any_width() {
+        let mut buffer = filled(100);
+        buffer.scroll_up(10);
+        let narrow = buffer.view(3, 4);
+        let wide = buffer.view(3, 80);
+        assert_eq!(narrow.last().unwrap().line, wide.last().unwrap().line);
+        assert_eq!(wide.last().unwrap().text, "line 89");
+    }
+
+    /// An empty line is one empty row; width 0 never wraps.
+    #[test]
+    fn empty_lines_and_zero_width_are_one_row() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("", Stream::Stdout, false);
+        buffer.push("abc", Stream::Stdout, false);
+        assert_eq!(texts(&buffer.view(5, 2)), vec!["", "ab", "c"]);
+        assert_eq!(texts(&buffer.view(5, 0)), vec!["", "abc"]);
+    }
+
+    /// Row scrolling moves by whole lines, at least as far as asked.
+    #[test]
+    fn row_scrolling_rounds_toward_the_direction_of_travel() {
+        let mut buffer = LogBuffer::new();
+        for _ in 0..5 {
+            buffer.push("aaaaaaaa", Stream::Stdout, false); // 2 rows each at width 4
+        }
+        buffer.scroll_up_rows(3, 4); // 3 rows up: covers 2 lines
+        assert!(matches!(buffer.scroll(), Scroll::Paused { offset: 2 }));
+        buffer.scroll_down_rows(1, 4); // 1 row down: one whole line
+        assert!(matches!(buffer.scroll(), Scroll::Paused { offset: 1 }));
+        buffer.scroll_down_rows(1, 4);
+        assert!(matches!(buffer.scroll(), Scroll::Following));
     }
 }

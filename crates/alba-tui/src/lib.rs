@@ -244,9 +244,13 @@ fn dispatch(
 ) {
     // Refreshed before every action: `EnterCopy`'s anchor and copy
     // mode's keyboard-driven scroll-follow both need to know the log
-    // pane's current content height, and this is the one place that
+    // pane's current content geometry, and this is the one place that
     // reaches the terminal size to compute it.
-    state.set_pane_height(log_pane_height(terminal_size));
+    let pane = ui::log_pane_content_area(terminal_size.width, terminal_size.height);
+    let (height, width) = pane
+        .map(|area| (area.height as usize, area.width as usize))
+        .unwrap_or((0, 0));
+    state.set_pane_size(height, width);
     match action {
         Action::Quit => {
             // Quitting on a run in flight abandons it: its summary,
@@ -300,26 +304,26 @@ fn dispatch(
         }
         Action::SelectNext => state.select_next(),
         Action::SelectPrevious => state.select_previous(),
-        Action::ScrollUp(lines) => {
+        Action::ScrollUp(rows) => {
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up(lines);
+                buffer.scroll_up_rows(rows, width);
             }
         }
-        Action::ScrollDown(lines) => {
+        Action::ScrollDown(rows) => {
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down(lines);
+                buffer.scroll_down_rows(rows, width);
             }
         }
         Action::ScrollHalfPageUp => {
-            let lines = half_pane(terminal_size);
+            let rows = (height / 2).max(1);
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up(lines);
+                buffer.scroll_up_rows(rows, width);
             }
         }
         Action::ScrollHalfPageDown => {
-            let lines = half_pane(terminal_size);
+            let rows = (height / 2).max(1);
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down(lines);
+                buffer.scroll_down_rows(rows, width);
             }
         }
         Action::FollowTail => {
@@ -368,22 +372,13 @@ fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) 
     }
     let pane_row = (mouse.row - area.y) as usize;
     let pane_col = (mouse.column - area.x) as usize;
-    state.handle_mouse(mouse.kind, area.height as usize, pane_row, pane_col);
-}
-
-/// How far `PageUp`/`PageDown` (and `Ctrl-u`/`Ctrl-d`) move the log
-/// pane: half of what it shows, the same distance `less` and vim move
-/// for the same keys — enough to turn a page, little enough to keep a
-/// few lines of context either side of the jump. At least one line, so
-/// a pane too short to halve still moves.
-fn half_pane(terminal_size: Size) -> usize {
-    (log_pane_height(terminal_size) / 2).max(1)
-}
-
-fn log_pane_height(terminal_size: Size) -> usize {
-    ui::log_pane_content_area(terminal_size.width, terminal_size.height)
-        .map(|area| area.height as usize)
-        .unwrap_or(0)
+    state.handle_mouse(
+        mouse.kind,
+        area.height as usize,
+        area.width as usize,
+        pane_row,
+        pane_col,
+    );
 }
 
 /// The selected beam's buffer, created on demand — scrolling a beam that
@@ -1110,25 +1105,6 @@ mod tests {
         assert!(
             matches!(state.logs["build"].scroll(), logs::Scroll::Following),
             "reaching the tail resumes following"
-        );
-    }
-
-    /// The distance follows the pane it moves — half of whatever the log
-    /// pane actually shows — and never falls to zero, which would make
-    /// the key a no-op on a terminal below the too-small floor (no pane
-    /// at all, so no height to halve).
-    #[test]
-    fn the_page_distance_is_half_the_panes_own_height() {
-        assert_eq!(half_pane(size()), 10, "20 content rows at 80x24");
-        assert_eq!(
-            half_pane(Size::new(40, 10)),
-            3,
-            "6 content rows at the floor"
-        );
-        assert_eq!(
-            half_pane(Size::new(10, 4)),
-            1,
-            "below the floor there is no pane; the key still moves a line"
         );
     }
 

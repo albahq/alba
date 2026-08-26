@@ -1,0 +1,28 @@
+---
+source: crates/alba-tui/tests/render.rs
+expression: "drawn(&state, 80, 24)"
+---
+"┌─ alba · run build ── ▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 0/1 · 0.0s ──────────────────────────────┐"
+"│BEAMS                         │logs · build                                   │"
+"│ ▶ build                 0.0s…│xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx│"
+"│                              │xxxxxxxxxxxxx                                  │"
+"│                              │tail                                           │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│                              │                                               │"
+"│✔ 0  ⚡ 0  ✖ 0  ○ 0           │● following                                    │" Hidden by multi-width symbols: [(7, " ")]
+"└─ q quit · r rerun · f force · t target · c cancel · w watch · n/N step ──────┘"
