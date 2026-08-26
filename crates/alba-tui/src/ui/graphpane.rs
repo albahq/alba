@@ -80,7 +80,7 @@ fn draw_node_row(
     }
 }
 
-/// The node's status colour, reversed on the focused node — pulled out
+/// The node's status colour, reversed on the focused node, pulled out
 /// of `draw_node_row` so it can be pinned by a unit test directly.
 /// `TestBackend::to_string()` drops styles entirely, so neither the
 /// colour nor the reversed span would move a render snapshot whether or
@@ -290,7 +290,7 @@ mod tests {
     }
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
-    /// cannot tell a focused node from any other, nor its status colour —
+    /// cannot tell a focused node from any other, nor its status colour:
     /// this is what actually pins both, the same reason `ui/logpane.rs`
     /// has its own unit test over `styled_line` rather than trusting a
     /// snapshot.

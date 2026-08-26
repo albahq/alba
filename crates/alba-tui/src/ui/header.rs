@@ -105,7 +105,6 @@ fn finished_line(target: &str, summary: &RunSummary, colour: bool) -> Line<'stat
 mod tests {
     use super::*;
     use alba_core::BeamId;
-    use alba_engine::RunSummary;
     use ratatui::style::{Color, Style};
     use std::time::Duration;
 
@@ -178,7 +177,7 @@ mod tests {
 
     /// `TestBackend::to_string()` (the render snapshots) drops styles, so
     /// this is what actually proves the bar, the outcome, and the parked
-    /// text reach their colour functions with `state.colour` — the
+    /// text reach their colour functions with `state.colour`; the
     /// colour-to-status mapping itself is `theme.rs`'s own to pin.
     #[test]
     fn colour_reaches_the_bar_the_outcome_and_the_parked_spans() {

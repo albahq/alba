@@ -156,8 +156,8 @@ pub struct AppState {
     /// terminal itself.
     pane_height: usize,
     /// The log pane's current content width, refreshed alongside
-    /// `pane_height` — wrapping needs it for the same reason the height
-    /// does: it decides which rows a line actually renders as.
+    /// `pane_height`, since wrapping needs it for the same reason the
+    /// height does: it decides which rows a line actually renders as.
     pane_width: usize,
 }
 

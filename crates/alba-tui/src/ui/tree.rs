@@ -88,7 +88,7 @@ fn row_line(
     Line::from(spans)
 }
 
-/// The name column's text for now — truncation to fit `width` is a
+/// The name column's text for now: truncation to fit `width` is a
 /// later task's job.
 fn fit_name(id: &str, _width: usize) -> String {
     id.to_string()
@@ -143,7 +143,7 @@ fn duration_text(state: &BeamState, now: Instant) -> String {
 }
 
 /// The four buckets a beam can settle into, each `glyph count` pair
-/// styled by `status_style` of a representative state for that bucket —
+/// styled by `status_style` of a representative state for that bucket:
 /// the same colour the tree's own rows would show that status in.
 fn counts_line(state: &AppState) -> Line<'static> {
     let mut succeeded = 0;

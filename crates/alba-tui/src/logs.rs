@@ -1,6 +1,6 @@
 //! Per-beam log storage: a bounded ring buffer with a following viewport.
 //!
-//! Each line is kept three ways — see [`LogLine`] — with the ANSI parsing
+//! Each line is kept three ways (see [`LogLine`]), with the ANSI parsing
 //! done once, at [`LogBuffer::push`], rather than on every render.
 //!
 //! A day-long watch session can produce unbounded output, so the buffer
@@ -112,7 +112,7 @@ impl Row {
 /// width (a `⚡` counts two). Width 0 means "do not wrap". An empty
 /// line is one empty row, so it still occupies a row on screen.
 // A single `0..count` here is a genuine one-row result, matching the
-// `Vec<Range<usize>>` every other branch returns — not the "meant to
+// `Vec<Range<usize>>` every other branch returns, not the "meant to
 // collect the range's own values" case clippy's lint is meant to catch.
 #[allow(clippy::single_range_in_vec_init)]
 fn wrap_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
@@ -163,9 +163,9 @@ fn parse(raw: &str) -> (String, Vec<(Style, String)>) {
 
 /// `ansi-to-tui` represents an SGR reset (`\x1b[0m`, or resetting just
 /// one channel like `\x1b[39m`) as an explicit `Color::Reset` rather
-/// than `None`, plus a populated `sub_modifier` — a bookkeeping field
+/// than `None`, plus a populated `sub_modifier` (a bookkeeping field
 /// `patch` uses to compose styles, never read when a `Style` is
-/// actually rendered. Left alone, a fully reset span would carry a
+/// actually rendered). Left alone, a fully reset span would carry a
 /// `Style` that renders identically to but does not `==`
 /// [`Style::default`], which would both surprise a test asserting
 /// equality and, later, confuse `logpane::patch`'s own use of
@@ -684,7 +684,7 @@ mod tests {
     ///
     /// Scrolling up by `MAX_LINES` itself clamps to the very top, where
     /// only the single oldest surviving line is reachable (see
-    /// `a_window_wider_than_the_reachable_history_clamps_to_the_top`) —
+    /// `a_window_wider_than_the_reachable_history_clamps_to_the_top`),
     /// too little to exercise displacement at all. This pins the offset
     /// so exactly `height` real lines (indices 0..3) are reachable
     /// instead, which is what makes the marker's insertion actually

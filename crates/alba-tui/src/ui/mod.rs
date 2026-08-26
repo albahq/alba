@@ -55,7 +55,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // own border, exactly as the spec's mockup draws them
     // (`┌─ alba · run build ── ... ─┐` / `└─ q quit · ... ─┘`): a
     // leading `─ ` and trailing ` ` are baked into the title itself so
-    // the block's own border fill supplies the rest of the dashes —
+    // the block's own border fill supplies the rest of the dashes,
     // wrapped around the header's and the bar's own spans rather than
     // their plain text, so the colour underneath survives into the
     // border's title.

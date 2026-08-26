@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
             .map(|committed| committed.search.query.as_str()),
     };
     // `styled_line` needs a real buffer to look up a row's own line (for
-    // the dimmed-stderr check and the full-line text search/copy need) —
+    // the dimmed-stderr check and the full-line text search/copy need),
     // harmless to require, since a `None` buffer never produces a row to
     // begin with (`rows_shown` is empty).
     let lines: Vec<Line> = match buffer {
@@ -81,7 +81,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
 /// truncation marker, which names no line). Search and the copy
 /// highlight both need the full line's text rather than just this row's
 /// own slice, so a match or a selection is found in the line's own
-/// coordinates and then clipped to this row by `within` — the same line
+/// coordinates and then clipped to this row by `within`, the same line
 /// looked up the same way whether it wrapped into one row or several;
 /// the dimmed-stderr check reads the same line's `stream` off it.
 fn full_line(buffer: &LogBuffer, line: Option<usize>) -> Option<&LogLine> {
@@ -109,12 +109,12 @@ fn within(row: &Row, from: usize, to: usize) -> Option<(usize, usize)> {
 /// match or a selection that crosses a wrap boundary still lights up
 /// correctly on each of the rows it spans.
 ///
-/// Starts from the row's own spans — carrying whatever colour ANSI
-/// parsing already gave the line — and patches a reversed style over
+/// Starts from the row's own spans, carrying whatever colour ANSI
+/// parsing already gave the line, and patches a reversed style over
 /// the covered or matched range on top, so a search hit inside a
 /// coloured `error` stays red as well as reversed.
 ///
-/// Before either highlight, plain stderr (no colour of its own — an
+/// Before either highlight, plain stderr (no colour of its own: an
 /// ordinary `warning: ...`, never a line ANSI already coloured) is
 /// dimmed, off when `colour` is off: the same visual cue the CLI's
 /// headless renderers give stderr, so a beam's error output stands apart
@@ -325,7 +325,7 @@ mod tests {
     }
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
-    /// cannot pin this — a unit test over `match_ranges` is what
+    /// cannot pin this: a unit test over `match_ranges` is what
     /// actually verifies every occurrence of a query gets found.
     #[test]
     fn match_ranges_finds_every_occurrence_case_insensitively() {
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// `TestBackend::to_string()` drops styles the same way it does for
-    /// search — this unit test over `patch` is what actually pins the
+    /// search: this unit test over `patch` is what actually pins the
     /// reversed style; the snapshot in `tests/render.rs` pins layout and
     /// the bottom bar instead.
     #[test]
@@ -369,7 +369,7 @@ mod tests {
         );
     }
 
-    /// Splitting must slice by character index, not byte offset — a
+    /// Splitting must slice by character index, not byte offset: a
     /// multi-byte character split at the wrong boundary would panic.
     #[test]
     fn patch_does_not_panic_on_multibyte_characters_and_splits_by_char() {
