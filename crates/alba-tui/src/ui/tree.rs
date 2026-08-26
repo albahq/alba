@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use alba_engine::BeamStatus;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::state::{AppState, BeamRow, BeamState};
 
@@ -73,12 +74,17 @@ fn row_line(
     // row's duration a column further right than the others.
     let name_width = width.saturating_sub(2 + glyph_width(glyph) + DURATION_WIDTH);
     let name = fit_name(&row.id, name_width);
+    // Pad by the name's *rendered* width, not its char count: a wide
+    // character makes those two diverge, and padding by char count would
+    // push the duration out of its column exactly the way an untruncated
+    // wide name would.
+    let pad = name_width.saturating_sub(name.width());
     let mut spans = vec![
         Span::styled(
             format!(" {glyph}"),
             super::theme::status_style(&row.state, colour),
         ),
-        Span::raw(format!(" {name:<name_width$}{duration:>DURATION_WIDTH$}")),
+        Span::raw(format!(" {name}{:pad$}{duration:>DURATION_WIDTH$}", "")),
     ];
     if selected {
         for span in &mut spans {
@@ -88,19 +94,30 @@ fn row_line(
     Line::from(spans)
 }
 
-/// `id` cut to `width` cells with a trailing `…` when it does not fit,
-/// so the duration column stays where it is. Beam ids are ASCII
-/// identifiers joined by `:`, so chars are cells here.
+/// `id` cut to fit `width` rendered cells, with a trailing `…` when it
+/// does not, so the duration column stays where it is. Beam ids may
+/// contain any Unicode alphanumeric character (`alba-syntax`'s
+/// `scan_ident` does not restrict them to ASCII), and a wide one paints
+/// two cells, so this budgets by display width rather than char count.
 fn fit_name(id: &str, width: usize) -> String {
-    if id.chars().count() <= width {
+    if id.width() <= width {
         return id.to_string();
     }
-    let kept: String = id.chars().take(width.saturating_sub(1)).collect();
     if width == 0 {
-        String::new()
-    } else {
-        format!("{kept}…")
+        return String::new();
     }
+    let budget = width - 1; // reserve one cell for the ellipsis
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in id.chars() {
+        let cell = c.width().unwrap_or(0);
+        if used + cell > budget {
+            break;
+        }
+        kept.push(c);
+        used += cell;
+    }
+    format!("{kept}…")
 }
 
 /// The glyph's width in terminal cells. Hardcoded rather than pulled
@@ -248,5 +265,49 @@ mod tests {
         assert_eq!(fit_name("build", 19), "build");
         assert_eq!(fit_name("abc", 0), "");
         assert_eq!(fit_name("abc", 1), "…");
+    }
+
+    #[test]
+    fn a_name_exactly_as_wide_as_its_column_is_unchanged() {
+        assert_eq!(fit_name("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn a_name_one_cell_over_its_column_is_truncated() {
+        assert_eq!(fit_name("abcdef", 5), "abcd…");
+    }
+
+    /// Beam ids may contain wide (double-cell) characters (`scan_ident`
+    /// in `alba-syntax` is not ASCII-only), so `fit_name` budgets by
+    /// display width: 5 wide chars (10 cells) truncated to 7 keeps only
+    /// as many whole wide chars as fit alongside the ellipsis.
+    #[test]
+    fn a_wide_character_name_is_truncated_by_display_width_not_char_count() {
+        assert_eq!(fit_name("国国国国国", 7), "国国国…");
+    }
+
+    /// A wide-character name never pushes the duration out of its
+    /// column: the padding after a truncated name accounts for the
+    /// name's rendered width, not its char count.
+    #[test]
+    fn a_wide_character_row_still_leaves_the_duration_in_its_column() {
+        let row = BeamRow {
+            id: "国".repeat(10),
+            state: BeamState::Done {
+                status: BeamStatus::Succeeded,
+                duration: Duration::from_millis(1200),
+            },
+        };
+        let line = row_line(&row, Instant::now(), 30, false, false);
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            rendered.width(),
+            30,
+            "the row fills its column, no wider and no narrower"
+        );
+        assert!(
+            rendered.ends_with(&format!("{:>DURATION_WIDTH$}", "1.2s")),
+            "the duration keeps its place at the end: {rendered:?}"
+        );
     }
 }
