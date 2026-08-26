@@ -88,10 +88,19 @@ fn row_line(
     Line::from(spans)
 }
 
-/// The name column's text for now: truncation to fit `width` is a
-/// later task's job.
-fn fit_name(id: &str, _width: usize) -> String {
-    id.to_string()
+/// `id` cut to `width` cells with a trailing `…` when it does not fit,
+/// so the duration column stays where it is. Beam ids are ASCII
+/// identifiers joined by `:`, so chars are cells here.
+fn fit_name(id: &str, width: usize) -> String {
+    if id.chars().count() <= width {
+        return id.to_string();
+    }
+    let kept: String = id.chars().take(width.saturating_sub(1)).collect();
+    if width == 0 {
+        String::new()
+    } else {
+        format!("{kept}…")
+    }
 }
 
 /// The glyph's width in terminal cells. Hardcoded rather than pulled
@@ -228,5 +237,16 @@ mod tests {
                 .iter()
                 .all(|span| span.style.add_modifier.contains(Modifier::REVERSED))
         );
+    }
+
+    #[test]
+    fn a_name_wider_than_its_column_is_truncated_with_an_ellipsis() {
+        assert_eq!(
+            fit_name("services:payment:integration", 19),
+            "services:payment:i…"
+        );
+        assert_eq!(fit_name("build", 19), "build");
+        assert_eq!(fit_name("abc", 0), "");
+        assert_eq!(fit_name("abc", 1), "…");
     }
 }

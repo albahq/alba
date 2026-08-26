@@ -375,3 +375,34 @@ fn a_long_log_line_wraps_in_the_pane() {
     state.apply(&output("build", "tail"), now);
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
+
+/// A long beam id never pushes the duration out of its column.
+#[test]
+fn a_long_beam_name_is_truncated_in_the_tree() {
+    let mut state = AppState::new("build", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            targets: vec![id("build")],
+            affected_by: None,
+            beams: vec![id("services:payment:integration"), id("build")],
+            edges: Vec::new(),
+        },
+        now,
+    );
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("services:payment:integration"),
+        },
+        now,
+    );
+    state.apply(
+        &RunEvent::BeamFinished {
+            id: id("services:payment:integration"),
+            status: BeamStatus::Succeeded,
+            duration: Duration::from_millis(1200),
+        },
+        now,
+    );
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}

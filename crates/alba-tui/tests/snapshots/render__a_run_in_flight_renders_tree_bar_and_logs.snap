@@ -25,4 +25,4 @@ expression: "drawn(&state, 80, 24)"
 "│                              │                                               │"
 "│                              │                                               │"
 "│✔ 1  ⚡ 1  ✖ 0  ○ 2           │● following                                    │" Hidden by multi-width symbols: [(7, " ")]
-"└─ q quit · r rerun · f force · t target · c cancel · w watch · n/N step ──────┘"
+"└─ q quit · r rerun · c cancel · w watch · / search · ? help ──────────────────┘"

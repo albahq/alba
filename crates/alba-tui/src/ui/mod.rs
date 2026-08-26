@@ -118,17 +118,10 @@ fn framed_title(content: Line<'static>) -> Line<'static> {
 /// give it: at the 80ms tick, or with a beam still flooding output, a
 /// one-draw message would be gone well under a blink.
 ///
-/// `n`/`N` live in the Normal-mode bar rather than Search's: they step
-/// the *committed* search (`AppState::last_search`), a Normal-mode
-/// binding (`input.rs`) the same way `j`/`k` are — advertising them
-/// while still composing a query would claim a key that, at that point,
-/// only ever types a character into it.
-///
-/// The Normal bar is the keymap condensed to what an 80-column frame
-/// can hold, not the whole of it: `t` earns a place because it is the
-/// only way back from an `r` that retargeted the session, while the log
-/// pane's own scrolling keys are left to the help overlay, which lists
-/// every binding there is.
+/// The Normal bar names the six actions a first-time reader needs, not
+/// the whole keymap: `f`, `t`, `n`/`N`, `g`, and `v` live in the help
+/// overlay (`?`) instead, which the bar itself points at. `help.rs`'s
+/// `keymap_lines` is where all of them are listed.
 fn bottom_bar(state: &AppState, now: Instant) -> String {
     if let Some(result) = &state.last_copy_result
         && result.is_visible(now)
@@ -136,9 +129,7 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
         return format!("{} · q quit", result.message);
     }
     match &state.mode {
-        Mode::Normal => {
-            "q quit · r rerun · f force · t target · c cancel · w watch · n/N step".to_string()
-        }
+        Mode::Normal => "q quit · r rerun · c cancel · w watch · / search · ? help".to_string(),
         Mode::Search(search) => {
             let total = search.matches.len();
             let current = if total == 0 { 0 } else { search.current + 1 };
@@ -232,7 +223,7 @@ mod tests {
         );
         assert_eq!(
             bottom_bar(&state, now + Duration::from_secs(3)),
-            "q quit · r rerun · f force · t target · c cancel · w watch · n/N step",
+            "q quit · r rerun · c cancel · w watch · / search · ? help",
             "falls back to the mode's own bar once the result has expired"
         );
     }
