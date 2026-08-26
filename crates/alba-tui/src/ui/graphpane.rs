@@ -18,7 +18,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::widgets::Paragraph;
 
 use crate::graph::{self, GraphState};
-use crate::state::AppState;
+use crate::state::{AppState, BeamState};
 
 use super::tree::glyph_for;
 
@@ -75,22 +75,23 @@ fn draw_node_row(
         let fraction = graph::slot_center_fraction(position, count);
         let row = &state.beams[beam];
         let label = format!("[{} {}]", glyph_for(&row.state), row.id);
-        let style = node_style(beam, graph_state.focused);
+        let style = node_style(&row.state, beam, graph_state.focused, state.colour);
         draw_label(frame, area, fraction, &label, style);
     }
 }
 
-/// The focused node reversed, every other node plain — pulled out of
-/// `draw_node_row` so it can be pinned by a unit test directly.
-/// `TestBackend::to_string()` drops styles entirely, so the reversed span
-/// itself would pass every render snapshot silently whether or not this
-/// ever actually fired; this is what `ui/logpane.rs`'s `styled_line` does
-/// for the very same reason.
-fn node_style(beam: usize, focused: usize) -> Style {
+/// The node's status colour, reversed on the focused node — pulled out
+/// of `draw_node_row` so it can be pinned by a unit test directly.
+/// `TestBackend::to_string()` drops styles entirely, so neither the
+/// colour nor the reversed span would move a render snapshot whether or
+/// not this ever actually fired; this is what `ui/logpane.rs`'s
+/// `styled_line` does for the very same reason.
+fn node_style(state: &BeamState, beam: usize, focused: usize, colour: bool) -> Style {
+    let style = super::theme::status_style(state, colour);
     if beam == focused {
-        Style::default().reversed()
+        style.reversed()
     } else {
-        Style::default()
+        style
     }
 }
 
@@ -289,13 +290,30 @@ mod tests {
     }
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
-    /// cannot tell a focused node from any other — this is what actually
-    /// pins the reversed style, the same reason `ui/logpane.rs` has its
-    /// own unit test over `styled_line` rather than trusting a snapshot.
+    /// cannot tell a focused node from any other, nor its status colour —
+    /// this is what actually pins both, the same reason `ui/logpane.rs`
+    /// has its own unit test over `styled_line` rather than trusting a
+    /// snapshot.
     #[test]
-    fn node_style_reverses_only_the_focused_beam() {
-        assert_eq!(node_style(2, 2), Style::default().reversed());
-        assert_eq!(node_style(1, 2), Style::default());
+    fn nodes_take_their_status_colour_and_the_focused_one_is_reversed() {
+        use alba_engine::BeamStatus;
+        use ratatui::style::Color;
+        use std::time::Duration;
+
+        let failed = BeamState::Done {
+            status: BeamStatus::Failed { exit_code: 1 },
+            duration: Duration::from_secs(1),
+        };
+        assert_eq!(
+            node_style(&failed, 2, 2, true),
+            Style::new().fg(Color::Red).reversed()
+        );
+        assert_eq!(node_style(&failed, 1, 2, true), Style::new().fg(Color::Red));
+        assert_eq!(node_style(&failed, 1, 2, false), Style::default());
+        assert_eq!(
+            node_style(&failed, 2, 2, false),
+            Style::default().reversed()
+        );
     }
 
     /// A single-node layer centres in the middle of its row regardless

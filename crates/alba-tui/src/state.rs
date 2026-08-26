@@ -113,6 +113,12 @@ pub struct AppState {
     pub logs: HashMap<String, LogBuffer>,
     pub phase: Phase,
     pub watch_enabled: bool,
+    /// Whether the interface draws colour at all: the CLI's own gate
+    /// (`stdout` is a terminal, `NO_COLOR` unset), decided once via
+    /// `with_colour`. Every function in `ui/theme.rs` answers
+    /// `Style::default()` when this is `false`, so the interface renders
+    /// exactly as it always did.
+    pub colour: bool,
     pub mode: Mode,
     /// The most recently *committed* search. `Mode::Search` carries the
     /// one being typed; this is where it lands when `Enter` commits it,
@@ -213,6 +219,7 @@ impl AppState {
             // session that never ran one.
             phase: Phase::Finished,
             watch_enabled,
+            colour: false,
             mode: Mode::Normal,
             last_search: None,
             pending_copy: None,
@@ -225,6 +232,13 @@ impl AppState {
             pane_height: 0,
             pane_width: 0,
         }
+    }
+
+    /// Whether the interface draws colour at all: the CLI's own gate
+    /// (`stdout` is a terminal, `NO_COLOR` unset), decided once.
+    pub fn with_colour(mut self, colour: bool) -> Self {
+        self.colour = colour;
+        self
     }
 
     /// Folds one event in. `now` is passed, not sampled — the state stays

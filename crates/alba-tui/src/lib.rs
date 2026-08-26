@@ -49,6 +49,7 @@ const MAX_BATCH: usize = 256;
 pub struct TuiOptions {
     pub target: String,
     pub watch: bool,
+    pub colour: bool,
 }
 
 /// One replayed line, both ways the CLI may print it.
@@ -78,7 +79,7 @@ pub async fn run(
     options: TuiOptions,
 ) -> io::Result<TuiOutcome> {
     let mut guard = terminal::TerminalGuard::enter()?;
-    let mut state = AppState::new(&options.target, options.watch);
+    let mut state = AppState::new(&options.target, options.watch).with_colour(options.colour);
     let mut input = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     // A loop that fell behind owes the user one fresh frame, not a burst

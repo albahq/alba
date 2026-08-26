@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::{AppState, Mode};
@@ -24,6 +24,7 @@ mod graphpane;
 mod header;
 mod help;
 mod logpane;
+mod theme;
 mod tree;
 
 /// Below this floor, the tree and log panes have no room left to mean
@@ -53,11 +54,17 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // The outer frame carries the header and the bottom bar inside its
     // own border, exactly as the spec's mockup draws them
     // (`┌─ alba · run build ── ... ─┐` / `└─ q quit · ... ─┘`): a
-    // leading `─ ` and trailing ` ` are baked into the title text itself
-    // so the block's own border fill supplies the rest of the dashes.
+    // leading `─ ` and trailing ` ` are baked into the title itself so
+    // the block's own border fill supplies the rest of the dashes —
+    // wrapped around the header's and the bar's own spans rather than
+    // their plain text, so the colour underneath survives into the
+    // border's title.
     let outer = Block::bordered()
-        .title_top(Line::from(format!("─ {} ", header::text(state, now))))
-        .title_bottom(Line::from(format!("─ {} ", bottom_bar(state, now))));
+        .title_top(framed_title(header::line(state, now)))
+        .title_bottom(framed_title(theme::bar_line(
+            &bottom_bar(state, now),
+            state.colour,
+        )));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -87,6 +94,17 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     if matches!(state.mode, Mode::Help) {
         help::draw(frame, inner);
     }
+}
+
+/// Wraps a header or bottom-bar line in the border's own `─ ... ` frame,
+/// spans and all, so a coloured span inside it (the progress bar, the
+/// outcome, a bold key) survives into the block's title rather than
+/// being flattened to plain text first.
+fn framed_title(content: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw("─ ")];
+    spans.extend(content.spans);
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 /// The always-available actions for the current mode.

@@ -430,6 +430,9 @@ async fn tui_execute(
         alba_tui::TuiOptions {
             target: selection_label(selection),
             watch: flags.watch,
+            // Wiring the real gate (`alba_cli::color_enabled()`) and the
+            // forced-colour environment variables is a later task's job.
+            colour: false,
         },
     )
     .await;

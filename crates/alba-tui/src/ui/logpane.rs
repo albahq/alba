@@ -8,7 +8,9 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::logs::{LogBuffer, Row, Scroll};
+use alba_executors::Stream;
+
+use crate::logs::{LogBuffer, LogLine, Row, Scroll};
 use crate::state::{AppState, Mode, Phase};
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -47,13 +49,18 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
             .as_ref()
             .map(|committed| committed.search.query.as_str()),
     };
-    let rows_shown = buffer
-        .map(|buffer| buffer.view(body_height, rows[1].width as usize))
-        .unwrap_or_default();
-    let lines: Vec<Line> = rows_shown
-        .iter()
-        .map(|row| styled_line(row, &state.mode, query, full_line_text(buffer, row.line)))
-        .collect();
+    // `styled_line` needs a real buffer to look up a row's own line (for
+    // the dimmed-stderr check and the full-line text search/copy need) —
+    // harmless to require, since a `None` buffer never produces a row to
+    // begin with (`rows_shown` is empty).
+    let lines: Vec<Line> = match buffer {
+        Some(buffer) => buffer
+            .view(body_height, rows[1].width as usize)
+            .iter()
+            .map(|row| styled_line(row, buffer, &state.mode, query, state.colour))
+            .collect(),
+        None => Vec::new(),
+    };
     frame.render_widget(Paragraph::new(lines), rows[1]);
 
     let following = match buffer {
@@ -70,18 +77,15 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(footer), rows[2]);
 }
 
-/// The whole logical line's plain text a row belongs to (`None` for the
-/// truncation marker, which names no line, or when there is no buffer
-/// to look it up in). Search and the copy highlight both need the full
-/// line rather than just this row's own slice, so a match or a
-/// selection is found in the line's own coordinates and then clipped to
-/// this row by `within` — the same line looked up the same way whether
-/// it wrapped into one row or several.
-fn full_line_text(buffer: Option<&LogBuffer>, line: Option<usize>) -> Option<&str> {
-    buffer
-        .zip(line)
-        .and_then(|(buffer, line)| buffer.lines().nth(line))
-        .map(|line| line.text.as_str())
+/// The whole logical `LogLine` a row belongs to (`None` for the
+/// truncation marker, which names no line). Search and the copy
+/// highlight both need the full line's text rather than just this row's
+/// own slice, so a match or a selection is found in the line's own
+/// coordinates and then clipped to this row by `within` — the same line
+/// looked up the same way whether it wrapped into one row or several;
+/// the dimmed-stderr check reads the same line's `stream` off it.
+fn full_line(buffer: &LogBuffer, line: Option<usize>) -> Option<&LogLine> {
+    line.and_then(|line| buffer.lines().nth(line))
 }
 
 /// A `(from, to)` inclusive char range of the whole line, as the same
@@ -110,24 +114,45 @@ fn within(row: &Row, from: usize, to: usize) -> Option<(usize, usize)> {
 /// the covered or matched range on top, so a search hit inside a
 /// coloured `error` stays red as well as reversed.
 ///
+/// Before either highlight, plain stderr (no colour of its own — an
+/// ordinary `warning: ...`, never a line ANSI already coloured) is
+/// dimmed, off when `colour` is off: the same visual cue the CLI's
+/// headless renderers give stderr, so a beam's error output stands apart
+/// from its stdout without a search or copy highlight to point at it.
+///
 /// Pulled out of `draw` so this composition can be tested directly over
 /// the styled spans it produces. `draw` itself is only ever exercised
 /// through `TestBackend::to_string()` in the snapshot tests, which drops
-/// styles entirely and so cannot tell a covered row from an uncovered
-/// one; an off-by-one in this wiring would pass every existing snapshot
-/// silently.
+/// styles entirely and so cannot tell a covered, dimmed, or coloured row
+/// from a plain one; an off-by-one in this wiring would pass every
+/// existing snapshot silently.
 fn styled_line(
     row: &Row,
+    buffer: &LogBuffer,
     mode: &Mode,
     query: Option<&str>,
-    full_line: Option<&str>,
+    colour: bool,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = row
         .spans
         .iter()
         .map(|(style, content)| Span::styled(content.clone(), *style))
         .collect();
-    let full_text = full_line.unwrap_or(&row.text);
+    let line_ref = full_line(buffer, row.line);
+    let full_text = line_ref.map(|line| line.text.as_str()).unwrap_or(&row.text);
+
+    let own_colour = row
+        .spans
+        .iter()
+        .any(|(style, _)| *style != Style::default());
+    let dim_stderr =
+        colour && line_ref.is_some_and(|line| line.stream == Stream::Stderr) && !own_colour;
+    if dim_stderr {
+        for span in &mut spans {
+            span.style = span.style.dim();
+        }
+    }
+
     if let (Mode::Copy(selection), Some(line)) = (mode, row.line) {
         let covered = selection
             .covers_line(line, full_text.chars().count())
@@ -233,7 +258,7 @@ mod tests {
         let rows: Vec<Line> = buffer
             .view(body_height, 80)
             .iter()
-            .map(|row| styled_line(row, &mode, None, full_line_text(Some(&buffer), row.line)))
+            .map(|row| styled_line(row, &buffer, &mode, None, false))
             .collect();
 
         assert_eq!(rows[0], Line::from("alpha"), "before the span: unstyled");
@@ -265,7 +290,8 @@ mod tests {
             spans: vec![(Style::default(), "Compiling api".to_string())],
             text: "Compiling api".to_string(),
         };
-        let line = styled_line(&row, &Mode::Normal, Some("api"), None);
+        let buffer = LogBuffer::new();
+        let line = styled_line(&row, &buffer, &Mode::Normal, Some("api"), false);
         assert_eq!(
             line,
             Line::from(vec![
@@ -273,6 +299,29 @@ mod tests {
                 Span::styled("api", Style::new().reversed()),
             ])
         );
+    }
+
+    /// stderr without colour of its own is dimmed; stderr that brought
+    /// colour keeps it.
+    #[test]
+    fn plain_stderr_is_dimmed_and_coloured_stderr_is_not() {
+        use alba_executors::Stream;
+        let mut buffer = LogBuffer::new();
+        buffer.push("warning", Stream::Stderr, false);
+        buffer.push("\u{1b}[31merror\u{1b}[0m", Stream::Stderr, false);
+        buffer.push("out", Stream::Stdout, false);
+        let rows = buffer.view(5, 80);
+        let plain = styled_line(&rows[0], &buffer, &Mode::Normal, None, true);
+        assert_eq!(plain.spans[0].style, Style::new().dim());
+        let coloured = styled_line(&rows[1], &buffer, &Mode::Normal, None, true);
+        assert_eq!(
+            coloured.spans[0].style,
+            Style::new().fg(ratatui::style::Color::Red)
+        );
+        let stdout = styled_line(&rows[2], &buffer, &Mode::Normal, None, true);
+        assert_eq!(stdout.spans[0].style, Style::default());
+        let no_colour = styled_line(&rows[0], &buffer, &Mode::Normal, None, false);
+        assert_eq!(no_colour.spans[0].style, Style::default());
     }
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
