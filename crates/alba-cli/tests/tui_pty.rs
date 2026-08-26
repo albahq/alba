@@ -25,8 +25,11 @@ const ALTERNATE_SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 /// `alba-tui/src/ui/footer.rs::outcome_line`: `ok · {duration}` or
 /// `failed · {duration}`, right-aligned) and nothing else in this
 /// interface ever renders: the fixtures' beams are `green` and `red`,
-/// the bottom bar, the pane titles, and the follow state spell neither
-/// word, and the beams' own output does not either. Unlike that output,
+/// the bottom bar's default keymap text, the pane titles, and the follow
+/// state spell neither word, and the beams' own output does not either
+/// (a failed copy takes over the bar with the literal `copy failed`
+/// from `copy.rs`, but this test never enters copy mode, so that
+/// exception never fires here). Unlike that output,
 /// which lands on the pty as soon as `RunEvent::BeamOutput` is applied,
 /// the word is only drawn once `Phase::Finished` and `last_summary` are
 /// set, in the very same `RunEvent::RunFinished` match arm that sets
@@ -54,9 +57,9 @@ const RUN_FAILED: &str = "failed";
 /// `alba-cli`'s `render::print_summary` puts in its summary line
 /// (`✓ 1 succeeded · 0.0s`), written to stderr once the alternate screen
 /// is already restored. Nothing the interface draws ever spells this —
-/// the tree's footer and the header both count with glyphs (`✔ 1`) — so
-/// seeing it in the bytes that follow `q` is evidence of the replay
-/// itself, not of a frame.
+/// the frame's footer counts with glyphs instead (`✔ 1`) — so seeing it
+/// in the bytes that follow `q` is evidence of the replay itself, not of
+/// a frame.
 const RUN_SUMMARY: &str = "1 succeeded";
 
 /// Kills the child on every exit path — including a failed assertion or a
