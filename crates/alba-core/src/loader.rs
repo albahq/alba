@@ -90,12 +90,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use alba_syntax::{File, Span, Spanned};
 
 use crate::error::{CoreError, SourceIdScope};
-use crate::eval::{build_project, parse_error_to_core_error};
-use crate::model::{Beam, BeamId, Project, SourceId};
+use crate::eval::{LazyGit, build_project, parse_error_to_core_error};
+use crate::model::{Beam, BeamId, Hook, Project, SourceId};
 
 /// The path and source text of every file [`load_project`] read, indexed
 /// by [`SourceId`], so a [`CoreError`]'s `source_id` can be turned back
@@ -173,9 +174,13 @@ pub struct LoadError {
 /// id defaults to.
 pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
     let mut loader = Loader::default();
-    match loader.load_file(root, Span::new(0, 0)) {
-        Ok((beams, default)) => {
-            let project = Project { beams, default };
+    match loader.load_file(root, Span::new(0, 0), true) {
+        Ok((beams, default, hooks)) => {
+            let project = Project {
+                beams,
+                default,
+                hooks,
+            };
             match crate::graph::validate_graph(&project) {
                 Ok(()) => Ok((project, loader.sources)),
                 Err(error) => Err(LoadError {
@@ -193,8 +198,8 @@ pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
 
 /// What one file's load produced: its own beams and everything it
 /// imports, ids and `needs` namespaced relative to that file itself, plus
-/// its own `default`.
-type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>);
+/// its own `default` and `hooks`.
+type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>, Vec<Hook>);
 
 #[derive(Default)]
 struct Loader {
@@ -224,6 +229,12 @@ struct Loader {
     /// first — the display path the *other* site would have produced names
     /// the same file, so both point a reader at the same text.
     loaded: HashMap<PathBuf, LoadedFile>,
+    /// The one `LazyGit` shared by every file this load reads, rooted at
+    /// the first Beamfile's directory (the root, since it is the first
+    /// file [`Loader::load_file`] ever sees). Lazily created on that first
+    /// call so a `load_project` that never even opens a file spawns
+    /// nothing.
+    git: Option<Arc<LazyGit>>,
 }
 
 impl Loader {
@@ -269,7 +280,21 @@ impl Loader {
     /// closing on it, gets reported; it's the span of the `import` that
     /// named `path` for every call except the very first (the root has no
     /// such span, so [`load_project`] passes a zero-width one).
-    fn load_file(&mut self, path: &Path, error_span: Span) -> Result<LoadedFile, CoreError> {
+    ///
+    /// `is_root` is `true` only for [`load_project`]'s own top-level call;
+    /// every recursive call for an `import` passes `false`. Threaded down
+    /// into [`Loader::load_file_body`] and then [`build_project`], whose
+    /// unknown-hook-name and duplicate-hook checks must only ever run for
+    /// the root file — a `hook` problem in an imported file must not fail
+    /// the whole load when that file's hooks are discarded anyway (see
+    /// this function's `default` handling above for the same rule applied
+    /// to a different field).
+    fn load_file(
+        &mut self,
+        path: &Path,
+        error_span: Span,
+        is_root: bool,
+    ) -> Result<LoadedFile, CoreError> {
         let canonical = Self::canonical(path, error_span)?;
 
         if let Some(start) = self.stack.iter().position(|(c, _)| *c == canonical) {
@@ -305,11 +330,15 @@ impl Loader {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let beam_dir = beam_dir_for(path, error_span)?;
+        let git = Arc::clone(
+            self.git
+                .get_or_insert_with(|| Arc::new(LazyGit::new(beam_dir.clone()))),
+        );
 
         let source_id = self.sources.push(path.to_path_buf(), source.clone());
 
         self.stack.push((canonical.clone(), path.to_path_buf()));
-        let result = self.load_file_body(&source, &import_base, &beam_dir, source_id);
+        let result = self.load_file_body(&source, &import_base, &beam_dir, source_id, git, is_root);
         self.stack.pop();
 
         let loaded = result?;
@@ -330,18 +359,20 @@ impl Loader {
         import_base: &Path,
         beam_dir: &Path,
         source_id: SourceId,
+        git: Arc<LazyGit>,
+        is_root: bool,
     ) -> Result<LoadedFile, CoreError> {
         let _scope = SourceIdScope::enter(source_id);
         let file: File = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
         check_duplicate_aliases(&file)?;
 
-        let local = build_project(&file, beam_dir)?;
+        let local = build_project(&file, beam_dir, git, is_root)?;
         let mut beams = local.beams;
 
         for import in &file.imports {
             let import_path = import_base.join(&import.path.value);
-            let (mut child_beams, _child_default) =
-                self.load_file(&import_path, import.path.span)?;
+            let (mut child_beams, _child_default, _child_hooks) =
+                self.load_file(&import_path, import.path.span, false)?;
             let alias = &import.alias.value;
             for beam in &mut child_beams {
                 beam.id.0 = format!("{alias}:{}", beam.id.0);
@@ -352,7 +383,7 @@ impl Loader {
             beams.extend(child_beams);
         }
 
-        Ok((beams, local.default))
+        Ok((beams, local.default, local.hooks))
     }
 }
 

@@ -46,7 +46,8 @@ fn a_run_in_flight_renders_tree_bar_and_logs() {
     let now = Instant::now();
     state.apply(
         &RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: ["codegen", "api:codegen", "api:build", "build", "test"]
                 .iter()
                 .map(|name| id(name))
@@ -97,7 +98,8 @@ fn a_failed_run_renders_the_cross_and_summary_counts() {
     let now = Instant::now();
     state.apply(
         &RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
         },
@@ -162,7 +164,8 @@ fn a_search_highlights_and_counts_matches() {
     let now = Instant::now();
     state.apply(
         &RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
         },
@@ -201,7 +204,8 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
     let now = Instant::now();
     state.apply(
         &RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
         },
@@ -240,7 +244,8 @@ fn a_copy_selection_highlights_the_span() {
     let now = Instant::now();
     state.apply(
         &RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
         },
@@ -265,7 +270,8 @@ fn three_beam_chain() -> AppState {
     let now = Instant::now();
     state.apply(
         &RunEvent::RunStarted {
-            target: id("test"),
+            targets: vec![id("test")],
+            affected_by: None,
             beams: vec![id("codegen"), id("build"), id("test")],
             edges: vec![(id("build"), id("codegen")), (id("test"), id("build"))],
         },
@@ -309,7 +315,8 @@ fn the_help_overlay_lists_the_full_keymap() {
     let mut state = AppState::new("build", false);
     state.apply(
         &RunEvent::RunStarted {
-            target: id("build"),
+            targets: vec![id("build")],
+            affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
         },

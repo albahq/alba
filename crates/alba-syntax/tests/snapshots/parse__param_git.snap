@@ -1,0 +1,14 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "`git` is reserved for the built-in git object",
+    span: Span {
+        start: 7,
+        end: 10,
+    },
+    help: Some(
+        "pick another name; `git.branch`, `git.sha`, `git.short_sha`, and `git.dirty` read from it",
+    ),
+}

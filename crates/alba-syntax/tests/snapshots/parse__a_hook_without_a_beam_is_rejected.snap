@@ -1,0 +1,14 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "hook `pre-commit` declares no `beam`",
+    span: Span {
+        start: 5,
+        end: 15,
+    },
+    help: Some(
+        "write `beam <name>` inside the block",
+    ),
+}

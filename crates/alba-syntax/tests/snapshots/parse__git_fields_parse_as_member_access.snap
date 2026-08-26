@@ -1,0 +1,148 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: "(&file.lets, &file.beams[0].run)"
+---
+(
+    [
+        LetBinding {
+            name: Spanned {
+                value: "tag",
+                span: Span {
+                    start: 4,
+                    end: 7,
+                },
+            },
+            value: Binary {
+                op: Concat,
+                lhs: Binary {
+                    op: Concat,
+                    lhs: Field {
+                        object: Spanned {
+                            value: "git",
+                            span: Span {
+                                start: 10,
+                                end: 13,
+                            },
+                        },
+                        field: Spanned {
+                            value: "short_sha",
+                            span: Span {
+                                start: 14,
+                                end: 23,
+                            },
+                        },
+                    },
+                    rhs: Str(
+                        StringTemplate {
+                            parts: [
+                                Literal(
+                                    "-",
+                                ),
+                            ],
+                            span: Span {
+                                start: 26,
+                                end: 29,
+                            },
+                        },
+                    ),
+                },
+                rhs: Field {
+                    object: Spanned {
+                        value: "git",
+                        span: Span {
+                            start: 32,
+                            end: 35,
+                        },
+                    },
+                    field: Spanned {
+                        value: "branch",
+                        span: Span {
+                            start: 36,
+                            end: 42,
+                        },
+                    },
+                },
+            },
+        },
+    ],
+    [
+        StringTemplate {
+            parts: [
+                Literal(
+                    "echo ",
+                ),
+                Expr(
+                    Field {
+                        object: Spanned {
+                            value: "git",
+                            span: Span {
+                                start: 63,
+                                end: 66,
+                            },
+                        },
+                        field: Spanned {
+                            value: "sha",
+                            span: Span {
+                                start: 67,
+                                end: 70,
+                            },
+                        },
+                    },
+                ),
+                Literal(
+                    " ",
+                ),
+                Expr(
+                    If {
+                        cond: Field {
+                            object: Spanned {
+                                value: "git",
+                                span: Span {
+                                    start: 76,
+                                    end: 79,
+                                },
+                            },
+                            field: Spanned {
+                                value: "dirty",
+                                span: Span {
+                                    start: 80,
+                                    end: 85,
+                                },
+                            },
+                        },
+                        then: Str(
+                            StringTemplate {
+                                parts: [
+                                    Literal(
+                                        "dirty",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 91,
+                                    end: 98,
+                                },
+                            },
+                        ),
+                        otherwise: Str(
+                            StringTemplate {
+                                parts: [
+                                    Literal(
+                                        "clean",
+                                    ),
+                                ],
+                                span: Span {
+                                    start: 104,
+                                    end: 111,
+                                },
+                            },
+                        ),
+                    },
+                ),
+            ],
+            span: Span {
+                start: 56,
+                end: 113,
+            },
+        },
+    ],
+)

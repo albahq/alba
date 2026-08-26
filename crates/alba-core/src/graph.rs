@@ -111,6 +111,40 @@ pub fn validate_graph(project: &Project) -> Result<(), CoreError> {
         ));
     }
 
+    for hook in &project.hooks {
+        let Some(&target) = by_id.get(hook.beam.value.0.as_str()) else {
+            return Err(unknown_beam_error(
+                &hook.beam.value.0,
+                all_ids(project),
+                Some(hook.beam.span),
+            )
+            .with_source_id(hook.source));
+        };
+        if target.params.len() > hook.arity {
+            let arguments = if hook.arity == 1 {
+                "argument"
+            } else {
+                "arguments"
+            };
+            let parameters = if target.params.len() == 1 {
+                "parameter"
+            } else {
+                "parameters"
+            };
+            return Err(CoreError::new(
+                format!(
+                    "hook `{}` passes {} {arguments}, but beam `{}` declares {} {parameters}",
+                    hook.name,
+                    hook.arity,
+                    target.id.0,
+                    target.params.len()
+                ),
+                hook.beam.span,
+            )
+            .with_source_id(hook.source));
+        }
+    }
+
     let mut done: HashSet<&str> = HashSet::new();
     for beam in &project.beams {
         if done.contains(beam.id.0.as_str()) {

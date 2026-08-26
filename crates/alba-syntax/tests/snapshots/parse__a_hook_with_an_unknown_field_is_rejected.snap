@@ -1,0 +1,14 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: err
+---
+ParseError {
+    message: "unknown hook field `needs`",
+    span: Span {
+        start: 18,
+        end: 23,
+    },
+    help: Some(
+        "a hook has exactly one field, `beam`",
+    ),
+}

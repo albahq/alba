@@ -12,10 +12,12 @@
 //! graph (unknown `needs` targets, `needs`-cycles) via [`validate_graph`]
 //! before returning it. [`execution_subgraph`] extracts the transitive
 //! closure of a target beam, for whichever engine schedules and runs it.
+//! [`git`] wraps the `git` CLI, the only place in the workspace that spawns it.
 
 mod error;
 mod eval;
 mod files;
+pub mod git;
 mod graph;
 mod loader;
 mod model;
@@ -25,7 +27,7 @@ pub use eval::{Scope, eval_expr, render_template, suggest};
 pub use files::{expand_globs, outputs_satisfied};
 pub use graph::{execution_subgraph, validate_graph};
 pub use loader::{LoadError, SourceMap, load_project};
-pub use model::{Beam, BeamId, ExecutorKind, OptionValue, Project, SourceId, Value};
+pub use model::{Beam, BeamId, ExecutorKind, Hook, OptionValue, Project, SourceId, Value};
 
 #[doc(hidden)]
 pub use eval::load_str;

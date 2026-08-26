@@ -5,7 +5,7 @@
 //! resolving `import` paths relative to the importing file's directory is
 //! the behavior under test.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alba_core::{SourceId, load_project};
 
@@ -335,4 +335,276 @@ fn source_map_tracks_path_and_text_per_source_id() {
     let (path, text) = sources.get(all.source).unwrap();
     assert_eq!(text, root_src);
     assert!(path.ends_with("Beamfile"));
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A repository with one commit holding `src/lib.rs` and `README.md`.
+fn repository() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}").unwrap();
+    std::fs::write(dir.path().join("README.md"), "# x").unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+    dir
+}
+
+#[test]
+fn git_fields_evaluate_from_the_repository_holding_the_beamfile() {
+    let dir = repository();
+    write(
+        dir.path().join("Beamfile"),
+        "let tag = git.branch + \"-\" + git.short_sha\n\
+         beam b { description \"{tag} {if git.dirty then 'dirty' else 'clean'}\" run \"echo {git.sha}\" }",
+    );
+    // The Beamfile itself is untracked, so the tree is dirty.
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let description = project.beams[0].description.as_deref().unwrap();
+    assert!(description.starts_with("main-"), "{description}");
+    assert!(description.ends_with(" dirty"), "{description}");
+    let sha =
+        alba_core::render_template(&project.beams[0].run[0], &project.beams[0].scope).unwrap();
+    assert_eq!(sha.len(), "echo ".len() + 40, "{sha}");
+    // Not just the prefix and suffix: the `short_sha` in between must
+    // actually look like one (non-empty, hexadecimal), so a formatting
+    // typo in between "main-" and " dirty" would still be caught.
+    let short_sha = description
+        .strip_prefix("main-")
+        .and_then(|rest| rest.strip_suffix(" dirty"))
+        .unwrap_or_else(|| panic!("unexpected description shape: {description}"));
+    assert!(!short_sha.is_empty(), "{description}");
+    assert!(
+        short_sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "{description}"
+    );
+}
+
+#[test]
+fn git_is_only_spawned_when_an_expression_reads_it() {
+    // Not a repository at all: loading must still succeed.
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path().join("Beamfile"), "beam b { run \"echo plain\" }");
+    load_project(&dir.path().join("Beamfile")).unwrap();
+}
+
+#[test]
+fn git_behind_a_statically_known_untaken_branch_is_never_spawned() {
+    // Not a repository at all: if `check_expr` evaluated `git.branch`
+    // eagerly while validating the untaken `else` branch of a
+    // statically-known `if`, this load would fail before the beam ever
+    // ran. `run` is deferred to schedule time, so nothing here ever calls
+    // `eval_expr` on it either; only `check_expr`'s load-time pass touches
+    // this expression.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "beam x { run \"{if true then 'a' else git.branch}\" }",
+    );
+    load_project(&dir.path().join("Beamfile")).unwrap();
+}
+
+#[test]
+fn reading_git_outside_a_repository_points_at_the_expression() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "let b = git.branch\nbeam x { run \"echo\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("cannot read `git.branch`"),
+        "{}",
+        err.error.message
+    );
+    let source = "let b = git.branch";
+    let span = err.error.span.unwrap();
+    assert_eq!(&source[span.start..span.end], "git.branch");
+}
+
+#[test]
+fn an_unknown_git_field_is_rejected_without_spawning_git() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "let b = git.tag\nbeam x { run \"echo\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("unknown git field `tag`"),
+        "{}",
+        err.error.message
+    );
+    assert!(err.error.help.as_deref().unwrap().contains("short_sha"));
+}
+
+#[test]
+fn only_git_has_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "let a = \"x\"\nlet b = a.len\nbeam x { run \"echo\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("`a` has no fields"),
+        "{}",
+        err.error.message
+    );
+}
+
+#[test]
+fn git_dirty_is_a_boolean_usable_in_a_condition() {
+    let dir = repository();
+    write(
+        dir.path().join("Beamfile"),
+        "let flag = git.dirty == true\nbeam x { run \"echo {flag}\" }",
+    );
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let rendered =
+        alba_core::render_template(&project.beams[0].run[0], &project.beams[0].scope).unwrap();
+    assert_eq!(rendered, "echo true");
+}
+
+#[test]
+fn hooks_load_with_their_target_and_arity() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\n\
+         hook pre-commit { beam check }\n\
+         hook commit-msg { beam api:lint_message }\n\
+         beam check { run \"x\" }",
+    );
+    write(
+        dir.path().join("api/Beamfile"),
+        "hook pre-push { beam lint_message }\n\
+         beam lint_message(path) { run \"lint {path}\" }",
+    );
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let hooks: Vec<(&str, &str, usize)> = project
+        .hooks
+        .iter()
+        .map(|hook| (hook.name.as_str(), hook.beam.value.0.as_str(), hook.arity))
+        .collect();
+    // The import's own `pre-push` is ignored: only the root declares hooks.
+    assert_eq!(
+        hooks,
+        [
+            ("pre-commit", "check", 0),
+            ("commit-msg", "api:lint_message", 1)
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_hook_name_is_rejected_with_a_suggestion() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-comit { beam check }\nbeam check { run \"x\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("unknown git hook `pre-comit`"),
+        "{}",
+        err.error.message
+    );
+    assert!(err.error.help.as_deref().unwrap().contains("pre-commit"));
+}
+
+#[test]
+fn a_duplicate_hook_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-commit { beam a }\nhook pre-commit { beam b }\nbeam a { run \"x\" }\nbeam b { run \"x\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("duplicate hook `pre-commit`"),
+        "{}",
+        err.error.message
+    );
+}
+
+#[test]
+fn a_hook_naming_an_unknown_beam_is_rejected_at_the_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-commit { beam chekc }\nbeam check { run \"x\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert!(
+        err.error.message.contains("unknown beam `chekc`"),
+        "{}",
+        err.error.message
+    );
+    let source = std::fs::read_to_string(dir.path().join("Beamfile")).unwrap();
+    let span = err.error.span.unwrap();
+    assert_eq!(&source[span.start..span.end], "chekc");
+}
+
+#[test]
+fn a_hook_target_with_too_many_parameters_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook commit-msg { beam lint }\nbeam lint(path, extra) { run \"x {path} {extra}\" }",
+    );
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+    assert_eq!(
+        err.error.message,
+        "hook `commit-msg` passes 1 argument, but beam `lint` declares 2 parameters"
+    );
+}
+
+#[test]
+fn a_hook_target_with_fewer_parameters_than_arguments_is_fine() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "hook pre-push { beam lint }\nbeam lint { run \"x\" }",
+    );
+    load_project(&dir.path().join("Beamfile")).unwrap();
+}
+
+#[test]
+fn an_invalid_hook_in_an_imported_file_is_ignored_not_rejected() {
+    // An import's `hook` declarations are ignored exactly like its
+    // `default` — including when they would themselves be load errors
+    // (an unknown name, a duplicate). The root here declares no hooks at
+    // all, so the load must still succeed with an empty `Project::hooks`.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\nbeam all { run \"echo ok\" }",
+    );
+    write(
+        dir.path().join("api/Beamfile"),
+        "hook pre-comit { beam build }\n\
+         hook pre-commit { beam build }\n\
+         hook pre-commit { beam build }\n\
+         beam build { run \"echo b\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    assert!(project.hooks.is_empty());
 }

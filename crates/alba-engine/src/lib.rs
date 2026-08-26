@@ -1,29 +1,31 @@
 //! Orchestration engine that schedules and runs beams.
 //!
 //! `alba-engine` sits between the model and the machine: it takes the
-//! validated [`alba_core::Project`] the loader produced, extracts the
-//! target beam's execution subgraph, and runs it with bounded parallelism
-//! through an [`alba_executors::Executor`] — which it only ever sees as
-//! that trait, so a future docker or plugin executor drops in without this
-//! crate changing. See the `scheduler` module for the scheduling rules
-//! themselves.
+//! validated [`alba_core::Project`] the loader produced, extracts the union
+//! of the target beams' execution subgraphs, and runs it with bounded
+//! parallelism through an [`alba_executors::Executor`] — which it only ever
+//! sees as that trait, so a future docker or plugin executor drops in
+//! without this crate changing. See the `scheduler` module for the
+//! scheduling rules themselves.
 //!
-//! Everything a caller needs is [`run`]: give it a project, a target,
+//! Everything a caller needs is [`run`]: give it a project, [`Targets`],
 //! [`RunOptions`], the [`Executors`] to dispatch each beam's declared kind
 //! to, a channel to receive [`RunEvent`]s on, and a cancellation token, and
 //! it reports back a [`RunSummary`]. [`watch`] wraps that same call in a
 //! session that re-runs the target whenever the files its `inputs` declare
 //! change; see the `session` module for the loop's shape.
 
+mod affected;
 mod cache;
 mod event;
 mod scheduler;
 mod session;
 mod watch;
 
+pub use affected::{Selection, affected, select};
 pub use cache::CacheOptions;
 pub use event::{BeamStatus, RunEvent, RunSummary};
-pub use scheduler::{Executors, RunOptions, run};
+pub use scheduler::{Executors, RunOptions, Targets, run};
 pub use session::{SessionCommand, session};
 pub use watch::{NotifyWatcher, SessionError, WatchBatch, WatchExit, Watcher, beamfile_dir, watch};
 
@@ -55,4 +57,8 @@ pub enum EngineError {
     /// one broken beam cannot take the whole run down silently.
     #[error("beam `{}` panicked while running", beam.0)]
     Panicked { beam: BeamId },
+    /// Git could not answer the question an affected run asked it: git is
+    /// missing, this is not a repository, the reference does not exist.
+    #[error("{0}")]
+    Git(#[from] alba_core::git::GitError),
 }

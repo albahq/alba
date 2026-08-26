@@ -133,7 +133,8 @@ fn json_log_format_emits_one_json_object_per_line() {
     // The payload a consumer builds a graph from, asserted on the wire
     // rather than only in the renderer's own unit tests.
     let opening: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
-    assert_eq!(opening["target"], "a");
+    assert_eq!(opening["targets"], serde_json::json!(["a"]));
+    assert!(opening.get("affected_by").is_none());
     assert_eq!(opening["beams"], serde_json::json!(["a"]));
     assert_eq!(opening["edges"], serde_json::json!([]));
 }

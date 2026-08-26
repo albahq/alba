@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{Debouncer, RecommendedCache};
+use notify_debouncer_full::{Debouncer, NoCache};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::{WatchBatch, Watcher};
@@ -23,7 +23,7 @@ pub struct NotifyWatcher {
     // Kept alive only for its `Drop`: dropping the debouncer stops the
     // background thread that feeds `batches`, so this field is never
     // read, only held.
-    _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer<notify::RecommendedWatcher, NoCache>,
 }
 
 impl NotifyWatcher {
@@ -33,9 +33,21 @@ impl NotifyWatcher {
 
     /// Starts watching every root recursively. An error here is fatal to
     /// the session before it starts — the CLI turns it into exit code 2.
+    ///
+    /// [`NoCache`] rather than the debouncer's default cache, which on
+    /// macOS and Windows is a file-ID map: arming a root would walk the
+    /// whole tree under it and `stat` every entry, before the watcher —
+    /// and so before anything the session draws — exists. A project root
+    /// holding a build directory makes that walk enormous (a Rust
+    /// `target/` reaches hundreds of thousands of files), and the session
+    /// looks frozen for as long as it runs. The cache buys only rename
+    /// stitching for back ends that emit no rename cookie, and a batch is
+    /// read here for its paths alone: a rename reported as two unrelated
+    /// paths triggers exactly the same rehash as one reported as a pair.
+    /// Linux already defaults to this for unrelated reasons.
     pub fn new(roots: &[PathBuf]) -> Result<Self, notify::Error> {
         let (sender, batches) = unbounded_channel();
-        let mut debouncer = notify_debouncer_full::new_debouncer(
+        let mut debouncer = notify_debouncer_full::new_debouncer_opt(
             Self::DEBOUNCE,
             None,
             move |result: notify_debouncer_full::DebounceEventResult| {
@@ -51,6 +63,8 @@ impl NotifyWatcher {
                 // A send failure means the session is gone; nothing to do.
                 let _ = sender.send(batch);
             },
+            NoCache::new(),
+            notify::Config::default(),
         )?;
         for root in roots {
             debouncer.watch(root, RecursiveMode::Recursive)?;

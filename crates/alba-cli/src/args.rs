@@ -41,6 +41,16 @@ pub enum Command {
         #[command(flatten)]
         flags: RunFlags,
     },
+    /// List the beams affected by what changed since a git reference,
+    /// without running anything.
+    Affected {
+        /// The git reference to diff the working tree against.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// `text`: one beam per line; `json`: `{"beams": [...]}`.
+        #[arg(long, value_name = "FORMAT", value_enum, default_value_t = LogFormat::Text)]
+        log_format: LogFormat,
+    },
     /// Manage the project's cache.
     Cache {
         #[command(subcommand)]
@@ -51,6 +61,35 @@ pub enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Run the beam a declared git hook points at. Called by the scripts
+    /// `alba hooks install` writes; usable by hand to debug a hook.
+    #[command(hide = true)]
+    Hook {
+        /// The git hook name (`pre-commit`, `commit-msg`, ...).
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The arguments git passed to the hook.
+        #[arg(
+            value_name = "ARG",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<String>,
+    },
+    /// Install or remove the git hooks this Beamfile declares.
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
+}
+
+/// A subcommand of `alba hooks`.
+#[derive(Debug, Subcommand)]
+pub enum HooksCommand {
+    /// Point `core.hooksPath` at `.alba/hooks` and write the hook scripts.
+    Install,
+    /// Remove the scripts and the `core.hooksPath` setting, if Alba set it.
+    Uninstall,
 }
 
 /// A subcommand of `alba cache`. `clean` is deliberately the only one for
@@ -132,6 +171,13 @@ pub struct RunFlags {
     /// declares as `inputs` change. Ctrl-C ends the session.
     #[arg(long)]
     pub watch: bool,
+
+    /// Run only the beams affected by what changed since this git
+    /// reference (their `inputs`, or their Beamfile), and their dependents.
+    /// With a beam, that beam runs if it is affected and nothing runs
+    /// otherwise; without one, every affected beam is a target.
+    #[arg(long, value_name = "REF")]
+    pub affected: Option<String>,
 
     /// Force the interactive interface on, even where it would default off
     ///

@@ -66,6 +66,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
+use crate::affected::{Selection, select};
 use crate::event::RunEvent;
 use crate::scheduler::{Executors, RunOptions, run};
 use crate::watch::set::{Relevance, WatchSet};
@@ -88,14 +89,15 @@ pub enum SessionCommand {
     Shutdown,
 }
 
-/// Runs `target` and keeps re-running it — for a relevant change while
+/// Runs `selection` and keeps re-running it — for a relevant change while
 /// `watch_enabled`, for a [`SessionCommand`] from `commands` — until
 /// `cancel` fires, a `Shutdown` arrives, or the watcher dies.
 ///
 /// `project` and `sources` are taken owned: the session outlives the
 /// caller's own copy, and both are cheap to clone.
 ///
-/// A `target` this project does not declare is *not* an error here: it
+/// A `selection` this project cannot resolve — an unknown beam, or a git
+/// reference that does not exist — is *not* an error here: it
 /// parks the session like any other project it cannot work from, because
 /// mid-session the fix is one Beamfile save away and a session that quit
 /// on a renamed beam would be a session that quits while the user is
@@ -109,7 +111,7 @@ pub async fn session(
     beamfile: &Path,
     mut project: Project,
     mut sources: SourceMap,
-    mut target: BeamId,
+    mut selection: Selection,
     options: RunOptions,
     executors: Executors,
     events: UnboundedSender<RunEvent>,
@@ -130,7 +132,7 @@ pub async fn session(
         // Rebuilt for each run: the set caches the files its patterns
         // resolved to, and the run just before may have created or
         // deleted some of them.
-        let mut set = match WatchSet::new(&project, &target, &sources) {
+        let mut set = match WatchSet::new(&project, selection.watched_target(), &sources) {
             Ok(set) => set,
             Err(error) => {
                 // The target is not in this project — a beam renamed by
@@ -163,7 +165,55 @@ pub async fn session(
                     } => {
                         (project, sources) = (fresh_project, fresh_sources);
                         match commanded {
-                            Some((id, force)) => (target, force_next) = (id, force),
+                            Some((id, force)) => {
+                                (selection, force_next) = (Selection::Beam(id), force);
+                            }
+                            None => announce_recovery(&events),
+                        }
+                        continue;
+                    }
+                    Reloaded::Exit(exit) => return exit,
+                }
+            }
+        };
+
+        let targets = match select(&project, &sources, &root, &selection) {
+            Ok(targets) => targets,
+            Err(error) => {
+                // Same parking as an unknown target above: nothing but a
+                // change to the project can move this answer (a git
+                // failure included: the reference is fixed for the
+                // session, and a repository that appears or a reference
+                // that gets created will not announce itself).
+                let session_error = SessionError::Run {
+                    error,
+                    sources: sources.clone(),
+                };
+                let _ = events.send(RunEvent::ProjectBroken {
+                    diagnostic: render_error(&session_error),
+                });
+                match park_until_the_project_changes(
+                    beamfile,
+                    sources.clone(),
+                    &events,
+                    &mut *watcher,
+                    &cancel,
+                    &mut commands,
+                    &mut watch_enabled,
+                    render_error,
+                )
+                .await
+                {
+                    Reloaded::Project {
+                        project: fresh_project,
+                        sources: fresh_sources,
+                        commanded,
+                    } => {
+                        (project, sources) = (fresh_project, fresh_sources);
+                        match commanded {
+                            Some((id, force)) => {
+                                (selection, force_next) = (Selection::Beam(id), force);
+                            }
                             None => announce_recovery(&events),
                         }
                         continue;
@@ -192,7 +242,7 @@ pub async fn session(
         let result = {
             let run_future = run(
                 &project,
-                &target,
+                &targets,
                 run_options,
                 executors.clone(),
                 events.clone(),
@@ -255,7 +305,7 @@ pub async fn session(
         // next one, so there is nothing left to wait for: retarget and go.
         let commanded_run = commanded.is_some();
         if let Some((id, force)) = commanded {
-            (target, force_next) = (id, force);
+            (selection, force_next) = (Selection::Beam(id), force);
         }
 
         let trigger = match pending.take() {
@@ -272,7 +322,7 @@ pub async fn session(
                         () = cancel.cancelled() => return WatchExit::Interrupted,
                         command = next_command(&mut commands) => match command {
                             SessionCommand::RunBeam { id, force } => {
-                                (target, force_next) = (id, force);
+                                (selection, force_next) = (Selection::Beam(id), force);
                                 break None;
                             }
                             // Nothing is in flight to cancel.
@@ -345,7 +395,9 @@ pub async fn session(
                         } => {
                             (project, sources) = (fresh_project, fresh_sources);
                             match commanded {
-                                Some((id, force)) => (target, force_next) = (id, force),
+                                Some((id, force)) => {
+                                    (selection, force_next) = (Selection::Beam(id), force);
+                                }
                                 None => announce_recovery(&events),
                             }
                         }

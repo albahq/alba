@@ -40,6 +40,12 @@ pub enum Expr {
         then: Box<Expr>,
         otherwise: Box<Expr>,
     },
+    /// `object.field`, member access. Only the `git` object has fields;
+    /// which ones is `alba-core`'s concern, not the grammar's.
+    Field {
+        object: Spanned<String>,
+        field: Spanned<String>,
+    },
 }
 
 /// A binary operator usable in an [`Expr::Binary`].
@@ -148,6 +154,14 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) => {
                 let name_span = self.advance().span;
+                if self.check(&TokenKind::Dot) {
+                    self.advance();
+                    let field = self.eat_ident()?;
+                    return Ok(Expr::Field {
+                        object: Spanned::new(name, name_span),
+                        field,
+                    });
+                }
                 if self.check(&TokenKind::LParen) {
                     self.advance();
                     let mut args = Vec::new();

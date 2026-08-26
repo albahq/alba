@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_str};
-use alba_engine::{BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, run};
+use alba_engine::{
+    BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, Targets, run,
+};
 use alba_executors::{
     BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
     FakeBehavior, FakeEvent, FakeExecutor, OutputLine, Stream,
@@ -107,7 +109,7 @@ async fn run_target_with_executors(
 
     let result = run(
         &project,
-        &BeamId(target.to_string()),
+        &Targets::beam(BeamId(target.to_string())),
         options,
         executors,
         events_tx,
@@ -906,11 +908,13 @@ beam build { needs [codegen] run "step build" }
     let first = outcome.events.first().expect("at least one event");
     match first {
         RunEvent::RunStarted {
-            target,
+            targets,
+            affected_by,
             beams,
             edges,
         } => {
-            assert_eq!(target.0, "build");
+            assert_eq!(ids(targets), ["build"]);
+            assert!(affected_by.is_none());
             assert_eq!(ids(beams), ["codegen", "build"]);
             assert_eq!(edges.len(), 1);
             assert_eq!(
@@ -920,6 +924,98 @@ beam build { needs [codegen] run "step build" }
         }
         other => panic!("first event must be RunStarted, got {other:?}"),
     }
+}
+
+/// The helper for a run with several targets: the union of their
+/// subgraphs, each beam scheduled once.
+async fn run_targets(source: &str, targets: &[&str], executor: Arc<dyn Executor>) -> Outcome {
+    let project = load_str(source).unwrap();
+    let targets = Targets {
+        beams: targets.iter().map(|t| BeamId(t.to_string())).collect(),
+        affected_by: Some("main".to_string()),
+    };
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let result = run(
+        &project,
+        &targets,
+        options(4, false),
+        Executors::uniform(executor),
+        sender,
+        CancellationToken::new(),
+    )
+    .await;
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    Outcome { result, events }
+}
+
+#[tokio::test]
+async fn several_targets_schedule_the_union_of_their_subgraphs_once() {
+    const SOURCE: &str = r#"
+beam shared { run "s" }
+beam a { needs [shared] run "a" }
+beam b { needs [shared] run "b" }
+beam c { run "c" }
+"#;
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_targets(SOURCE, &["a", "b"], executor).await;
+    let summary = outcome.summary();
+    let mut ran = ids(&summary.succeeded);
+    ran.sort();
+    assert_eq!(ran, ["a", "b", "shared"]);
+    match &outcome.events[0] {
+        RunEvent::RunStarted {
+            targets,
+            affected_by,
+            ..
+        } => {
+            assert_eq!(ids(targets), ["a", "b"]);
+            assert_eq!(affected_by.as_deref(), Some("main"));
+        }
+        other => panic!("first event must be RunStarted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn no_targets_is_an_empty_run() {
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_targets("beam a { run \"a\" }", &[], executor).await;
+    let summary = outcome.summary();
+    assert!(summary.succeeded.is_empty() && summary.failed.is_empty());
+    assert!(matches!(&outcome.events[0], RunEvent::RunStarted { beams, .. } if beams.is_empty()));
+    assert!(matches!(
+        outcome.events.last(),
+        Some(RunEvent::RunFinished { .. })
+    ));
+}
+
+#[tokio::test]
+async fn positional_arguments_need_exactly_one_target() {
+    const SOURCE: &str = r#"
+beam a(x) { run "a {x}" }
+beam b { run "b" }
+"#;
+    let project = load_str(SOURCE).unwrap();
+    let targets = Targets {
+        beams: vec![BeamId("a".into()), BeamId("b".into())],
+        affected_by: None,
+    };
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut options = options(1, false);
+    options.params = vec!["v".to_string()];
+    let err = run(
+        &project,
+        &targets,
+        options,
+        Executors::uniform(Arc::new(FakeExecutor::new())),
+        sender,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("exactly one target"), "{err}");
 }
 
 #[tokio::test]
@@ -934,7 +1030,7 @@ beam build { needs [helper] run "step build" }
 
     assert_eq!(
         outcome.error().to_string(),
-        "beam `helper` declares parameters, but only the target beam can be given any"
+        "beam `helper` declares parameters, but only a target beam can be given any"
     );
     assert!(commands(&executor).is_empty());
 }

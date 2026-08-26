@@ -72,12 +72,39 @@ unset variable there would make the whole project fail to load, including for
 beams nobody asked to run. Alba rejects that at the call site rather than
 letting `alba check` answer differently depending on the machine it runs on.
 
+### Git variables
+
+The `git` object exposes the repository holding the Beamfile:
+
+| Expression | Value |
+| --- | --- |
+| `git.branch` | Current branch name; `HEAD` when detached. |
+| `git.sha` | Full SHA of `HEAD`. |
+| `git.short_sha` | Abbreviated SHA (`git rev-parse --short HEAD`). |
+| `git.dirty` | `true` when the working tree or the index differs from `HEAD`, untracked files included. |
+
+It is usable wherever an expression is: `let`, `run`, `description`, `env`,
+`inputs`, `outputs`, `cwd`, an executor option. `branch`, `sha`, and
+`short_sha` are strings; `dirty` is a boolean, so
+`{if git.dirty then '-dirty' else ''}` works with the existing expression
+forms.
+
+Each field is evaluated on first access and cached for the rest of the load,
+so a single `git` call answers all four: a Beamfile that never reads `git`
+never runs it. Outside a git repository, in a repository with no commit yet,
+or with `git` missing from the `PATH`, reading any field is a load error
+pointing at the expression that accessed it.
+
+`git` is a reserved name: `let git = ...`, and a parameter named `git`, are
+both rejected at parse time.
+
 ## Usage
 
 ```sh
-alba              # runs the declared `default` beam, or lists beams if none is declared
-alba check        # loads and validates the Beamfile without running anything
-alba run <beam>   # runs a beam and everything it needs
+alba                # runs the declared `default` beam, or lists beams if none is declared
+alba check          # loads and validates the Beamfile without running anything
+alba run <beam>     # runs a beam and everything it needs
+alba affected <ref> # lists the beams a git diff affects, runs nothing
 ```
 
 On a terminal, running any of these opens the interactive interface
@@ -132,6 +159,7 @@ Common to every subcommand:
 | `--output <STYLE>` | How text output is laid out: `interleaved` (every line as it happens, prefixed with the beam it came from) or `grouped` (each beam's output held back and printed as one block when it ends). Defaults to `interleaved` on a terminal and `grouped` otherwise. Ignored with `--log-format json`. |
 | `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line). Defaults to `text`. See [The JSON stream](#the-json-stream). |
 | `--watch` | Keep running: re-run the beam whenever the files its subgraph declares as `inputs` change, or a loaded Beamfile changes. Ctrl-C ends the session. See [Watch mode](#watch-mode). |
+| `--affected <REF>` | Run only the beams affected by what changed since `<REF>`, and their dependents. With a beam, that beam runs if it is affected and nothing runs otherwise; without one, every affected beam is a target. A beam with no `inputs` is never affected on its own. Composes with `--watch`: the targets are recomputed on every run. See [Affected runs](#affected-runs). |
 | `--ui` | Ask for the interactive interface even though stdout is not a terminal. Since it cannot actually draw there, the run is refused with an error instead of falling back to headless. Has no effect otherwise: on a terminal the interface is already the default, and `--log-format json`, `--output`, or `--no-ui` still choose the text renderers over it. See [Interactive interface](#interactive-interface). |
 | `--no-ui` | Force the plain text renderers on, even on a terminal. |
 
@@ -143,7 +171,7 @@ before reading anything else. An ordinary run emits six kinds:
 
 | `event` | Fields |
 | --- | --- |
-| `run_started` | `target` (the beam that was asked for), `beams` (every beam in its subgraph, the target included), `edges` (one `[beam, dependency]` pair per edge between them). Always the first line of the stream, before any beam's own events, so a consumer knows the shape of the run before watching it happen. |
+| `run_started` | `targets` (the beams asked for; empty when an `--affected` run found nothing), `affected_by` (the git reference an `--affected` run targeted; omitted otherwise), `beams` (every beam in the run's subgraph, the targets included), `edges` (one `[beam, dependency]` pair per edge between them). Always the first line of the stream, before any beam's own events, so a consumer knows the shape of the run before watching it happen. |
 | `beam_started` | `beam`. |
 | `beam_cached` | `beam`, for a beam the cache answered instead of running. |
 | `beam_output` | `beam`, `stream` (`stdout` or `stderr`), `text`, `replayed` (`true` for a line replayed from the cache rather than produced now). |
@@ -240,6 +268,47 @@ The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
 `alba cache clean` removes it entirely; the next run of any beam starts
 from scratch and repopulates it. Alba never edits your `.gitignore`, so
 add `.alba/` to it yourself in any project that turns caching on.
+
+## Affected runs
+
+`alba run --affected <ref> [beam]` runs only the beams affected by what
+changed since `<ref>`: every path `git diff --name-only <ref>` reports,
+plus every untracked file `.gitignore` does not exclude.
+
+A beam is affected when:
+
+- one of its `inputs` globs matches a changed path (pattern matching against
+  the path, exactly as watch mode does, so a deleted file still counts), or
+  the Beamfile that declares it changed;
+- it transitively `needs` a beam that is affected: the set is closed over
+  dependents, so an aggregating beam becomes affected the moment anything it
+  needs does;
+- it declares no `inputs` at all: such a beam is never affected by the first
+  rule alone, only by needing one that is.
+
+With a beam, the targets are the affected beams inside that beam's subgraph;
+when the beam itself is not affected, nothing in its subgraph is either
+(closure over dependents cuts both ways), and the run is empty. Without one,
+every affected beam in the project is a target, except a beam that declares
+parameters, which is skipped, since nothing can bind its arguments; the
+others still run. Either way, an empty run prints `✓ nothing affected by
+<ref>` and exits `0` rather than reporting an ordinary summary with every
+bucket at zero.
+
+`alba affected <ref>` lists the affected beams without running anything, one
+per line, or `{"beams": [...]}` under `--log-format json`. It exits `0` even
+when the list is empty: the dry run of `--affected`, meant for CI. A
+parameterized beam is listed too, marked `deploy (takes parameters)`, since
+nothing here needs to bind its arguments.
+
+`--affected <ref> --watch` composes: the reference stays fixed while the
+working tree moves. The watched set is the beam's whole subgraph, not only
+what is affected at startup, so touching a file of a not-yet-affected beam
+still triggers a run; every run, initial or triggered, recomputes the
+targets against `<ref>`, so reverting a change drops its beam back out.
+
+Affected selection is driven through the `git` CLI: `git` must be on the
+`PATH` for `--affected` and `alba affected`.
 
 ## Watch mode
 
@@ -576,6 +645,88 @@ those.
 Whenever the rewrite is not worth it, `executor system_shell` on that one
 beam restores exactly the previous behavior, and the rest of the Beamfile
 keeps the cross-platform guarantee.
+
+## Git hooks
+
+A Beamfile declares git hooks and points each one at the beam that runs it:
+
+```
+hook pre-commit { beam check }
+hook commit-msg { beam check_message }
+```
+
+`<name>` must be one of git's own hook names (`pre-commit`, `commit-msg`,
+`pre-push`, `post-checkout`, and so on); an unknown one is a load error.
+`beam` is required and names a local or namespaced beam; an unknown beam is
+a load error, reported the same way an unknown `needs` is. Git passes each
+hook a fixed number of arguments (`pre-commit` none, `commit-msg` one,
+`pre-push` two, and so on); the target beam may declare at most that many
+parameters: more is a load error, fewer is fine, git's extra arguments are
+dropped. The same hook cannot be declared twice, and only the root
+Beamfile's `hook` declarations count: an imported Beamfile's are ignored,
+exactly like its `default`.
+
+A hook that needs several beams points at an aggregating one, which is
+exactly what running it by hand looks like:
+
+```
+beam check_message(path) {
+  needs [fmt, lint]
+  run "commitlint --edit {path}"
+}
+```
+
+### Installing hooks
+
+`alba hooks install` writes one identical script under `.alba/hooks/` for
+every hook git knows, declared or not, and points the repository's
+`core.hooksPath` at that directory. Writing a script for every hook rather
+than only the declared ones is what lets a `hook` declaration added later
+take effect without reinstalling: only the first install per clone matters.
+Running it again rewrites the scripts without error. If `core.hooksPath`
+already points somewhere else, it refuses instead of overwriting it:
+
+```sh
+$ alba hooks install
+core.hooksPath already points to `.husky`, remove it or uninstall that tool first
+```
+
+`.alba/` should be in `.gitignore`; Alba never edits it for you.
+
+`alba hooks uninstall` removes the scripts and unsets `core.hooksPath`, but
+only when Alba is the one that set it, otherwise it refuses the same way.
+
+### Running a hook
+
+`alba hook <name> [args]` is what the installed scripts call, and doubles as
+a way to run a hook by hand while debugging it. With no Beamfile, or no
+`hook <name>` declared, it does nothing and exits `0`: this is what makes
+installing scripts for every hook harmless. A Beamfile that fails to load
+prints the diagnostic and exits `2` instead, blocking the git operation
+rather than letting it through silently. Otherwise it is the strict
+equivalent of `alba run <beam> [args]` with the text renderers and grouped
+output: git's own arguments become the target beam's positional parameters,
+truncated to what it declares, and the exit code is the run's, so git blocks
+the operation on any non-zero exit, not only `1`.
+
+`alba check` counts declared hooks in its summary and warns when they are
+not yet installed:
+
+```sh
+$ alba check
+⚠ 2 hooks declared, run 'alba hooks install'
+✓ Beamfile: 5 beams, 2 hooks
+
+$ alba hooks install
+✓ hooks installed: core.hooksPath = .alba/hooks
+
+$ alba check
+✓ Beamfile: 5 beams, 2 hooks
+```
+
+`pre-push` receives the list of refs being pushed on standard input; Alba
+does not forward it to the hook beam, so a hook that needs that list has to
+read it another way.
 
 ## Docker executor
 

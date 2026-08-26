@@ -30,3 +30,6 @@ beam build {
   outputs ["target/release/alba"]
   run "cargo build --release"
 }
+
+hook pre-commit { beam fmt }
+hook pre-push { beam check }

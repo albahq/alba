@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alba_core::{BeamId, ExecutorKind, load_str};
-use alba_engine::{BeamStatus, CacheOptions, Executors, RunEvent, RunOptions, RunSummary, run};
+use alba_engine::{
+    BeamStatus, CacheOptions, Executors, RunEvent, RunOptions, RunSummary, Targets, run,
+};
 use alba_executors::{FakeBehavior, FakeExecutor};
 use tokio_util::sync::CancellationToken;
 
@@ -103,7 +105,7 @@ async fn run_prepared(
 
     let summary = run(
         &project,
-        &BeamId(target.to_string()),
+        &Targets::beam(BeamId(target.to_string())),
         options,
         Executors::uniform(executor.clone()),
         events_tx,

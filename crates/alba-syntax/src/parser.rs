@@ -33,8 +33,8 @@
 //!   a parse error (`duplicate executor option`), for the same reason.
 
 use crate::ast::{
-    BeamDecl, BeamRef, ExecutorDecl, ExecutorOptionValue, File, Import, LetBinding, NamedString,
-    Spanned,
+    BeamDecl, BeamRef, ExecutorDecl, ExecutorOptionValue, File, HookDecl, Import, LetBinding,
+    NamedString, Spanned,
 };
 use crate::expr::Expr;
 use crate::lexer::Lexer;
@@ -419,7 +419,9 @@ impl<'a> Parser<'a> {
             self.advance();
             if !self.check(&TokenKind::RParen) {
                 loop {
-                    params.push(self.eat_ident()?);
+                    let param = self.eat_ident()?;
+                    reject_reserved(&param)?;
+                    params.push(param);
                     if self.check(&TokenKind::Comma) {
                         self.advance();
                     } else {
@@ -453,6 +455,54 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `hook <name> { beam <ref> }`. `beam` is the only field and is
+    /// required; the block form is kept so a later field (a `when`
+    /// condition, say) can join without breaking existing Beamfiles.
+    ///
+    /// The field's own name, `beam`, is the `KwBeam` keyword token (the
+    /// same one a top-level `beam` declaration starts with), not an
+    /// `Ident("beam")` — the lexer never produces the latter — so this
+    /// checks for the keyword directly rather than eating an identifier
+    /// and comparing its text.
+    fn parse_hook(&mut self) -> Result<HookDecl, ParseError> {
+        let hook_kw = self.expect(TokenKind::KwHook, "`hook`")?;
+        let name = self.eat_ident()?;
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let mut beam = None;
+        while !self.check(&TokenKind::RBrace) {
+            if !self.check(&TokenKind::KwBeam) {
+                let field = self.eat_ident()?;
+                return Err(ParseError {
+                    message: format!("unknown hook field `{}`", field.value),
+                    span: field.span,
+                    help: Some("a hook has exactly one field, `beam`".to_string()),
+                });
+            }
+            let beam_span = self.advance().span;
+            if beam.is_some() {
+                return Err(ParseError {
+                    message: "duplicate field `beam`".to_string(),
+                    span: beam_span,
+                    help: None,
+                });
+            }
+            beam = Some(self.parse_beam_ref()?);
+        }
+        let rbrace = self.expect(TokenKind::RBrace, "`}`")?;
+        let Some(beam) = beam else {
+            return Err(ParseError {
+                message: format!("hook `{}` declares no `beam`", name.value),
+                span: name.span,
+                help: Some("write `beam <name>` inside the block".to_string()),
+            });
+        };
+        Ok(HookDecl {
+            name,
+            beam,
+            span: Span::new(hook_kw.span.start, rbrace.span.end),
+        })
+    }
+
     /// `import "path" as alias`.
     fn parse_import(&mut self) -> Result<Import, ParseError> {
         self.expect(TokenKind::KwImport, "`import`")?;
@@ -466,6 +516,7 @@ impl<'a> Parser<'a> {
     fn parse_let(&mut self) -> Result<LetBinding, ParseError> {
         self.expect(TokenKind::KwLet, "`let`")?;
         let name = self.eat_ident()?;
+        reject_reserved(&name)?;
         self.expect(TokenKind::Eq, "`=`")?;
         let value = self.parse_expr()?;
         Ok(LetBinding { name, value })
@@ -480,6 +531,7 @@ impl<'a> Parser<'a> {
         let mut lets = Vec::new();
         let mut default = None;
         let mut beams = Vec::new();
+        let mut hooks = Vec::new();
 
         while !self.is_eof() {
             match self.peek().kind {
@@ -494,8 +546,11 @@ impl<'a> Parser<'a> {
                     default = Some(self.eat_ident()?);
                 }
                 TokenKind::KwBeam => beams.push(self.parse_beam()?),
+                TokenKind::KwHook => hooks.push(self.parse_hook()?),
                 _ => {
-                    return Err(self.unexpected("`version`, `import`, `let`, `default`, or `beam`"));
+                    return Err(
+                        self.unexpected("`version`, `import`, `let`, `default`, `beam`, or `hook`")
+                    );
                 }
             }
         }
@@ -517,8 +572,26 @@ impl<'a> Parser<'a> {
             lets,
             default,
             beams,
+            hooks,
         })
     }
+}
+
+/// `git` names the built-in git object; binding it would shadow every
+/// `git.*` field at once.
+fn reject_reserved(name: &Spanned<String>) -> Result<(), ParseError> {
+    if name.value == "git" {
+        return Err(ParseError {
+            message: "`git` is reserved for the built-in git object".to_string(),
+            span: name.span,
+            help: Some(
+                "pick another name; `git.branch`, `git.sha`, `git.short_sha`, and `git.dirty` \
+                 read from it"
+                    .to_string(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// The [`describe`] text for [`TokenKind::Eof`], exposed so `template.rs`
@@ -545,6 +618,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::KwElse => "`else`".to_string(),
         TokenKind::KwTrue => "`true`".to_string(),
         TokenKind::KwFalse => "`false`".to_string(),
+        TokenKind::KwHook => "`hook`".to_string(),
         TokenKind::LBrace => "`{`".to_string(),
         TokenKind::RBrace => "`}`".to_string(),
         TokenKind::LBracket => "`[`".to_string(),
@@ -559,6 +633,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::AndAnd => "`&&`".to_string(),
         TokenKind::OrOr => "`||`".to_string(),
         TokenKind::Plus => "`+`".to_string(),
+        TokenKind::Dot => "`.`".to_string(),
         TokenKind::Newline => "a newline".to_string(),
         TokenKind::Eof => EOF_DESCRIPTION.to_string(),
     }

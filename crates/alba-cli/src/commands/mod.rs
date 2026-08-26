@@ -20,9 +20,21 @@
 //! `plugin` goes further still: `alba plugin check` needs no Beamfile at
 //! all, not even to locate a directory, since it drives a binary through
 //! the protocol directly. It is dispatched the same way, before loading.
+//!
+//! `affected` lists the beams a git reference's diff touches, and never
+//! runs anything — it is the dry run of `alba run --affected`, meant for
+//! CI to gate on.
 
+pub mod affected;
 pub mod cache;
 pub mod check;
+/// `alba hook <name> [args]`: dispatched after loading, like every command
+/// in this list except `cache` and `plugin` — but see `main.rs`, which
+/// answers `0` before loading is even attempted when there is no Beamfile
+/// at all, since an undeclared hook (the common case, git knows every
+/// hook by name whether or not a Beamfile declares it) must stay silent.
+pub mod hook;
+pub mod hooks;
 pub mod list;
 pub mod plugin;
 pub mod run;

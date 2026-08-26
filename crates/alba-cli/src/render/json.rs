@@ -70,7 +70,9 @@ impl super::Renderer for JsonRenderer {
 #[serde(tag = "event", rename_all = "snake_case")]
 enum WireEvent<'a> {
     RunStarted {
-        target: &'a str,
+        targets: Vec<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        affected_by: Option<&'a str>,
         beams: Vec<&'a str>,
         edges: Vec<(&'a str, &'a str)>,
     },
@@ -130,11 +132,13 @@ impl<'a> From<&'a RunEvent> for WireEvent<'a> {
     fn from(event: &'a RunEvent) -> Self {
         match event {
             RunEvent::RunStarted {
-                target,
+                targets,
+                affected_by,
                 beams,
                 edges,
             } => WireEvent::RunStarted {
-                target: &target.0,
+                targets: targets.iter().map(|id| id.0.as_str()).collect(),
+                affected_by: affected_by.as_deref(),
                 beams: beams.iter().map(|id| id.0.as_str()).collect(),
                 edges: edges
                     .iter()
@@ -327,7 +331,8 @@ mod tests {
     #[test]
     fn run_started_is_emitted_on_the_wire() {
         let event = RunEvent::RunStarted {
-            target: BeamId("build".to_string()),
+            targets: vec![BeamId("build".to_string())],
+            affected_by: None,
             beams: vec![BeamId("codegen".to_string()), BeamId("build".to_string())],
             edges: vec![(BeamId("build".to_string()), BeamId("codegen".to_string()))],
         };
@@ -336,7 +341,7 @@ mod tests {
 
         assert_eq!(
             line,
-            r#"{"event":"run_started","target":"build","beams":["codegen","build"],"edges":[["build","codegen"]]}"#
+            r#"{"event":"run_started","targets":["build"],"beams":["codegen","build"],"edges":[["build","codegen"]]}"#
         );
     }
 

@@ -43,7 +43,8 @@ use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, SessionError, WatchExit,
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection,
+    SessionError, WatchExit,
 };
 use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -53,7 +54,7 @@ use crate::args::{LogFormat, OutputStyle, RunFlags};
 use crate::exit::{EXIT_ALBA_ERROR, EXIT_INTERRUPTED};
 use crate::render::{GroupedRenderer, InterleavedRenderer, JsonRenderer, LineSink, Renderer};
 
-/// Runs `target` and returns the process exit code.
+/// Runs `selection` and returns the process exit code.
 ///
 /// Loading already happened in `main.rs` (see the `commands` module doc
 /// comment); `sources` is carried in only to render an [`EngineError`]
@@ -63,7 +64,7 @@ pub fn run(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
@@ -97,14 +98,16 @@ pub fn run(
     // are otherwise exactly the program they were.
     if interactive {
         runtime.block_on(tui_execute(
-            project, sources, beamfile, target, params, flags,
+            project, sources, beamfile, selection, params, flags,
         ))
     } else if flags.watch {
         runtime.block_on(watch_execute(
-            project, sources, beamfile, target, params, flags,
+            project, sources, beamfile, selection, params, flags,
         ))
     } else {
-        runtime.block_on(execute(project, sources, beamfile, target, params, flags))
+        runtime.block_on(execute(
+            project, sources, beamfile, selection, params, flags,
+        ))
     }
 }
 
@@ -159,7 +162,7 @@ async fn execute(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
@@ -173,6 +176,15 @@ async fn execute(
         }),
     };
 
+    let root = alba_engine::beamfile_dir(beamfile);
+    let targets = match alba_engine::select(project, sources, &root, selection) {
+        Ok(targets) => targets,
+        Err(error) => {
+            LineSink::stderr().line(render_engine_error(&error, sources).trim_end());
+            return EXIT_ALBA_ERROR;
+        }
+    };
+
     let (events, incoming) = unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -181,7 +193,7 @@ async fn execute(
 
     let result = alba_engine::run(
         project,
-        target,
+        &targets,
         options,
         executors(beamfile),
         events,
@@ -232,22 +244,22 @@ async fn watch_execute(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
     let mut err = LineSink::stderr();
 
-    match alba_core::execution_subgraph(project, target) {
-        Ok(subgraph) => {
-            if let Some(warning) = no_inputs_warning(project, target, &subgraph) {
-                err.line(&warning);
-            }
-        }
-        Err(error) => {
-            err.line(crate::render_core_error(&error, sources).trim_end());
-            return EXIT_ALBA_ERROR;
-        }
+    let root = alba_engine::beamfile_dir(beamfile);
+    if let Err(error) = alba_engine::select(project, sources, &root, selection) {
+        err.line(render_engine_error(&error, sources).trim_end());
+        return EXIT_ALBA_ERROR;
+    }
+    if let Some(target) = selection.watched_target()
+        && let Ok(subgraph) = alba_core::execution_subgraph(project, target)
+        && let Some(warning) = no_inputs_warning(project, target, &subgraph)
+    {
+        err.line(&warning);
     }
 
     let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources)) {
@@ -278,7 +290,7 @@ async fn watch_execute(
         beamfile,
         project.clone(),
         sources.clone(),
-        target.clone(),
+        selection.clone(),
         options,
         executors(beamfile),
         events,
@@ -338,7 +350,7 @@ async fn tui_execute(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    target: &BeamId,
+    selection: &Selection,
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
@@ -348,8 +360,9 @@ async fn tui_execute(
     // `no_inputs_warning`'s advice belongs to a session that can only
     // watch, and this one shows its watch state in the header and lets `w`
     // change it.
-    if let Err(error) = alba_core::execution_subgraph(project, target) {
-        err.line(crate::render_core_error(&error, sources).trim_end());
+    let root = alba_engine::beamfile_dir(beamfile);
+    if let Err(error) = alba_engine::select(project, sources, &root, selection) {
+        err.line(render_engine_error(&error, sources).trim_end());
         return EXIT_ALBA_ERROR;
     }
 
@@ -381,14 +394,14 @@ async fn tui_execute(
         let beamfile = beamfile.to_path_buf();
         let project = project.clone();
         let sources = sources.clone();
-        let target = target.clone();
+        let selection = selection.clone();
         let watch = flags.watch;
         async move {
             alba_engine::session(
                 &beamfile,
                 project,
                 sources,
-                target,
+                selection,
                 options,
                 executors(&beamfile),
                 events,
@@ -412,7 +425,7 @@ async fn tui_execute(
         incoming,
         commands,
         alba_tui::TuiOptions {
-            target: target.0.clone(),
+            target: selection_label(selection),
             watch: flags.watch,
         },
     )
@@ -439,7 +452,15 @@ async fn tui_execute(
         }
     };
 
-    replay(&mut err, &outcome);
+    // The session's own fixed reference — `TuiOutcome` carries none of its
+    // own, and a mid-session retarget to a plain beam (`SessionCommand::Run`)
+    // is not reflected here, same as `selection_label` above: both read the
+    // selection this call started with, not whatever the session moved to.
+    let affected_by = match selection {
+        Selection::Affected { reference, .. } => Some(reference.as_str()),
+        Selection::Beam(_) => None,
+    };
+    replay(&mut err, &outcome, affected_by);
 
     match failure {
         // A session that did not end on its own terms is an Alba failure,
@@ -451,6 +472,20 @@ async fn tui_execute(
         // sources: an abandoned run, a parked session, or a session the
         // user quit before anything finished all report an interruption.
         None => outcome.last_run_code.unwrap_or(EXIT_INTERRUPTED),
+    }
+}
+
+/// What the interface calls the session before its first run reports.
+fn selection_label(selection: &Selection) -> String {
+    match selection {
+        Selection::Beam(id)
+        | Selection::Affected {
+            within: Some(id), ..
+        } => id.0.clone(),
+        Selection::Affected {
+            reference,
+            within: None,
+        } => format!("affected by {reference}"),
     }
 }
 
@@ -493,9 +528,18 @@ fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'
 /// [`crate::render::print_summary`] is: the caller hands it the real
 /// stderr, while a test hands it a buffer and reads back exactly what
 /// the user would have been left looking at.
-fn replay<W: std::io::Write>(err: &mut LineSink<W>, outcome: &alba_tui::TuiOutcome) {
+///
+/// `affected_by` is the caller's own selection, not anything read back off
+/// `outcome` — `TuiOutcome` carries no reference of its own — so an
+/// `--affected` session that ends on an empty run still owes the same
+/// `nothing affected` line the headless and watch sessions print.
+fn replay<W: std::io::Write>(
+    err: &mut LineSink<W>,
+    outcome: &alba_tui::TuiOutcome,
+    affected_by: Option<&str>,
+) {
     if let Some(summary) = &outcome.last_summary {
-        crate::render::print_summary(err, summary);
+        crate::render::print_summary(err, summary, affected_by);
     }
 
     for (beam, lines) in &outcome.failed_logs {
@@ -786,6 +830,7 @@ mod tests {
         Project {
             beams,
             default: None,
+            hooks: Vec::new(),
         }
     }
 
@@ -961,11 +1006,11 @@ mod tests {
 
     /// What `replay` wrote, as lines — the interface is gone by the time
     /// it runs, so this is literally what the user is left looking at.
-    fn replayed(outcome: &alba_tui::TuiOutcome) -> Vec<String> {
+    fn replayed(outcome: &alba_tui::TuiOutcome, affected_by: Option<&str>) -> Vec<String> {
         let mut buffer: Vec<u8> = Vec::new();
         {
             let mut sink = LineSink::new(&mut buffer);
-            replay(&mut sink, outcome);
+            replay(&mut sink, outcome, affected_by);
         }
         String::from_utf8(buffer)
             .expect("the replay writes UTF-8")
@@ -994,7 +1039,7 @@ mod tests {
             ..RunSummary::default()
         };
 
-        let lines = replayed(&outcome(Some(summary), Vec::new()));
+        let lines = replayed(&outcome(Some(summary), Vec::new()), None);
 
         assert_eq!(lines.len(), 1, "got: {lines:?}");
         assert!(
@@ -1017,7 +1062,7 @@ mod tests {
             vec!["boom 1".to_string(), "boom 2".to_string()],
         )];
 
-        let lines = replayed(&outcome(Some(summary), logs));
+        let lines = replayed(&outcome(Some(summary), logs), None);
 
         assert!(lines[0].contains("1 failed"), "got: {lines:?}");
         assert_eq!(
@@ -1043,7 +1088,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         )];
 
-        let lines = replayed(&outcome(Some(summary), logs));
+        let lines = replayed(&outcome(Some(summary), logs), None);
 
         assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
         assert!(
@@ -1059,7 +1104,21 @@ mod tests {
     /// no summary, no beams, and so not a single line.
     #[test]
     fn a_session_with_no_finished_run_replays_nothing() {
-        assert!(replayed(&outcome(None, Vec::new())).is_empty());
+        assert!(replayed(&outcome(None, Vec::new()), None).is_empty());
+    }
+
+    /// The reviewer's finding: `TuiOutcome` carries no `affected_by` of its
+    /// own, but the caller's selection does, and an `--affected` session
+    /// that ends right after an empty run must still say so on the way
+    /// out — not fall back to a bare, misleading duration.
+    #[test]
+    fn the_replay_of_an_empty_affected_run_says_nothing_was_affected() {
+        let lines = replayed(
+            &outcome(Some(RunSummary::default()), Vec::new()),
+            Some("HEAD"),
+        );
+
+        assert_eq!(lines, ["\u{2713} nothing affected by HEAD"]);
     }
 
     /// An orderly goodbye is not a failure and owes no line.

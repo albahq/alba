@@ -62,7 +62,8 @@
 //! as soon as its argument is known.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use alba_syntax::{
     BeamDecl, BeamRef, BinOp, ExecutorDecl, ExecutorOptionValue, Expr, File, ParseError, Span,
@@ -70,7 +71,8 @@ use alba_syntax::{
 };
 
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
-use crate::model::{Beam, BeamId, ExecutorKind, OptionValue, Project, Value};
+use crate::git::{GitError, GitHead};
+use crate::model::{Beam, BeamId, ExecutorKind, Hook, OptionValue, Project, Value};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
 const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
@@ -85,12 +87,76 @@ const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scope {
     values: HashMap<String, Value>,
+    git: Option<Arc<LazyGit>>,
+}
+
+/// The `git` object's values, computed on first access and shared by every
+/// scope of one load: a Beamfile that never reads `git` never spawns it,
+/// and one that reads it in ten places spawns it once.
+#[derive(Debug)]
+pub(crate) struct LazyGit {
+    root: PathBuf,
+    head: OnceLock<Result<GitHead, GitError>>,
+}
+
+impl LazyGit {
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            head: OnceLock::new(),
+        }
+    }
+
+    fn head(&self) -> Result<&GitHead, GitError> {
+        self.head
+            .get_or_init(|| crate::git::head(&self.root))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+
+/// Two scopes from the same load share one `LazyGit`; comparing the root
+/// is what "same git" means, and keeps `Scope: PartialEq`.
+impl PartialEq for LazyGit {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+    }
 }
 
 impl Scope {
     /// An empty scope: no `let`s, no parameters.
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// A scope with no `let`s or parameters yet, but with `git` wired up
+    /// so `git.*` field access resolves once an expression reads it.
+    pub(crate) fn with_git(git: Arc<LazyGit>) -> Self {
+        Self {
+            values: HashMap::new(),
+            git: Some(git),
+        }
+    }
+
+    /// The `git.<field>` value, or the error to report at `span`. Callers
+    /// have already run `check_field` (below), so a bad object or field
+    /// name never reaches here: the only remaining way to fail is `git`
+    /// being unavailable in this scope, or the real `git.head()` call
+    /// itself failing.
+    fn git_field(&self, field: &Spanned<String>, span: Span) -> Result<Value, CoreError> {
+        let Some(git) = &self.git else {
+            return Err(CoreError::new("`git` is not available here", span));
+        };
+        let head = git.head().map_err(|error| {
+            CoreError::new(format!("cannot read `git.{}`: {error}", field.value), span)
+        })?;
+        Ok(match field.value.as_str() {
+            "branch" => Value::Str(head.branch.clone()),
+            "sha" => Value::Str(head.sha.clone()),
+            "short_sha" => Value::Str(head.short_sha.clone()),
+            "dirty" => Value::Bool(head.dirty),
+            _ => unreachable!("checked by check_field before this method is ever called"),
+        })
     }
 
     /// Binds `name` to `value` in place. `pub(crate)`: only this module's
@@ -130,7 +196,10 @@ impl Scope {
         for (name, arg) in params.iter().zip(args.iter()) {
             values.insert(name.clone(), Value::Str(arg.clone()));
         }
-        Self { values }
+        Self {
+            values,
+            git: self.git.clone(),
+        }
     }
 }
 
@@ -145,7 +214,43 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Var(name) => Some(name.span),
         Expr::Call { name, .. } => Some(name.span),
         Expr::Bool(_) | Expr::Binary { .. } | Expr::If { .. } => None,
+        Expr::Field { object, field } => Some(Span::new(object.span.start, field.span.end)),
     }
+}
+
+/// `object.field`: only `git` has fields, and only the four values below
+/// exist on it. Spawn-free: this alone is what `check_expr` runs, so
+/// `git.tag` or `foo.bar` is rejected at load time without ever touching
+/// git. Shared with `eval_field`, which extends this with the real
+/// `git.head()` lookup once a value is actually needed.
+fn check_field(object: &Spanned<String>, field: &Spanned<String>) -> Result<(), CoreError> {
+    if object.value != "git" {
+        return Err(CoreError::new(
+            format!("`{}` has no fields; only `git` does", object.value),
+            object.span,
+        ));
+    }
+    if !matches!(
+        field.value.as_str(),
+        "branch" | "sha" | "short_sha" | "dirty"
+    ) {
+        return Err(
+            CoreError::new(format!("unknown git field `{}`", field.value), field.span)
+                .with_help("expected one of `branch`, `sha`, `short_sha`, `dirty`"),
+        );
+    }
+    Ok(())
+}
+
+/// `object.field`, evaluated for real: [`check_field`]'s spawn-free name
+/// check, then the actual `git.head()` lookup through the scope.
+fn eval_field(
+    object: &Spanned<String>,
+    field: &Spanned<String>,
+    scope: &Scope,
+) -> Result<Value, CoreError> {
+    check_field(object, field)?;
+    scope.git_field(field, Span::new(object.span.start, field.span.end))
 }
 
 /// Classic dynamic-programming Levenshtein edit distance between two
@@ -285,6 +390,7 @@ fn eval_with_fallback(expr: &Expr, scope: &Scope, fallback: Span) -> Result<Valu
                 )),
             }
         }
+        Expr::Field { object, field } => eval_field(object, field, scope),
     }
 }
 
@@ -590,6 +696,18 @@ fn check_expr(
                 }
             }
         }
+        // Spawn-free name check only: whether `object` has fields and
+        // whether `field` is one of `git`'s four. The real `git.head()`
+        // lookup happens only at evaluation time (`eval_field`, via
+        // `eval_with_fallback`), never here — otherwise a beam whose
+        // condition never takes the branch that reads `git` would still
+        // spawn it just because `check_expr` validates both branches of an
+        // `if` (see above). `env()` calls defer the same way, for the same
+        // reason.
+        Expr::Field { object, field } => {
+            check_field(object, field)?;
+            Ok(StaticValue::Unknown)
+        }
     }
 }
 
@@ -712,6 +830,7 @@ fn reject_param_references(expr: &Expr, params: &[String], field: &str) -> Resul
             reject_param_references(then, params, field)?;
             reject_param_references(otherwise, params, field)
         }
+        Expr::Field { .. } => Ok(()),
     }
 }
 
@@ -801,7 +920,12 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
             import.path.span,
         ));
     }
-    let project = build_project(&file, Path::new("."))?;
+    let project = build_project(
+        &file,
+        Path::new("."),
+        Arc::new(LazyGit::new(PathBuf::from("."))),
+        true,
+    )?;
     crate::graph::validate_graph(&project)?;
     Ok(project)
 }
@@ -812,8 +936,13 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
 /// [`SourceIdScope`]). Does not resolve `file.imports` — that recursion,
 /// and the namespace prefixing it requires, belongs to
 /// [`crate::loader::load_project`], which calls this once per file.
-pub(crate) fn build_project(file: &File, dir: &Path) -> Result<Project, CoreError> {
-    let mut lets = Scope::empty();
+pub(crate) fn build_project(
+    file: &File,
+    dir: &Path,
+    git: Arc<LazyGit>,
+    is_root: bool,
+) -> Result<Project, CoreError> {
+    let mut lets = Scope::with_git(git);
     for binding in &file.lets {
         // Validated before being evaluated, for the same reason a
         // load-time field is: evaluation only walks the branch an `if`
@@ -836,7 +965,48 @@ pub(crate) fn build_project(file: &File, dir: &Path) -> Result<Project, CoreErro
         .as_ref()
         .map(|d| Spanned::new(BeamId(d.value.clone()), d.span));
 
-    Ok(Project { beams, default })
+    // An import's own `hook` declarations are ignored, exactly as its
+    // `default` is (see `crate::loader::Loader::load_file_body`) — so the
+    // unknown-name and duplicate checks below must only ever run for the
+    // root Beamfile. Running them unconditionally would fail the *whole*
+    // load over a hook problem in a file whose hooks are never even kept.
+    let mut hooks: Vec<Hook> = Vec::new();
+    if is_root {
+        for decl in &file.hooks {
+            let Some(known) = crate::git::known_hook(&decl.name.value) else {
+                let mut err = CoreError::new(
+                    format!("unknown git hook `{}`", decl.name.value),
+                    decl.name.span,
+                );
+                if let Some(candidate) = suggest(
+                    &decl.name.value,
+                    crate::git::KNOWN_HOOKS.iter().map(|hook| hook.name),
+                ) {
+                    err = err.with_help(format!("did you mean `{candidate}`?"));
+                }
+                return Err(err);
+            };
+            if hooks.iter().any(|hook| hook.name == decl.name.value) {
+                return Err(CoreError::new(
+                    format!("duplicate hook `{}`", decl.name.value),
+                    decl.name.span,
+                ));
+            }
+            hooks.push(Hook {
+                name: decl.name.value.clone(),
+                beam: Spanned::new(beam_ref_to_id(&decl.beam.value), decl.beam.span),
+                arity: known.arity,
+                span: decl.span,
+                source: current_source_id(),
+            });
+        }
+    }
+
+    Ok(Project {
+        beams,
+        default,
+        hooks,
+    })
 }
 
 fn beam_ref_to_id(r: &BeamRef) -> BeamId {

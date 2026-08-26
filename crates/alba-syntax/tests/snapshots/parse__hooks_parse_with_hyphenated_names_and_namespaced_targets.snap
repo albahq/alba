@@ -1,0 +1,54 @@
+---
+source: crates/alba-syntax/tests/parse.rs
+expression: file.hooks
+---
+[
+    HookDecl {
+        name: Spanned {
+            value: "pre-commit",
+            span: Span {
+                start: 5,
+                end: 15,
+            },
+        },
+        beam: Spanned {
+            value: BeamRef {
+                namespace: [],
+                name: "check",
+            },
+            span: Span {
+                start: 23,
+                end: 28,
+            },
+        },
+        span: Span {
+            start: 0,
+            end: 30,
+        },
+    },
+    HookDecl {
+        name: Spanned {
+            value: "commit-msg",
+            span: Span {
+                start: 36,
+                end: 46,
+            },
+        },
+        beam: Spanned {
+            value: BeamRef {
+                namespace: [
+                    "api",
+                ],
+                name: "check_message",
+            },
+            span: Span {
+                start: 54,
+                end: 71,
+            },
+        },
+        span: Span {
+            start: 31,
+            end: 73,
+        },
+    },
+]

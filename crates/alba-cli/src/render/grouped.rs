@@ -25,6 +25,10 @@ pub struct GroupedRenderer {
     /// and never `true` outside a watch session, since a plain `alba run`
     /// has no session to clear between.
     clear_between_runs: bool,
+    /// The reference the current run's targets were computed against, set
+    /// from each `RunStarted` and read back at `RunFinished` — `None` for
+    /// an ordinary run.
+    affected_by: Option<String>,
     out: LineSink<io::Stdout>,
     err: LineSink<io::Stderr>,
 }
@@ -35,6 +39,7 @@ impl GroupedRenderer {
         Self {
             buffers: HashMap::new(),
             clear_between_runs,
+            affected_by: None,
             out: LineSink::stdout(),
             err: LineSink::stderr(),
         }
@@ -106,9 +111,9 @@ impl Renderer for GroupedRenderer {
                     let header = format!("\u{2500}\u{2500} {id} (unfinished) \u{2500}\u{2500}");
                     self.flush(&id, &header);
                 }
-                print_summary(&mut self.err, summary);
+                print_summary(&mut self.err, summary, self.affected_by.as_deref());
             }
-            RunEvent::RunStarted { .. } => {}
+            RunEvent::RunStarted { affected_by, .. } => self.affected_by = affected_by.clone(),
             RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
             // Alba commentary, not the run's output — stderr, like every
             // other diagnostic this module prints (see the module doc).
