@@ -67,6 +67,14 @@ pub fn key_style(colour: bool) -> Style {
 /// A bottom-bar text (`q quit · r rerun`) as a line whose first word of
 /// every ` · `-separated item is a key drawn with `key_style`. Off
 /// colour it is one plain span, the text unchanged.
+///
+/// "First word of the item" is a heuristic for "the key", not a rule
+/// `bottom_bar`'s callers are held to, and it has two known misfires
+/// left as cosmetic: an item with no space at all bolds whole, not just
+/// a first word (the Search bar's `1/5` match counter), and an item
+/// whose first word is not the key (`copied (OSC 52) · q quit` bolds
+/// `copied`) bolds the wrong word. Neither is worth restructuring
+/// `bottom_bar` to fix.
 pub fn bar_line(text: &str, colour: bool) -> Line<'static> {
     if !colour {
         return Line::from(text.to_string());
