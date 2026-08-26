@@ -26,7 +26,7 @@ pub fn line(state: &AppState, now: Instant) -> Line<'static> {
     match &state.phase {
         Phase::Running { done, total, since } => {
             let elapsed = now.saturating_duration_since(*since);
-            let filled = filled_cells(*done, *total);
+            let filled = super::footer::filled_cells(*done, *total, BAR_WIDTH);
             let rest = BAR_WIDTH - filled;
             Line::from(vec![
                 Span::raw(format!("alba · run {} ── ", state.target)),
@@ -55,19 +55,6 @@ pub fn line(state: &AppState, now: Instant) -> Line<'static> {
             None => Line::from(format!("alba · {} · idle", state.target)),
         },
     }
-}
-
-/// Deterministic on purpose: `done`/`total` are the whole story, so the
-/// same state always draws the same bar and no clock is involved in
-/// deciding how full it looks — only in how long the run has taken,
-/// which the header prints separately.
-fn filled_cells(done: usize, total: usize) -> usize {
-    if total == 0 {
-        0
-    } else {
-        ((done as f64 / total as f64) * BAR_WIDTH as f64).round() as usize
-    }
-    .min(BAR_WIDTH)
 }
 
 /// The last run's outcome, once it is over. Zero buckets are omitted,

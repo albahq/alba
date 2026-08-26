@@ -20,6 +20,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::{AppState, Mode};
 
+mod footer;
 mod graphpane;
 mod header;
 mod help;
@@ -29,9 +30,9 @@ mod tree;
 
 /// Below this floor, the tree and log panes have no room left to mean
 /// anything, so the whole layout gives way to one message instead of
-/// drawing a garbled screen (spec: "terminal too small", roughly 40x10).
+/// drawing a garbled screen (spec: "terminal too small", roughly 40x12).
 const MIN_WIDTH: u16 = 40;
-const MIN_HEIGHT: u16 = 10;
+const MIN_HEIGHT: u16 = 12;
 
 /// The tree pane's fixed content width, measured inside the frame's
 /// outer border and the divider that separates it from the log pane.
@@ -45,7 +46,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         frame.render_widget(
-            Paragraph::new("terminal too small (need at least 40x10)").alignment(Alignment::Center),
+            Paragraph::new("terminal too small (need at least 40x12)").alignment(Alignment::Center),
             area,
         );
         return;
@@ -68,11 +69,30 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
+    // Inside the frame, top to bottom: the body (the two panes, or the
+    // graph), the junction line that closes the panes' columns, and the
+    // footer carrying the run. The bottom edge below them is the outer
+    // block's own.
+    let rows = Layout::vertical([
+        Constraint::Min(0),    // body
+        Constraint::Length(1), // junction: ├───┴───┤
+        Constraint::Length(1), // footer: counts, bar or outcome
+    ])
+    .split(inner);
+    let (body, junction, footer) = (rows[0], rows[1], rows[2]);
+
+    footer::draw(frame, footer, state, now);
+
     // Graph mode replaces the body entirely — no tree, no log pane, no
-    // divider between them — rather than squeezing into either half:
-    // the graph is the one thing on screen while it is active.
+    // divider between them, and no junction closing columns that are
+    // not there: the graph gets the junction's row too. The footer stays:
+    // the run is still the run while the reader looks at its graph.
     if let Mode::Graph(graph) = &state.mode {
-        graphpane::draw(frame, inner, state, graph);
+        let body = Rect {
+            height: body.height + junction.height,
+            ..body
+        };
+        graphpane::draw(frame, body, state, graph);
         return;
     }
 
@@ -80,13 +100,14 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     // the divider between it and the log pane — one column wider than
     // the tree's actual content width.
     let panes =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(inner);
+        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(body);
     let divider = Block::new().borders(Borders::RIGHT);
     let tree_area = divider.inner(panes[0]);
     frame.render_widget(divider, panes[0]);
 
     tree::draw(frame, tree_area, state, now);
     logpane::draw(frame, panes[1], state);
+    draw_junction(frame, area, junction);
 
     // Help is an overlay, not a replacement: the tree and log panes stay
     // drawn underneath it (dimmed), unlike graph mode's own early return
@@ -94,6 +115,22 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     if matches!(state.mode, Mode::Help) {
         help::draw(frame, inner);
     }
+}
+
+/// The line closing the two panes' columns: `─` across the frame's
+/// inside, `┴` where the divider lands on it, and the outer border's
+/// own `│` on either side turned into `├`/`┤`. Those three cells are
+/// written by hand: `Block` draws one rectangle's edges, and this row
+/// is where three of them meet.
+fn draw_junction(frame: &mut Frame, frame_area: Rect, junction: Rect) {
+    frame.render_widget(
+        Paragraph::new("─".repeat(junction.width as usize)),
+        junction,
+    );
+    let buffer = frame.buffer_mut();
+    buffer[(frame_area.x, junction.y)].set_symbol("├");
+    buffer[(junction.x + TREE_WIDTH, junction.y)].set_symbol("┴");
+    buffer[(frame_area.right() - 1, junction.y)].set_symbol("┤");
 }
 
 /// Wraps a header or bottom-bar line in the border's own `─ ... ` frame,
@@ -162,10 +199,11 @@ fn format_duration(duration: Duration) -> String {
 }
 
 /// The log pane's own content rectangle — inside the outer border, past
-/// the tree pane and its divider, and inside the title row
-/// `logpane::draw` reserves — for a terminal of `width` × `height`
-/// cells. `None` below the too-small floor, where `draw` paints nothing
-/// but its one message and there is no pane to hit-test against.
+/// the tree pane and its divider, and inside the title row, and above
+/// the junction and footer rows `logpane::draw` reserves — for a
+/// terminal of `width` × `height` cells. `None` below the too-small
+/// floor, where `draw` paints nothing but its one message and there is
+/// no pane to hit-test against.
 ///
 /// Copy mode's mouse handling (`lib::dispatch_mouse`) asks this rather
 /// than re-deriving the layout its own way, so a click can never drift
@@ -176,14 +214,20 @@ pub fn log_pane_content_area(width: u16, height: u16) -> Option<Rect> {
         return None;
     }
     let inner = Block::bordered().inner(Rect::new(0, 0, width, height));
-    let panes =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(inner);
     let rows = Layout::vertical([
+        Constraint::Min(0),    // body
+        Constraint::Length(1), // junction
+        Constraint::Length(1), // footer
+    ])
+    .split(inner);
+    let panes =
+        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(rows[0]);
+    let pane = Layout::vertical([
         Constraint::Length(1), // "LOGS" title row
         Constraint::Min(0),    // output
     ])
     .split(panes[1]);
-    Some(rows[1])
+    Some(pane[1])
 }
 
 #[cfg(test)]
@@ -193,15 +237,41 @@ mod tests {
     #[test]
     fn log_pane_content_area_sits_past_the_tree_and_its_borders() {
         // Outer border: 1 cell each side. Tree pane + divider: 31
-        // columns. Title row: 1 line.
+        // columns. Title row: 1 line. Junction and footer: 2 lines.
         let area = log_pane_content_area(80, 24).expect("80x24 clears the floor");
-        assert_eq!(area, Rect::new(32, 2, 47, 21));
+        assert_eq!(area, Rect::new(32, 2, 47, 19));
     }
 
     #[test]
     fn log_pane_content_area_is_none_below_the_floor() {
         assert_eq!(log_pane_content_area(MIN_WIDTH - 1, 24), None);
         assert_eq!(log_pane_content_area(80, MIN_HEIGHT - 1), None);
+    }
+
+    /// The junction row is where three block edges meet, and its three
+    /// special cells are written by hand, so this pins them: `├` on the
+    /// left edge, `┴` at the divider's foot, `┤` on the right edge.
+    #[test]
+    fn the_junction_closes_both_columns() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let state = AppState::new("build", false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &state, Instant::now()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // Rows at 80x24: 23 is the bottom edge, 22 the footer, 21 the
+        // junction, 20 the last body row.
+        assert_eq!(buffer[(0, 21)].symbol(), "├");
+        assert_eq!(buffer[(31, 21)].symbol(), "┴");
+        assert_eq!(buffer[(79, 21)].symbol(), "┤");
+        assert_eq!(
+            buffer[(31, 20)].symbol(),
+            "│",
+            "the divider reaches the junction"
+        );
     }
 
     /// The copy result takes over the bar for its whole visible window,

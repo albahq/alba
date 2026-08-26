@@ -1,6 +1,6 @@
 //! The right pane: the selected beam's output, or — once the project is
-//! parked — the diagnostic that parked it, with a footer naming the
-//! follow state.
+//! parked — the diagnostic that parked it, with the follow state
+//! right-aligned on the title row. The pane has no last row of its own.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
