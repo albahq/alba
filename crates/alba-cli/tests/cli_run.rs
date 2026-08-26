@@ -416,8 +416,15 @@ fn executor_system_shell_opts_a_beam_out() {
 fn jobs_zero_is_rejected() {
     let dir = project("beam a { run \"echo ok\" }\n");
 
+    // This asserts on clap's own error text as plain, uncoloured output,
+    // so the child's colour has to be pinned off regardless of what the
+    // parent test process's own environment carries: a `test` beam run
+    // under the interface sets `FORCE_COLOR`/`CLICOLOR_FORCE` on this
+    // process (see `commands/run.rs`), and clap honours those over a
+    // piped, non-terminal stderr unless `NO_COLOR` says otherwise.
     alba()
         .current_dir(&dir)
+        .env("NO_COLOR", "1")
         .args(["run", "a", "--jobs", "0"])
         .assert()
         .code(2)
