@@ -52,7 +52,10 @@ impl LogLine {
 
 /// One rendered row of the log pane: which buffer line it shows (`None`
 /// for the truncation marker), which char range of that line, and that
-/// slice's own text and spans.
+/// slice's own text and spans. `text` is, by construction, the
+/// concatenation of `spans`' content in order; it exists so that search
+/// and copy can match and slice against plain text without re-joining
+/// `spans` themselves, not as a second, independent source of truth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub line: Option<usize>,
@@ -296,6 +299,14 @@ impl LogBuffer {
 
     pub fn lines(&self) -> impl Iterator<Item = &LogLine> {
         self.lines.iter()
+    }
+
+    /// The single line at `index`, or `None` past the end of the
+    /// buffer. `VecDeque::get` is O(1), the natural home for the lookup
+    /// `copy::line_text` and `logpane::full_line` each used to spell out
+    /// by hand as `lines().nth(index)`.
+    pub fn line(&self, index: usize) -> Option<&LogLine> {
+        self.lines.get(index)
     }
 
     pub fn scroll(&self) -> &Scroll {

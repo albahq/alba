@@ -127,8 +127,7 @@ fn clamp_by(current: usize, delta: isize, max: usize) -> usize {
 /// that must read as nothing rather than panic.
 fn line_text(buffer: &LogBuffer, index: usize) -> String {
     buffer
-        .lines()
-        .nth(index)
+        .line(index)
         .map(|line| line.text.clone())
         .unwrap_or_default()
 }
