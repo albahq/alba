@@ -97,7 +97,14 @@ async fn a_fully_cached_run_stays_imperceptible() {
 /// (on macOS, most of a second for an FSEvents stream) that this guard
 /// has no business policing. One warm-up first, because the very first
 /// stream of a process pays extra.
+///
+/// Ignored by default: creating 20,000 files and arming an FSEvents stream
+/// three times costs real wall-clock time, and its budget is a 300ms delta
+/// against a baseline that is already most of a second on macOS, so under
+/// load the noise swallows the signal. Run it explicitly with
+/// `cargo test -p alba-engine --test perf -- --ignored`.
 #[tokio::test]
+#[ignore]
 async fn arming_the_watcher_does_not_scan_the_tree() {
     fn arm(root: &Path) -> Duration {
         let started = Instant::now();
