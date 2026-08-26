@@ -85,7 +85,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
 /// looked up the same way whether it wrapped into one row or several;
 /// the dimmed-stderr check reads the same line's `stream` off it.
 fn full_line(buffer: &LogBuffer, line: Option<usize>) -> Option<&LogLine> {
-    line.and_then(|line| buffer.lines().nth(line))
+    line.and_then(|line| buffer.line(line))
 }
 
 /// A `(from, to)` inclusive char range of the whole line, as the same
@@ -141,8 +141,14 @@ fn styled_line(
     let line_ref = full_line(buffer, row.line);
     let full_text = line_ref.map(|line| line.text.as_str()).unwrap_or(&row.text);
 
-    let own_colour = row
-        .spans
+    // Decided over the whole logical line, not just this row's wrapped
+    // slice: a stderr line whose colour begins past the wrap boundary
+    // must dim the same way on every row it wraps into, not just the
+    // ones before its first coloured span. Falls back to the row's own
+    // spans for the truncation marker, which has no line behind it.
+    let own_colour = line_ref
+        .map(|line| line.spans.as_slice())
+        .unwrap_or(&row.spans)
         .iter()
         .any(|(style, _)| *style != Style::default());
     let dim_stderr =
@@ -322,6 +328,35 @@ mod tests {
         assert_eq!(stdout.spans[0].style, Style::default());
         let no_colour = styled_line(&rows[0], &buffer, &Mode::Normal, None, false);
         assert_eq!(no_colour.spans[0].style, Style::default());
+    }
+
+    /// A wrapped stderr line whose colour starts only on its second row
+    /// must dim (or not) the same way on both rows: the decision is
+    /// about the whole logical line, not each wrapped slice of it. Width
+    /// 4 wraps "aaaabb" into "aaaa" (default style) and "bb" (red),
+    /// reproducing exactly the split the bug used to produce: the first
+    /// row dimmed, the second row not, for what is really one coloured
+    /// line.
+    #[test]
+    fn wrapped_stderr_line_is_dimmed_consistently_across_its_rows() {
+        let mut buffer = LogBuffer::new();
+        buffer.push("aaaa\u{1b}[31mbb\u{1b}[0m", Stream::Stderr, false);
+        let rows = buffer.view(5, 4);
+        assert_eq!(rows[0].text, "aaaa");
+        assert_eq!(rows[1].text, "bb");
+
+        let first = styled_line(&rows[0], &buffer, &Mode::Normal, None, true);
+        let second = styled_line(&rows[1], &buffer, &Mode::Normal, None, true);
+        assert_ne!(
+            first.spans[0].style,
+            Style::new().dim(),
+            "line has colour, not dimmed"
+        );
+        assert_ne!(
+            second.spans[0].style,
+            Style::new().dim(),
+            "same line, same treatment"
+        );
     }
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
