@@ -54,7 +54,7 @@ Five blocking items and two small ones:
 
 ## Colour theme
 
-The gate moves out of `alba-cli/src/main.rs` into a place both crates reach: `alba_tui::run` takes a
+The gate stays `alba_cli::color_enabled`: `alba_tui::run` takes a
 `colour: bool` alongside its existing inputs, and the CLI computes it with the same rule `color_enabled`
 applies today. With colour off, every style below collapses to the current monochrome rendering, so the
 existing snapshot tests keep describing the `NO_COLOR` output.
@@ -169,8 +169,8 @@ rule between `bottom_bar` and `help::keymap_lines`.
 - `alba-engine`: `RunOptions.extra_env` and its two uses in `scheduler.rs` (executor environment, not the
   cache facts).
 - `alba-tui`: `logs.rs` (parsing, `Row`, `view`), `copy.rs` (`row_at`), `state.rs` (the two flags and the
-  jump), `ui/theme.rs` (new: `status_style` and the bold key style), `ui/tree.rs`, `ui/header.rs`,
-  `ui/logpane.rs`, `ui/graphpane.rs`, `ui/mod.rs`.
+  jump), `ui/theme.rs` (new: `status_style` and `bar_line`, the bold key style), `ui/tree.rs`,
+  `ui/header.rs`, `ui/logpane.rs`, `ui/graphpane.rs`, `ui/mod.rs`.
 - `alba-cli`: the colour gate passed to the TUI, `extra_env` set on the TUI path, the replay choosing raw or
   plain.
 - `README.md`: the Layout and Keymap sections, the new "Colour" paragraph (theme, `NO_COLOR`, forced colour

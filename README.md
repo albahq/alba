@@ -427,6 +427,25 @@ afterward. A Beamfile edit still reloads the project, a broken one still
 parks the session until a later save fixes it, and a change still cancels
 a run in flight and starts a fresh one, exactly as that section describes.
 
+### Colour
+
+- The theme: `✔` green, `⚡` cyan, `▶` yellow, `✖` red, `○` dimmed; the
+  progress bar green while running; the outcome green or red; the header
+  yellow while parked; keys in the bottom bar bold.
+- `NO_COLOR` (or stdout not being a terminal) turns all of it off and the
+  interface renders monochrome.
+- Commands run under the interface receive `FORCE_COLOR=1` and
+  `CLICOLOR_FORCE=1` (a beam's own `env` wins on those names), so `cargo`,
+  `eslint`, and friends print the colours they would in a terminal, which
+  the log pane renders; the cache does not see those two variables, so a
+  beam hits the same entry whether the interface or a pipe ran it. The
+  headless renderers set nothing and print the command's bytes as they
+  are.
+- stderr lines that carry no colour of their own are dimmed; ones that do
+  keep it.
+- The exit replay of failed beams keeps their colours when the interface
+  had colour, and prints plain text otherwise.
+
 ### Layout
 
 ```text
@@ -439,8 +458,8 @@ a run in flight and starts a fresh one, exactly as that section describes.
 │ ○ build                  │ warning: unused import: `std::fmt`               │
 │ ○ test                   │   --> src/lib.rs:4:5                             │
 │                          │                                                  │
-│ ✔ 1  ⚡ 1  ✖ 0  ○ 2      │ [/] search   [g] graph   [↑↓] scroll             │
-└─ q quit · r rerun · c cancel · w watch ─────────────────────────────────────┘
+│ ✔ 1  ⚡ 1  ✖ 0  ○ 2      │ ● following                                      │
+└─ q quit · r rerun · c cancel · w watch · / search · ? help ─────────────────┘
 ```
 
 The header and the bottom bar are not panes of their own: they sit inside
@@ -455,11 +474,14 @@ part of that same frame, is what separates the tree from the log pane.
   cached, `▶` running (its own duration ticking), `✖` failed (an allowed
   failure included), `○` pending or cancelled, plus a footer counting
   beams by status, with `▶` left out of the tally since it has not settled
-  yet.
+  yet. A name longer than its column is cut with a trailing `…`.
 - **Logs** (right): the selected beam's output, following the tail by
   default. Scrolling up (the wheel, or the keys below) pauses following,
   so you can read in peace while the run continues; `G`, or scrolling back
-  down to the bottom, resumes it.
+  down to the bottom, resumes it. Long lines wrap by character; scrolling
+  moves by whole lines. When a beam fails and you have not moved the
+  selection since the run started, the selection jumps to it (the first
+  failure only).
 - **Bottom bar**: the actions available in whatever mode is active, the
   keymap below condensed to what fits.
 
@@ -481,7 +503,7 @@ quits if nothing is running.
 | `f` | Rerun the selected beam, bypassing the cache. |
 | `c` | Cancel the run in flight. |
 | `w` | Toggle watch on or off. |
-| `j`/`k`, `↓`/`↑` | Move the selection. |
+| `j`/`k`, `↓`/`↑` | Move the selection. Moving the selection by hand also stops a failure from moving it for the rest of the run. |
 | `t` | Run the target the session was started for. `r` and `f` retarget the session onto the beam they rerun, so this is the way back to the whole graph. |
 | `PgUp`/`PgDn`, `Ctrl-u`/`Ctrl-d` | Scroll the log pane by half its height. |
 | `G` | Jump the log pane to the tail and resume following. |
@@ -491,6 +513,9 @@ quits if nothing is running.
 | `v` | Enter copy. |
 | `g` | Enter graph. |
 | `?` | Open help. |
+
+The bottom bar shows `q`, `r`, `c`, `w`, `/`, and `?`; the rest of this
+table lives in the help overlay.
 
 **Search** (`/`)
 
