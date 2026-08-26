@@ -437,10 +437,18 @@ a run in flight and starts a fresh one, exactly as that section describes.
 - Commands run under the interface receive `FORCE_COLOR=1` and
   `CLICOLOR_FORCE=1` (a beam's own `env` wins on those names), so `cargo`,
   `eslint`, and friends print the colours they would in a terminal, which
-  the log pane renders; the cache does not see those two variables, so a
-  beam hits the same entry whether the interface or a pipe ran it. The
-  headless renderers set nothing and print the command's bytes as they
-  are.
+  the log pane renders. Both variables are inherited by anything the
+  beam's command spawns in turn, not only that command itself, so a
+  script that shells out further still gets colour several processes
+  down. The cache does not see those two variables, so a beam hits the
+  same entry whether the interface or a pipe ran it; that is right for
+  rebuild avoidance, but it also means a beam whose output depends on
+  colour (a build log written to a file, a generated report) can be
+  produced under the interface and then served from cache to a headless
+  run, or the other way around, with the fingerprint never noticing. A
+  beam that redirects tool output into a file or a parser should pin
+  `env { FORCE_COLOR = "0" }` in its own `env`, which wins. The headless
+  renderers set nothing and print the command's bytes as they are.
 - stderr lines that carry no colour of their own are dimmed; ones that do
   keep it.
 - The exit replay of failed beams keeps their colours when the interface
