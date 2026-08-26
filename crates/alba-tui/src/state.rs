@@ -148,6 +148,13 @@ pub struct AppState {
     /// watch trigger that follows a completed run is told apart from one
     /// that superseded a run still going.
     waiting_seen: bool,
+    /// `j`/`k`/the graph's `Enter` moved the selection since the run
+    /// started: the reader chose a place, so a failure must not pull
+    /// them off it.
+    selection_moved: bool,
+    /// A failure already pulled the selection once this run; the second
+    /// one leaves the reader on the first.
+    jumped_to_failure: bool,
     /// The log pane's current content height — refreshed by
     /// `lib::dispatch` before every action, since it is the one piece of
     /// screen geometry copy mode's keyboard flow needs (`v`'s anchor,
@@ -229,6 +236,8 @@ impl AppState {
             outcome: None,
             user_cancelled: false,
             waiting_seen: false,
+            selection_moved: false,
+            jumped_to_failure: false,
             pane_height: 0,
             pane_width: 0,
         }
@@ -302,6 +311,15 @@ impl AppState {
                     status: status.clone(),
                     duration: *duration,
                 };
+                let real_failure = matches!(status, BeamStatus::Failed { .. });
+                if real_failure
+                    && !self.selection_moved
+                    && !self.jumped_to_failure
+                    && let Some(index) = self.index_of(&id.0)
+                {
+                    self.select(index);
+                    self.jumped_to_failure = true;
+                }
                 if let Phase::Running { done, total, .. } = &mut self.phase {
                     *done = (*done + 1).min(*total);
                 }
@@ -429,10 +447,12 @@ impl AppState {
     }
 
     pub fn select_next(&mut self) {
+        self.selection_moved = true;
         self.select(self.selected + 1);
     }
 
     pub fn select_previous(&mut self) {
+        self.selection_moved = true;
         self.select(self.selected.saturating_sub(1));
     }
 
@@ -608,6 +628,7 @@ impl AppState {
         };
         match key.code {
             KeyCode::Enter => {
+                self.selection_moved = true;
                 self.select(graph.focused);
                 return; // stays Mode::Normal, already replaced above
             }
@@ -886,6 +907,8 @@ impl AppState {
         self.outcome = None;
         self.user_cancelled = false;
         self.waiting_seen = false;
+        self.selection_moved = false;
+        self.jumped_to_failure = false;
         // A run starting is the project loading again: the diagnostic
         // that parked the session describes a Beamfile that no longer is.
         if let Some(buffer) = self.logs.get_mut(DIAGNOSTIC_LOG) {
@@ -1250,6 +1273,88 @@ mod tests {
         state.select_next();
         state.select_next();
         assert_eq!(state.selected, 1);
+    }
+
+    fn three_beams() -> AppState {
+        let mut state = AppState::new("build", false);
+        state.apply(&run_started("build", &["a", "b", "c"], &[]), Instant::now());
+        state
+    }
+
+    /// The first failure of a run pulls the selection onto itself.
+    #[test]
+    fn the_first_failure_selects_its_beam() {
+        let mut state = three_beams();
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "c");
+    }
+
+    /// A second failure leaves the reader on the first one.
+    #[test]
+    fn a_second_failure_does_not_move_the_selection_again() {
+        let mut state = three_beams();
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "b"),
+            Instant::now(),
+        );
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "b");
+    }
+
+    /// A reader who moved since the run started is not interrupted.
+    #[test]
+    fn a_moved_selection_is_not_hijacked_by_a_failure() {
+        let mut state = three_beams();
+        state.select_next(); // b
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "b");
+    }
+
+    /// An allowed failure is not the failure the reader needs to see.
+    #[test]
+    fn an_allowed_failure_does_not_jump() {
+        let mut state = three_beams();
+        state.apply(
+            &finished(BeamStatus::FailedAllowed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "a");
+    }
+
+    /// A new run starts the rule afresh: the earlier jump and the
+    /// earlier movement are both forgotten.
+    #[test]
+    fn a_new_run_resets_the_jump_rule() {
+        let mut state = three_beams();
+        state.select_next();
+        state.apply(&run_started("build", &["a", "b", "c"], &[]), Instant::now());
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "c");
+    }
+
+    /// Choosing a beam in the graph counts as moving.
+    #[test]
+    fn selecting_in_the_graph_counts_as_moving() {
+        let mut state = three_beams();
+        state.enter_graph();
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.apply(
+            &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
+            Instant::now(),
+        );
+        assert_eq!(state.selected_beam().unwrap().id, "a");
     }
 
     /// A parked session still watches, and resolves no file: the header
