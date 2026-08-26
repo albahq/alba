@@ -279,7 +279,7 @@ mod tests {
     fn buffer_of(lines: &[&str]) -> LogBuffer {
         let mut buffer = LogBuffer::new();
         for text in lines {
-            buffer.push(text.to_string(), false);
+            buffer.push(text.to_string(), alba_executors::Stream::Stdout, false);
         }
         buffer
     }
@@ -412,7 +412,11 @@ mod tests {
     fn top_visible_line_follows_the_tail_by_default() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
-            buffer.push(format!("line {index}"), false);
+            buffer.push(
+                format!("line {index}"),
+                alba_executors::Stream::Stdout,
+                false,
+            );
         }
         assert_eq!(top_visible_line(&buffer, 3), 7);
     }
@@ -421,7 +425,11 @@ mod tests {
     fn top_visible_line_honors_a_paused_scroll() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
-            buffer.push(format!("line {index}"), false);
+            buffer.push(
+                format!("line {index}"),
+                alba_executors::Stream::Stdout,
+                false,
+            );
         }
         buffer.scroll_up(4);
         assert_eq!(top_visible_line(&buffer, 3), 3);
@@ -431,7 +439,11 @@ mod tests {
     fn line_for_pane_row_maps_rows_to_buffer_lines() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
-            buffer.push(format!("line {index}"), false);
+            buffer.push(
+                format!("line {index}"),
+                alba_executors::Stream::Stdout,
+                false,
+            );
         }
         // Following, height 3: rows show lines 7, 8, 9.
         assert_eq!(line_for_pane_row(&buffer, 3, 0), Some(7));
@@ -450,7 +462,11 @@ mod tests {
     fn line_for_pane_row_skips_the_truncation_marker() {
         let mut buffer = LogBuffer::new();
         for index in 0..(crate::logs::MAX_LINES + 5) {
-            buffer.push(format!("line {index}"), false);
+            buffer.push(
+                format!("line {index}"),
+                alba_executors::Stream::Stdout,
+                false,
+            );
         }
         buffer.scroll_up(crate::logs::MAX_LINES); // paused at the very top
         assert_eq!(

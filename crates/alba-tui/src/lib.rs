@@ -51,6 +51,13 @@ pub struct TuiOptions {
     pub watch: bool,
 }
 
+/// One replayed line, both ways the CLI may print it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayLine {
+    pub raw: String,
+    pub text: String,
+}
+
 #[derive(Debug)]
 pub struct TuiOutcome {
     /// `Some(code)` iff the last run ran to completion un-abandoned.
@@ -58,7 +65,7 @@ pub struct TuiOutcome {
     pub last_summary: Option<RunSummary>,
     /// `(beam id, its buffered lines)` for the last summary's failed
     /// beams, for the CLI's exit replay.
-    pub failed_logs: Vec<(String, Vec<String>)>,
+    pub failed_logs: Vec<(String, Vec<ReplayLine>)>,
 }
 
 /// Drives the interface until the user quits or the session ends.
@@ -403,11 +410,19 @@ fn outcome(state: &AppState) -> TuiOutcome {
     }
 }
 
-fn buffered_lines(state: &AppState, beam: &str) -> Vec<String> {
+fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
     state
         .logs
         .get(beam)
-        .map(|buffer| buffer.lines().map(|line| line.text.clone()).collect())
+        .map(|buffer| {
+            buffer
+                .lines()
+                .map(|line| ReplayLine {
+                    raw: line.raw.clone(),
+                    text: line.text.clone(),
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -438,6 +453,14 @@ mod tests {
                 text: text.to_string(),
             },
             replayed: false,
+        }
+    }
+
+    /// A plain, escape-free replayed line: `raw` and `text` are the same.
+    fn replay_line(text: &str) -> ReplayLine {
+        ReplayLine {
+            raw: text.to_string(),
+            text: text.to_string(),
         }
     }
 
@@ -567,7 +590,7 @@ mod tests {
             outcome.failed_logs,
             vec![(
                 "bad".to_string(),
-                vec!["boom 1".to_string(), "boom 2".to_string()]
+                vec![replay_line("boom 1"), replay_line("boom 2")]
             )],
             "only the failed beam's lines, and all of them"
         );
@@ -625,7 +648,7 @@ mod tests {
         assert_eq!(outcome.last_run_code, None, "an abandoned run cannot vouch");
         assert_eq!(
             outcome.failed_logs,
-            vec![("bad".to_string(), vec!["boom".to_string()])],
+            vec![("bad".to_string(), vec![replay_line("boom")])],
             "the drain still collects the replay's material"
         );
         assert!(outcome.last_summary.is_some());

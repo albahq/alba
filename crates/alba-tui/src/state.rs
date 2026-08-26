@@ -258,10 +258,11 @@ impl AppState {
                 }
             }
             RunEvent::BeamOutput { id, line, replayed } => {
-                self.logs
-                    .entry(id.0.clone())
-                    .or_default()
-                    .push(line.text.clone(), *replayed);
+                self.logs.entry(id.0.clone()).or_default().push(
+                    line.text.as_str(),
+                    line.stream,
+                    *replayed,
+                );
                 // A still-running beam's search must not go stale while
                 // the user is not typing: a keystroke is not the only
                 // way the match set can change, the buffer gaining a
@@ -327,7 +328,7 @@ impl AppState {
                 self.outcome = None;
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
                 for line in diagnostic.lines() {
-                    buffer.push(line.to_string(), false);
+                    buffer.push(line, alba_executors::Stream::Stdout, false);
                 }
             }
         }
@@ -1856,7 +1857,7 @@ mod tests {
         let buffer = state.logs.get("build").unwrap();
         let view = buffer.view(5);
         assert_eq!(
-            view.last().map(String::as_str),
+            view.last().map(|row| row.text.as_str()),
             Some("ERROR here"),
             "the match is scrolled to the bottom of its view"
         );
@@ -2030,7 +2031,7 @@ mod tests {
         state.handle_modal_key(char_key('k'));
         assert_eq!(cursor(&state), (24, 0));
         assert_eq!(
-            state.logs.get("build").unwrap().view(5)[0],
+            state.logs.get("build").unwrap().view(5)[0].text,
             "line 24",
             "the cursor's line is now the top of the view"
         );
@@ -2044,7 +2045,7 @@ mod tests {
         let buffer = state.logs.get("build").unwrap();
         let view = buffer.view(5);
         assert_eq!(
-            view.last().map(String::as_str),
+            view.last().map(|row| row.text.as_str()),
             Some("line 29"),
             "the view follows the cursor back down to the tail"
         );
@@ -2063,7 +2064,7 @@ mod tests {
         state.apply(&output("build", "line 30"), Instant::now());
         let view_after_push = state.logs.get("build").unwrap().view(5);
         assert_eq!(
-            view_after_push.last().map(String::as_str),
+            view_after_push.last().map(|row| row.text.as_str()),
             Some("line 30"),
             "the view keeps following the tail after the cursor reached it"
         );

@@ -554,7 +554,7 @@ fn replay<W: std::io::Write>(
             ));
         }
         for line in lines {
-            err.line(line);
+            err.line(&line.text);
         }
     }
 }
@@ -1022,6 +1022,8 @@ mod tests {
             .collect()
     }
 
+    /// Plain, escape-free lines: `raw` and `text` are the same, which is
+    /// all the replay itself cares about (see `replay`'s `err.line`).
     fn outcome(
         summary: Option<RunSummary>,
         failed_logs: Vec<(String, Vec<String>)>,
@@ -1029,7 +1031,21 @@ mod tests {
         alba_tui::TuiOutcome {
             last_run_code: summary.as_ref().map(RunSummary::exit_code),
             last_summary: summary,
-            failed_logs,
+            failed_logs: failed_logs
+                .into_iter()
+                .map(|(beam, lines)| {
+                    (
+                        beam,
+                        lines
+                            .into_iter()
+                            .map(|s| alba_tui::ReplayLine {
+                                raw: s.clone(),
+                                text: s,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
         }
     }
 

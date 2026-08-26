@@ -95,7 +95,7 @@ mod tests {
     fn buffer_of(lines: &[&str]) -> LogBuffer {
         let mut buffer = LogBuffer::new();
         for text in lines {
-            buffer.push(text.to_string(), false);
+            buffer.push(text.to_string(), alba_executors::Stream::Stdout, false);
         }
         buffer
     }
@@ -157,7 +157,11 @@ mod tests {
         let mut search = typed("compiling");
         search.update(&buffer);
         assert_eq!(search.matches, vec![0]);
-        buffer.push("Compiling core".to_string(), false);
+        buffer.push(
+            "Compiling core".to_string(),
+            alba_executors::Stream::Stdout,
+            false,
+        );
         search.update(&buffer);
         assert_eq!(search.matches, vec![0, 1]);
     }
