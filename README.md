@@ -101,10 +101,10 @@ both rejected at parse time.
 ## Usage
 
 ```sh
-alba              # runs the declared `default` beam, or lists beams if none is declared
-alba check        # loads and validates the Beamfile without running anything
-alba run <beam>   # runs a beam and everything it needs
-alba affected <ref>   # lists the beams a git diff affects, runs nothing
+alba                # runs the declared `default` beam, or lists beams if none is declared
+alba check          # loads and validates the Beamfile without running anything
+alba run <beam>     # runs a beam and everything it needs
+alba affected <ref> # lists the beams a git diff affects, runs nothing
 ```
 
 On a terminal, running any of these opens the interactive interface
@@ -280,7 +280,7 @@ A beam is affected when:
 - one of its `inputs` globs matches a changed path (pattern matching against
   the path, exactly as watch mode does, so a deleted file still counts), or
   the Beamfile that declares it changed;
-- it transitively `needs` a beam that is affected — the set is closed over
+- it transitively `needs` a beam that is affected: the set is closed over
   dependents, so an aggregating beam becomes affected the moment anything it
   needs does;
 - it declares no `inputs` at all: such a beam is never affected by the first
@@ -289,7 +289,7 @@ A beam is affected when:
 With a beam, the targets are the affected beams inside that beam's subgraph;
 when the beam itself is not affected, nothing in its subgraph is either
 (closure over dependents cuts both ways), and the run is empty. Without one,
-every affected beam in the project is a target — except a beam that declares
+every affected beam in the project is a target, except a beam that declares
 parameters, which is skipped, since nothing can bind its arguments; the
 others still run. Either way, an empty run prints `✓ nothing affected by
 <ref>` and exits `0` rather than reporting an ordinary summary with every
@@ -661,7 +661,7 @@ hook commit-msg { beam check_message }
 a load error, reported the same way an unknown `needs` is. Git passes each
 hook a fixed number of arguments (`pre-commit` none, `commit-msg` one,
 `pre-push` two, and so on); the target beam may declare at most that many
-parameters — more is a load error, fewer is fine, git's extra arguments are
+parameters: more is a load error, fewer is fine, git's extra arguments are
 dropped. The same hook cannot be declared twice, and only the root
 Beamfile's `hook` declarations count: an imported Beamfile's are ignored,
 exactly like its `default`.
@@ -694,7 +694,7 @@ core.hooksPath already points to `.husky`, remove it or uninstall that tool firs
 `.alba/` should be in `.gitignore`; Alba never edits it for you.
 
 `alba hooks uninstall` removes the scripts and unsets `core.hooksPath`, but
-only when Alba is the one that set it — otherwise it refuses the same way.
+only when Alba is the one that set it, otherwise it refuses the same way.
 
 ### Running a hook
 
@@ -706,7 +706,7 @@ prints the diagnostic and exits `2` instead, blocking the git operation
 rather than letting it through silently. Otherwise it is the strict
 equivalent of `alba run <beam> [args]` with the text renderers and grouped
 output: git's own arguments become the target beam's positional parameters,
-truncated to what it declares, and the exit code is the run's — git blocks
+truncated to what it declares, and the exit code is the run's, so git blocks
 the operation on any non-zero exit, not only `1`.
 
 `alba check` counts declared hooks in its summary and warns when they are
