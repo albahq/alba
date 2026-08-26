@@ -2,7 +2,7 @@
 source: crates/alba-tui/tests/render.rs
 expression: "drawn(&state, 80, 24)"
 ---
-"┌─ alba · run build ── ▰▰▰▰▰▰▱▱▱▱▱▱▱▱ 2/5 · 0.0s ──────────────────────────────┐"
+"┌─ alba · build ───────────────────────────────────────────────────────────────┐"
 "│BEAMS                         │LOGS                                ● following│"
 "│ ✔ codegen                1.2s│Compiling api v0.1.0                           │"
 "│ ⚡ api:codegen           0.8s│                                               │" Hidden by multi-width symbols: [(3, " ")]

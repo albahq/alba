@@ -2,7 +2,7 @@
 source: crates/alba-tui/tests/render.rs
 expression: "drawn(&state, 80, 24)"
 ---
-"┌─ alba · waiting · 42 files watched ──────────────────────────────────────────┐"
+"┌─ alba · build ─────────────────────────────────────────── watching 42 files ─┐"
 "│BEAMS                         │LOGS                                ● following│"
 "│                              │                                               │"
 "│                              │                                               │"

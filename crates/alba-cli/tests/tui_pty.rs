@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
 /// A green, one-beam project: the fixture the original smoke test drives.
-const GREEN: &str = "version \"1\"\n\nbeam ok {\n  run \"echo hello-from-the-beam\"\n}\n";
+const GREEN: &str = "version \"1\"\n\nbeam green {\n  run \"echo hello-from-the-beam\"\n}\n";
 
 /// A beam that fails after printing a coloured line, for the replay's own
 /// colour test.
@@ -21,41 +21,34 @@ const RED_SCRIPT: &str = "printf '\\033[31mred\\033[0m\\n'\nexit 1\n";
 const ALTERNATE_SCREEN_ENTER: &str = "\u{1b}[?1049h";
 const ALTERNATE_SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 
-/// The word the header's own account of a finished run carries (see
-/// `alba-tui/src/ui/header.rs::finished_line`, format `"alba · run
-/// {target} finished · {counts} · {duration}"`) and nothing else in this
-/// interface ever renders. Unlike the beam's own output — which lands on
-/// the pty as soon as `RunEvent::BeamOutput` is applied, well before the
-/// run is over — this word is only drawn once `Phase::Finished` and
-/// `last_summary` are set, in the very same `RunEvent::RunFinished` match
-/// arm that sets `AppState::outcome` (`state.rs`, the field
-/// `exit_outcome()` reads). So seeing it on the pty is synchronized with
-/// the exit code actually being decided.
+/// The outcome word the footer draws once a run is over (see
+/// `alba-tui/src/ui/footer.rs::outcome_line`: `ok · {duration}` or
+/// `failed · {duration}`, right-aligned) and nothing else in this
+/// interface ever renders: the fixtures' beams are `green` and `red`,
+/// the bottom bar, the pane titles, and the follow state spell neither
+/// word, and the beams' own output does not either. Unlike that output,
+/// which lands on the pty as soon as `RunEvent::BeamOutput` is applied,
+/// the word is only drawn once `Phase::Finished` and `last_summary` are
+/// set, in the very same `RunEvent::RunFinished` match arm that sets
+/// `AppState::outcome` (`state.rs`, the field `exit_outcome()` reads).
+/// So seeing it on the pty is synchronized with the exit code actually
+/// being decided.
 ///
-/// It also has to survive ratatui's own diffing, which this test does not
-/// get to skip: the header is one plain, unstyled `Line`
-/// (`ui/mod.rs::draw`), and `Buffer::diff` only ever forwards a cell whose
-/// symbol or style changed from the previously drawn frame
-/// (`ratatui::buffer::Buffer::diff`) — a cell that happens to match its
-/// predecessor is silently dropped from the byte stream, cursor-jumped
-/// over instead of printed. The frame right before this one's first
-/// appearance is either the idle header (`"alba · {target} · idle"`,
-/// drawn once before any event lands) or a `Running` header (`"alba · run
-/// {target} ── {bar} {done}/{total} · {duration}"`, drawn on every
-/// `RunEvent` batch while the beam is in flight) — nothing else is
-/// reachable for a one-beam, non-watch run. At the column where
-/// `"finished"` starts (right after `"{target} "`), the idle header has
-/// either run out of characters (its own text is shorter and ends inside
-/// the word "idle") or is drawing "─"/a bar cell/a digit there — never a
-/// Latin letter — so every one of the word's 8 cells differs from either
-/// possible predecessor at that same screen position, letter by letter,
-/// independently of the run's specific timings, digits or bar fill. That
-/// is what the original `"run ok finished"` token got wrong: its `"run
-/// ok"` prefix is byte-identical to the `Running` header's own `"run
-/// ok"`, so it could be skipped by the diff entirely, leaving this loop
-/// spinning to the deadline. `"finished"` alone starts past that shared
-/// prefix, in the region the two headers always disagree on.
-const RUN_FINISHED: &str = "finished";
+/// It also has to survive ratatui's own diffing, which this test does
+/// not get to skip: `Buffer::diff` only forwards a cell whose symbol or
+/// style changed from the previously drawn frame, and silently
+/// cursor-jumps over one that did not. The frame right before the
+/// outcome's first appearance shows, at the footer's right end, either
+/// `idle` (drawn once before any event lands) or the in-flight text
+/// `{bar} {done}/{total} · {duration}` (drawn on every `RunEvent` batch
+/// while the beam runs). Both words are right-aligned, so their letters
+/// land on cells that held, in the predecessor, a bar cell, a digit, a
+/// `/`, a space, or nothing (`idle` is four cells wide and both words
+/// sit further left than that), never the same Latin letter. Every
+/// letter therefore differs from its predecessor and is emitted,
+/// contiguously, whatever the run's timings.
+const RUN_OK: &str = "ok";
+const RUN_FAILED: &str = "failed";
 
 /// What the exit replay owes for this fixture's green run: the count
 /// `alba-cli`'s `render::print_summary` puts in its summary line
@@ -150,8 +143,8 @@ fn drive_with_script(
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = String::new();
 
-    // Read until the run has actually finished, evidenced by the header's
-    // own finished-run line — not merely the alternate screen opening,
+    // Read until the run has actually finished, evidenced by the footer's
+    // own outcome word — not merely the alternate screen opening,
     // and not merely the beam's output showing up. Entering the
     // alternate screen happens well before the beam completes, and the
     // beam's output reaches the pty (via `RunEvent::BeamOutput`) before
@@ -159,7 +152,7 @@ fn drive_with_script(
     // that sets `AppState::outcome`) — so neither is proof the run is
     // over. Quitting before it is over now correctly earns exit code 130
     // (a run that never finished does not get to vouch for a code), so
-    // `q` must not be sent until `RUN_FINISHED` — synchronized with the
+    // `q` must not be sent until `RUN_OK` or `RUN_FAILED` — synchronized with the
     // outcome by construction, see its doc comment — has appeared. Output
     // arrives inside the alternate screen, so it may be split across
     // reads and interleaved with escape sequences — search the
@@ -173,7 +166,9 @@ fn drive_with_script(
             Ok(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
             Err(_) => panic!("the run never finished on the pty; got: {seen:?}"),
         }
-        if seen.contains(ALTERNATE_SCREEN_ENTER) && seen.contains(RUN_FINISHED) {
+        if seen.contains(ALTERNATE_SCREEN_ENTER)
+            && (seen.contains(RUN_OK) || seen.contains(RUN_FAILED))
+        {
             break;
         }
     }
@@ -231,7 +226,7 @@ fn drive_with_script(
 
 #[test]
 fn the_tui_opens_restores_and_replays_on_q() {
-    let (seen, after_quit, status) = drive(GREEN, "ok", &[]);
+    let (seen, after_quit, status) = drive(GREEN, "green", &[]);
 
     assert!(
         seen.contains("hello-from-the-beam"),

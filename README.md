@@ -457,43 +457,49 @@ a run in flight and starts a fresh one, exactly as that section describes.
 ### Layout
 
 ```text
-┌─ alba · run build ── ▰▰▰▰▰▰▱▱▱▱▱▱▱▱ 2/5 · 4.2s ─────────────────────────────┐
-│ BEAMS                    │ logs · api:build                                 │
-│                          │                                                  │
-│ ✔ codegen          1.2s  │ Compiling proc-macro2 v1.0.86                    │
-│ ⚡ api:codegen      0.8s  │ Compiling serde v1.0.210                         │
-│ ▶ api:build        3.4s… │ Compiling api v0.1.0 (/repo/api)                 │
-│ ○ build                  │ warning: unused import: `std::fmt`               │
-│ ○ test                   │   --> src/lib.rs:4:5                             │
-│                          │                                                  │
-│ ✔ 1  ⚡ 1  ✖ 0  ○ 2      │ ● following                                      │
-└─ q quit · r rerun · c cancel · w watch · / search · ? help ─────────────────┘
+┌─ alba · build ──────────────────────────────────────────── watching 3 files ─┐
+│BEAMS                         │LOGS                               ● following │
+│ ✔ codegen                1.2s│Compiling proc-macro2 v1.0.86                  │
+│ ⚡ api:codegen           0.8s│Compiling serde v1.0.210                       │
+│ ▶ api:build             3.4s…│Compiling api v0.1.0 (/repo/api)               │
+│ ○ build                      │warning: unused import: `std::fmt`             │
+│ ○ test                       │  --> src/lib.rs:4:5                           │
+│                              │                                               │
+├──────────────────────────────┴───────────────────────────────────────────────┤
+│ ✔ 1  ⚡ 1  ✖ 0  ○ 2                ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 2/5 · 4.2s │
+└─ q quit · r rerun · c cancel · w watch · / search · ? help ──────────────────┘
 ```
 
 The header and the bottom bar are not panes of their own: they sit inside
-the top and bottom edge of a single outer frame, and one vertical divider,
-part of that same frame, is what separates the tree from the log pane.
+the top and bottom edge of a single outer frame. Inside it, one vertical
+divider separates the tree from the log pane, and a junction line closes
+both columns above the footer.
 
-- **Header**: while a run is going, its progress bar, done/total, and
-  elapsed time, ticking live; once it ends, the outcome by status (zero
-  buckets omitted); between runs in a watch session, how many files it is
-  watching; parked, instead, when the project cannot load.
+- **Header**: `alba · {target}` on the left; on the right, between runs in
+  a watch session, how many files it is watching, or `parked` when the
+  project cannot load.
 - **Tree** (left, 30 columns): one row per beam, `✔` succeeded, `⚡`
   cached, `▶` running (its own duration ticking), `✖` failed (an allowed
-  failure included), `○` pending or cancelled, plus a footer counting
-  beams by status, with `▶` left out of the tally since it has not settled
-  yet. A name longer than its column is cut with a trailing `…`.
+  failure included), `○` pending or cancelled. A name longer than its
+  column is cut with a trailing `…`.
 - **Logs** (right): the selected beam's output, following the tail by
-  default. Scrolling up (the wheel, or the keys below) pauses following,
-  so you can read in peace while the run continues; `G`, or scrolling back
-  down to the bottom, resumes it. Long lines wrap by character; scrolling
-  moves by whole lines. When a beam fails and you have not moved the
-  selection since the run started, the selection jumps to it (the first
-  failure only).
+  default; the title row shows `● following` or `↑ paused`. Scrolling up
+  (the wheel, or the keys below) pauses following, so you can read in
+  peace while the run continues; `G`, or scrolling back down to the
+  bottom, resumes it. Long lines wrap by character; scrolling moves by
+  whole lines. When a beam fails and you have not moved the selection
+  since the run started, the selection jumps to it (the first failure
+  only).
+- **Footer**: the run. Left, the beams counted by status (`▶` left out of
+  the tally, since it has not settled yet). Right, while a run is going,
+  its progress bar, done/total, and elapsed time, ticking live; once it
+  ends, `ok` or `failed` and the duration. The bar grows with the
+  terminal, up to 30 cells, and gives way to the count alone when fewer
+  than 14 cells are left for it.
 - **Bottom bar**: the actions available in whatever mode is active, the
   keymap below condensed to what fits.
 
-Below roughly 40 columns by 10 rows, the interface shows "terminal too
+Below roughly 40 columns by 12 rows, the interface shows "terminal too
 small" rather than a layout with nothing left to draw.
 
 ### Keymap

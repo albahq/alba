@@ -2,7 +2,7 @@
 source: crates/alba-tui/tests/render.rs
 expression: "drawn(&state, 80, 24)"
 ---
-"┌─ alba · run test ── ▰▰▰▰▰▱▱▱▱▱▱▱▱▱ 1/3 · 0.0s ───────────────────────────────┐"
+"┌─ alba · test ────────────────────────────────────────────────────────────────┐"
 "│                                  [✔ codegen]                                 │"
 "│                                       │                                      │"
 "│                                   [▶ build]                                  │"

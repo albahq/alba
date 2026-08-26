@@ -54,18 +54,23 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
 
     // The outer frame carries the header and the bottom bar inside its
     // own border, exactly as the spec's mockup draws them
-    // (`┌─ alba · run build ── ... ─┐` / `└─ q quit · ... ─┘`): a
-    // leading `─ ` and trailing ` ` are baked into the title itself so
-    // the block's own border fill supplies the rest of the dashes,
-    // wrapped around the header's and the bar's own spans rather than
-    // their plain text, so the colour underneath survives into the
-    // border's title.
-    let outer = Block::bordered()
-        .title_top(framed_title(header::line(state, now)))
+    // (`┌─ alba · build ──── ... ── watching 3 files ─┐` / `└─ q quit ·
+    // ... ─┘`): a leading `─ ` and trailing ` ` (mirrored for the
+    // right-hand title) are baked into the title itself so the block's
+    // own border fill supplies the rest of the dashes, wrapped around
+    // the header's and the bar's own spans rather than their plain text,
+    // so the colour underneath survives into the border's title. The
+    // session state is a second, right-aligned title on the same edge,
+    // so it never displaces the identity.
+    let mut outer = Block::bordered()
+        .title_top(framed_title(header::line(state)))
         .title_bottom(framed_title(theme::bar_line(
             &bottom_bar(state, now),
             state.colour,
         )));
+    if let Some(session) = header::session(state) {
+        outer = outer.title_top(framed_title_right(session).right_aligned());
+    }
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -141,6 +146,15 @@ fn framed_title(content: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw("─ ")];
     spans.extend(content.spans);
     spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// `framed_title`'s mirror image for a title on the right end of an
+/// edge: ` ... ─`, so the border's fill meets it from the left.
+fn framed_title_right(content: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(content.spans);
+    spans.push(Span::raw(" ─"));
     Line::from(spans)
 }
 

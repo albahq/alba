@@ -1,99 +1,49 @@
-//! The header line: the run's live progress while `Phase::Running`, or a
-//! one-line account of whatever else the session is doing — waiting on
-//! watch, parked on a broken Beamfile, or the last run's outcome.
+//! The top edge's two titles: the run's identity on the left (`alba ·
+//! {target}`), and, on the right, what the session is doing besides the
+//! run, when there is anything to say: a watch waiting between runs,
+//! or a project parked on a broken Beamfile. The run's own progress and
+//! outcome are the footer's (see `ui/footer.rs`), so a watch never has
+//! to evict them to say it is watching.
 //!
-//! This text is not rendered into its own pane: it sits inside the
+//! Neither text is rendered into its own pane: both sit inside the
 //! outer frame's top border (see `ui/mod.rs`), the way the spec's
-//! mockup draws it (`┌─ alba · run build ── ... ─┐`).
+//! mockup draws them (`┌─ alba · build ──── ... ── watching 3 files ─┐`).
 
-use std::time::Instant;
-
-use alba_engine::RunSummary;
 use ratatui::text::{Line, Span};
 
 use crate::state::{AppState, Phase};
 
-use super::format_duration;
-use super::theme::{bar_style, outcome_style, parked_style};
+use super::theme::parked_style;
 
-/// The bar's width in cells. Matches the spec's mockup exactly: at 2/5
-/// done the bar shows 6 filled cells of 14 (`round(2.0 / 5.0 * 14.0) ==
-/// 6`), so this constant is not a free choice — it is the one the mockup
-/// was drawn with.
-const BAR_WIDTH: usize = 14;
-
-pub fn line(state: &AppState, now: Instant) -> Line<'static> {
-    match &state.phase {
-        Phase::Running { done, total, since } => {
-            let elapsed = now.saturating_duration_since(*since);
-            let filled = super::footer::filled_cells(*done, *total, BAR_WIDTH);
-            let rest = BAR_WIDTH - filled;
-            Line::from(vec![
-                Span::raw(format!("alba · run {} ── ", state.target)),
-                Span::styled("▰".repeat(filled), bar_style(state.colour)),
-                Span::raw(format!(
-                    "{} {done}/{total} · {}",
-                    "▱".repeat(rest),
-                    format_duration(elapsed)
-                )),
-            ])
-        }
-        Phase::Waiting { files } => {
-            let plural = if *files == 1 { "" } else { "s" };
-            Line::from(format!("alba · waiting · {files} file{plural} watched"))
-        }
-        // A single styled span, not `Line::styled` (which sets the
-        // line's own style rather than a span's): `framed_title`
-        // (`ui/mod.rs`) only carries a line's spans into the border's
-        // title, so the colour has to live on the span to survive there.
-        Phase::Parked => Line::from(vec![Span::styled(
-            "alba · parked · waiting for a valid Beamfile".to_string(),
-            parked_style(state.colour),
-        )]),
-        Phase::Finished => match &state.last_summary {
-            Some(summary) => finished_line(&state.target, summary, state.colour),
-            None => Line::from(format!("alba · {} · idle", state.target)),
-        },
-    }
+/// The left-hand title.
+pub fn line(state: &AppState) -> Line<'static> {
+    Line::from(format!("alba · {}", state.target))
 }
 
-/// The last run's outcome, once it is over. Zero buckets are omitted,
-/// the same call the headless renderers' summary line makes (see
-/// `alba-cli/src/render/mod.rs::summary_line`) — but the glyphs are the
-/// tree pane's fixed four rather than the five-bucket breakdown text
-/// renderers use, so a failed and an allowed-failure beam both read as
-/// `✖` here, matching what the tree footer would have shown them as.
-fn finished_line(target: &str, summary: &RunSummary, colour: bool) -> Line<'static> {
-    let failed = summary.failed.len() + summary.failed_allowed.len();
-    let counts = [
-        ("✔", summary.succeeded.len()),
-        ("⚡", summary.cached.len()),
-        ("✖", failed),
-        ("○", summary.cancelled.len()),
-    ];
-    let parts: Vec<String> = counts
-        .iter()
-        .filter(|(_, count)| *count > 0)
-        .map(|(glyph, count)| format!("{glyph} {count}"))
-        .collect();
-    let counts_text = if parts.is_empty() {
-        "nothing ran".to_string()
-    } else {
-        parts.join("  ")
-    };
-    Line::from(vec![
-        Span::raw(format!("alba · run {target} finished · ")),
-        Span::styled(counts_text, outcome_style(summary, colour)),
-        Span::raw(format!(" · {}", format_duration(summary.duration))),
-    ])
+/// The right-hand title, when the session has a state of its own to
+/// report. A single styled span, not `Line::styled` (which sets the
+/// line's own style rather than a span's): `framed_title` (`ui/mod.rs`)
+/// only carries a line's spans into the border's title, so the colour
+/// has to live on the span to survive there.
+pub fn session(state: &AppState) -> Option<Line<'static>> {
+    match &state.phase {
+        Phase::Waiting { files } => {
+            let plural = if *files == 1 { "" } else { "s" };
+            Some(Line::from(format!("watching {files} file{plural}")))
+        }
+        Phase::Parked => Some(Line::from(vec![Span::styled(
+            "parked · waiting for a valid Beamfile".to_string(),
+            parked_style(state.colour),
+        )])),
+        Phase::Running { .. } | Phase::Finished => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alba_core::BeamId;
     use ratatui::style::{Color, Style};
-    use std::time::Duration;
+    use std::time::Instant;
 
     fn state_with_phase(phase: Phase) -> AppState {
         let mut state = AppState::new("build", false);
@@ -101,100 +51,58 @@ mod tests {
         state
     }
 
-    /// The spec's own worked example: 2/5 done draws 6 of 14 cells filled.
     #[test]
-    fn running_shows_the_bar_and_the_elapsed_time() {
-        let now = Instant::now();
-        let state = state_with_phase(Phase::Running {
+    fn the_left_title_is_the_identity_whatever_the_phase() {
+        let running = state_with_phase(Phase::Running {
             done: 2,
             total: 5,
-            since: now - Duration::from_secs(3),
+            since: Instant::now(),
         });
+        assert_eq!(line(&running).to_string(), "alba · build");
         assert_eq!(
-            line(&state, now).to_string(),
-            format!(
-                "alba · run build ── {}{} 2/5 · 3.0s",
-                "▰".repeat(6),
-                "▱".repeat(8)
-            )
+            line(&state_with_phase(Phase::Finished)).to_string(),
+            "alba · build"
         );
     }
 
     #[test]
-    fn waiting_names_the_watched_file_count() {
-        let state = state_with_phase(Phase::Waiting { files: 3 });
-        assert_eq!(
-            line(&state, Instant::now()).to_string(),
-            "alba · waiting · 3 files watched"
+    fn the_session_title_is_absent_while_running_or_finished() {
+        assert!(session(&state_with_phase(Phase::Finished)).is_none());
+        assert!(
+            session(&state_with_phase(Phase::Running {
+                done: 0,
+                total: 1,
+                since: Instant::now(),
+            }))
+            .is_none()
         );
     }
 
     #[test]
-    fn parked_names_the_broken_beamfile() {
-        let state = state_with_phase(Phase::Parked);
+    fn a_waiting_watch_names_its_file_count() {
         assert_eq!(
-            line(&state, Instant::now()).to_string(),
-            "alba · parked · waiting for a valid Beamfile"
+            session(&state_with_phase(Phase::Waiting { files: 3 }))
+                .unwrap()
+                .to_string(),
+            "watching 3 files"
         );
-    }
-
-    #[test]
-    fn an_idle_session_with_no_summary_reads_idle() {
-        let state = state_with_phase(Phase::Finished);
         assert_eq!(
-            line(&state, Instant::now()).to_string(),
-            "alba · build · idle"
-        );
-    }
-
-    #[test]
-    fn a_finished_run_reports_its_non_zero_buckets() {
-        let mut state = state_with_phase(Phase::Finished);
-        state.last_summary = Some(RunSummary {
-            succeeded: vec![BeamId("a".into())],
-            failed: vec![BeamId("b".into())],
-            duration: Duration::from_secs(2),
-            ..RunSummary::default()
-        });
-        assert_eq!(
-            line(&state, Instant::now()).to_string(),
-            "alba · run build finished · ✔ 1  ✖ 1 · 2.0s"
+            session(&state_with_phase(Phase::Waiting { files: 1 }))
+                .unwrap()
+                .to_string(),
+            "watching 1 file"
         );
     }
 
     /// `TestBackend::to_string()` (the render snapshots) drops styles, so
-    /// this is what actually proves the bar, the outcome, and the parked
-    /// text reach their colour functions with `state.colour`; the
-    /// colour-to-status mapping itself is `theme.rs`'s own to pin.
+    /// this is what proves the parked text reaches its colour function
+    /// with `state.colour`.
     #[test]
-    fn colour_reaches_the_bar_the_outcome_and_the_parked_spans() {
-        let mut running = state_with_phase(Phase::Running {
-            done: 1,
-            total: 2,
-            since: Instant::now(),
-        });
-        running.colour = true;
-        assert_eq!(
-            line(&running, Instant::now()).spans[1].style,
-            Style::new().fg(Color::Green)
-        );
-
+    fn a_parked_project_is_named_in_the_parked_colour() {
         let mut parked = state_with_phase(Phase::Parked);
         parked.colour = true;
-        assert_eq!(
-            line(&parked, Instant::now()).spans[0].style,
-            Style::new().fg(Color::Yellow)
-        );
-
-        let mut finished = state_with_phase(Phase::Finished);
-        finished.colour = true;
-        finished.last_summary = Some(RunSummary {
-            succeeded: vec![BeamId("a".into())],
-            ..RunSummary::default()
-        });
-        assert_eq!(
-            line(&finished, Instant::now()).spans[1].style,
-            Style::new().fg(Color::Green)
-        );
+        let title = session(&parked).unwrap();
+        assert_eq!(title.to_string(), "parked · waiting for a valid Beamfile");
+        assert_eq!(title.spans[0].style, Style::new().fg(Color::Yellow));
     }
 }
