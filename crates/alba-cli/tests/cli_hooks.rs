@@ -45,9 +45,15 @@ fn git_ok(dir: &Path, args: &[&str]) {
 fn repository(beamfile: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     git_ok(dir.path(), &["init", "-q", "-b", "main"]);
-    git_ok(dir.path(), &["config", "user.email", "alba@example.com"]);
-    git_ok(dir.path(), &["config", "user.name", "Alba"]);
-    git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+    git_ok(
+        dir.path(),
+        &["config", "--local", "user.email", "alba@example.com"],
+    );
+    git_ok(dir.path(), &["config", "--local", "user.name", "Alba"]);
+    git_ok(
+        dir.path(),
+        &["config", "--local", "commit.gpgsign", "false"],
+    );
     std::fs::write(dir.path().join("Beamfile"), beamfile).unwrap();
     std::fs::write(dir.path().join(".gitignore"), ".alba/\n").unwrap();
     git_ok(dir.path(), &["add", "-A"]);
