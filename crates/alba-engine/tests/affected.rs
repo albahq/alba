@@ -175,9 +175,15 @@ fn select_without_a_beam_targets_every_affected_beam_but_parameterized_ones() {
     );
 }
 
+/// No `git init` here, on purpose: `Selection::Beam` must never touch git
+/// at all, so this asserts it by making any git access fail rather than
+/// by watching that it happens not to. A regression that made the `Beam`
+/// path call `changed_files` would fail loudly here instead of passing
+/// unnoticed inside a real repository.
 #[test]
 fn select_a_plain_beam_is_the_old_behaviour() {
-    let dir = repository();
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path().join("Beamfile"), "beam free { run \"free\" }\n");
     let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
     let targets = select(
         &project,
