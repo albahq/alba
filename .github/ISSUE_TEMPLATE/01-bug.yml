@@ -1,0 +1,52 @@
+name: Bug report
+description: Something does not behave the way the README says it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: beamfile
+    attributes:
+      label: Beamfile
+      description: The smallest Beamfile that reproduces the problem.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact `alba` invocation.
+      placeholder: alba run --affected main build
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Paste the output as is; `--log-format json` output is welcome.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Alba version
+      description: Output of `alba --version`.
+      placeholder: alba 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true

@@ -859,3 +859,12 @@ $ alba plugin check target/debug/alba-executor-example
 ✓ close
 conformant: protocol v1
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, the checks every
+change must pass, and the commit conventions.
+
+## License
+
+[MIT](LICENSE)
