@@ -155,6 +155,51 @@ fn a_tiny_terminal_gets_the_too_small_screen() {
     insta::assert_snapshot!(drawn(&state, 30, 8));
 }
 
+/// The real frame at the declared floor, a run in progress: the
+/// narrowest width the layout still has to draw a tree, a log pane, a
+/// junction, and a footer on, rather than the too-small message.
+#[test]
+fn a_run_in_flight_renders_at_the_forty_column_floor() {
+    let mut state = AppState::new("build", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            targets: vec![id("build")],
+            affected_by: None,
+            beams: vec![id("codegen"), id("build")],
+            edges: vec![(id("build"), id("codegen"))],
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+    state.apply(
+        &RunEvent::BeamFinished {
+            id: id("codegen"),
+            status: BeamStatus::Succeeded,
+            duration: Duration::from_millis(1200),
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(&output("build", "Compiling api v0.1.0"), now);
+    insta::assert_snapshot!(drawn(&state, 40, 12));
+}
+
+/// The floor's other exercise: a parked project, whose session title
+/// (`parked · waiting for a valid Beamfile`) is the longest text the
+/// top edge ever has to share with the identity title.
+#[test]
+fn a_parked_session_renders_at_the_forty_column_floor() {
+    let mut state = AppState::new("build", true);
+    state.apply(
+        &RunEvent::ProjectBroken {
+            diagnostic: "error: unknown target `nope`\n".to_string(),
+        },
+        Instant::now(),
+    );
+    insta::assert_snapshot!(drawn(&state, 40, 12));
+}
+
 /// Search mode: the bottom bar shows the query and the match counter,
 /// and the pane has scrolled so the current match (the earliest one, of
 /// two) is on screen even though it sits well above the tail.

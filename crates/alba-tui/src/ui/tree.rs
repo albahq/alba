@@ -1,14 +1,9 @@
 //! The left pane: one row per beam with a status glyph and a
-//! right-aligned duration, the selected row reversed, and a footer that
-//! tallies rows by status.
-//!
-//! The footer counts only the four statuses a beam can settle into
-//! (`✔ ⚡ ✖ ○`) — the same four the spec's mockup's counts row shows —
-//! and leaves a beam still `▶` running out of the tally: it has not
-//! settled into an outcome yet, so counting it under any of the four
-//! would misreport which bucket it will land in.
+//! right-aligned duration, the selected row reversed. The counts by
+//! status that used to close this pane sit on the frame's footer now
+//! (see `ui/footer.rs`).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -32,7 +27,6 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
     let rows = Layout::vertical([
         Constraint::Length(1), // "BEAMS" title
         Constraint::Min(0),    // one row per beam
-        Constraint::Length(1), // per-status counts
     ])
     .split(area);
 
@@ -53,8 +47,6 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows[1]);
-
-    frame.render_widget(Paragraph::new(counts_line(state)), rows[2]);
 }
 
 /// One tree row: the glyph in its status colour, the name and the
@@ -168,71 +160,11 @@ fn duration_text(state: &BeamState, now: Instant) -> String {
     }
 }
 
-/// The four buckets a beam can settle into, each `glyph count` pair
-/// styled by `status_style` of a representative state for that bucket:
-/// the same colour the tree's own rows would show that status in.
-fn counts_line(state: &AppState) -> Line<'static> {
-    let mut succeeded = 0;
-    let mut cached = 0;
-    let mut failed = 0;
-    let mut pending_or_cancelled = 0;
-    for row in &state.beams {
-        match &row.state {
-            BeamState::Pending => pending_or_cancelled += 1,
-            BeamState::Running { .. } => {}
-            BeamState::Done { status, .. } => match status {
-                BeamStatus::Succeeded => succeeded += 1,
-                BeamStatus::Cached => cached += 1,
-                BeamStatus::Failed { .. } | BeamStatus::FailedAllowed { .. } => failed += 1,
-                BeamStatus::Cancelled => pending_or_cancelled += 1,
-            },
-        }
-    }
-    let duration = Duration::from_secs(0);
-    let buckets: [(&str, usize, BeamState); 4] = [
-        (
-            "✔",
-            succeeded,
-            BeamState::Done {
-                status: BeamStatus::Succeeded,
-                duration,
-            },
-        ),
-        (
-            "⚡",
-            cached,
-            BeamState::Done {
-                status: BeamStatus::Cached,
-                duration,
-            },
-        ),
-        (
-            "✖",
-            failed,
-            BeamState::Done {
-                status: BeamStatus::Failed { exit_code: 1 },
-                duration,
-            },
-        ),
-        ("○", pending_or_cancelled, BeamState::Pending),
-    ];
-    let mut spans = Vec::with_capacity(buckets.len() * 2 - 1);
-    for (index, (glyph, count, representative)) in buckets.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::styled(
-            format!("{glyph} {count}"),
-            super::theme::status_style(representative, state.colour),
-        ));
-    }
-    Line::from(spans)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::style::{Modifier, Style};
+    use std::time::Duration;
 
     #[test]
     fn a_failed_row_carries_the_status_colour_on_its_glyph() {

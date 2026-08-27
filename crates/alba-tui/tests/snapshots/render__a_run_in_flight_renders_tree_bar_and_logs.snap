@@ -2,8 +2,8 @@
 source: crates/alba-tui/tests/render.rs
 expression: "drawn(&state, 80, 24)"
 ---
-"┌─ alba · run build ── ▰▰▰▰▰▰▱▱▱▱▱▱▱▱ 2/5 · 0.0s ──────────────────────────────┐"
-"│BEAMS                         │logs · api:build                               │"
+"┌─ alba · build ───────────────────────────────────────────────────────────────┐"
+"│BEAMS                         │LOGS                                ● following│"
 "│ ✔ codegen                1.2s│Compiling api v0.1.0                           │"
 "│ ⚡ api:codegen           0.8s│                                               │" Hidden by multi-width symbols: [(3, " ")]
 "│ ▶ api:build             0.0s…│                                               │"
@@ -23,6 +23,6 @@ expression: "drawn(&state, 80, 24)"
 "│                              │                                               │"
 "│                              │                                               │"
 "│                              │                                               │"
-"│                              │                                               │"
-"│✔ 1  ⚡ 1  ✖ 0  ○ 2           │● following                                    │" Hidden by multi-width symbols: [(7, " ")]
+"├──────────────────────────────┴───────────────────────────────────────────────┤"
+"│ ✔ 1  ⚡ 1  ✖ 0  ○ 2                ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 2/5 · 0.0s │" Hidden by multi-width symbols: [(8, " ")]
 "└─ q quit · r rerun · c cancel · w watch · / search · ? help ──────────────────┘"

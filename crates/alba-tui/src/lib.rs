@@ -358,8 +358,9 @@ fn half_pane(height: usize) -> usize {
 
 /// Copy mode's own hit testing: a click or a drag only means something
 /// once it lands inside the log pane's own content area — the tree
-/// pane, the borders, and the title/footer rows are not part of the
-/// buffer copy mode addresses. A release (`Up`) is the one exception:
+/// pane, the borders, and the title row are not part of the buffer copy
+/// mode addresses, and neither are the junction and footer rows, which
+/// sit outside the pane entirely. A release (`Up`) is the one exception:
 /// it always finishes whatever selection is already there, wherever the
 /// pointer ended up, since dragging off the bottom of the buffer or
 /// into the tree pane and letting go there are both routine and must
@@ -804,11 +805,11 @@ mod tests {
 
         match &state.mode {
             state::Mode::Copy(copy) => {
-                // 80x24 gives the log pane a content height of 20 rows
+                // 80x24 gives the log pane a content height of 19 rows
                 // (see `ui::log_pane_content_area`); following a 30-line
-                // buffer, the top visible line is 30 - 20 = 10.
-                assert_eq!(copy.anchor, (10, 0));
-                assert_eq!(copy.cursor, (10, 0));
+                // buffer, the top visible line is 30 - 19 = 11.
+                assert_eq!(copy.anchor, (11, 0));
+                assert_eq!(copy.cursor, (11, 0));
             }
             other => panic!("expected Mode::Copy, got {other:?}"),
         }
@@ -831,7 +832,7 @@ mod tests {
 
         // The log pane's content area starts at (32, 2) for an 80x24
         // terminal (see `ui::log_pane_content_area`); its 5 lines all
-        // fit inside the 20-row content height and follow the tail, so
+        // fit inside the 19-row content height and follow the tail, so
         // row 0 of the pane is buffer line 0 ("line 0").
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -1081,7 +1082,7 @@ mod tests {
 
     /// The log pane's keyboard scrolling, end to end through `dispatch`:
     /// half the pane's own content height per press, and back down to
-    /// following. At 80x24 the pane shows 20 rows, so half is 10.
+    /// following. At 80x24 the pane shows 19 rows, so half is 9.
     #[test]
     fn the_page_keys_scroll_the_selected_beams_buffer_by_half_a_pane() {
         let (commands, _receiver) = commands();
@@ -1096,21 +1097,21 @@ mod tests {
         assert!(
             matches!(
                 state.logs["build"].scroll(),
-                logs::Scroll::Paused { offset: 10 }
+                logs::Scroll::Paused { offset: 9 }
             ),
-            "half of the pane's 20 content rows"
+            "half of the pane's 19 content rows"
         );
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageUp, size());
         assert!(matches!(
             state.logs["build"].scroll(),
-            logs::Scroll::Paused { offset: 20 }
+            logs::Scroll::Paused { offset: 18 }
         ));
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageDown, size());
         assert!(matches!(
             state.logs["build"].scroll(),
-            logs::Scroll::Paused { offset: 10 }
+            logs::Scroll::Paused { offset: 9 }
         ));
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageDown, size());
@@ -1122,13 +1123,13 @@ mod tests {
 
     /// `half_pane` is exercised end to end above at the 80x24 default; this
     /// pins its floor directly, at the two sizes that actually reach it: a
-    /// terminal just past the minimum, whose 6 content rows halve to 3, and
+    /// terminal just past the minimum, whose 7 content rows halve to 3, and
     /// one below the minimum, whose content area is empty (no pane at all)
     /// but never falls to zero, which would make the key a no-op.
     #[test]
     fn the_page_distance_is_half_the_panes_own_height() {
-        assert_eq!(half_pane(20), 10, "20 content rows at 80x24");
-        assert_eq!(half_pane(6), 3, "6 content rows at the floor");
+        assert_eq!(half_pane(19), 9, "19 content rows at 80x24");
+        assert_eq!(half_pane(7), 3, "7 content rows at the floor");
         assert_eq!(
             half_pane(0),
             1,
