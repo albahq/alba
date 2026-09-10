@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Alba's embedded shell: a deterministic, cross-platform, POSIX-like interpreter for beam commands"
 
 [dependencies]
 glob = { workspace = true }

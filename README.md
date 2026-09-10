@@ -9,7 +9,7 @@ readable.
 ## Install
 
 ```sh
-cargo install --path crates/alba-cli
+cargo install --path crates/alba
 ```
 
 This builds the `alba` binary and installs it into Cargo's bin directory

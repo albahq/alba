@@ -80,7 +80,7 @@ impl PluginExecutor {
     /// `open` write as well as the read that follows it — see the module
     /// doc comment. Public so a caller that needs to reason about the
     /// exact timeout a plain [`Self::new`] session runs under — `alba
-    /// plugin check`, in `alba-cli`, is the motivating one — can read it
+    /// plugin check`, in `alba`, is the motivating one — can read it
     /// rather than guess a value that could silently drift from this one.
     pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -504,7 +504,7 @@ impl ExecSession for PluginSession {
         // `wait()`-ed the child, so `Child::id()` here is `None` and the
         // signal below is a no-op — any descendant the plugin left behind
         // on *that* path survives unkilled. See also
-        // `alba-cli`'s `commands::plugin` module doc comment, which
+        // `alba`'s `commands::plugin` module doc comment, which
         // documents the same gap for `alba plugin check`.
         let PluginSession {
             mut child,

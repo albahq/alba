@@ -304,7 +304,7 @@ async fn a_stage_that_never_reads_does_not_hang_its_producer() {
 /// follows it releases the readers.
 ///
 /// Deliberately not a `#[tokio::test]`: it builds and drops a runtime
-/// the way `alba-cli`'s `run` command does, because dropping a runtime
+/// the way `alba`'s `run` command does, because dropping a runtime
 /// waits for its blocking tasks. That is what makes the difference
 /// visible — a reader parked on a synchronous pipe read would survive
 /// `execute()` and hold the whole process here until the descendant

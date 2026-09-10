@@ -54,7 +54,7 @@ const RUN_OK: &str = "ok";
 const RUN_FAILED: &str = "failed";
 
 /// What the exit replay owes for this fixture's green run: the count
-/// `alba-cli`'s `render::print_summary` puts in its summary line
+/// `alba`'s `render::print_summary` puts in its summary line
 /// (`✓ 1 succeeded · 0.0s`), written to stderr once the alternate screen
 /// is already restored. Nothing the interface draws ever spells this —
 /// the frame's footer counts with glyphs instead (`✔ 1`) — so seeing it

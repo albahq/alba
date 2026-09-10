@@ -10,7 +10,7 @@ channel and pulls in `rustfmt` and `clippy`, so a plain `rustup` install is
 enough. Build the binary once, then let Alba drive its own checks:
 
 ```sh
-cargo install --path crates/alba-cli
+cargo install --path crates/alba
 alba hooks install
 ```
 

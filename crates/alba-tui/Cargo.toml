@@ -3,11 +3,13 @@ name = "alba-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Interactive terminal interface for Alba runs"
 
 [dependencies]
-alba-core = { path = "../alba-core" }
-alba-engine = { path = "../alba-engine" }
-alba-executors = { path = "../alba-executors" }
+alba-core.workspace = true
+alba-engine.workspace = true
+alba-executors.workspace = true
 ansi-to-tui.workspace = true
 arboard.workspace = true
 crossterm.workspace = true

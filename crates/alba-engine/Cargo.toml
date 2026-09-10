@@ -3,10 +3,12 @@ name = "alba-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Orchestration engine for Alba: scheduling, caching, affected runs, and watch mode"
 
 [dependencies]
-alba-core = { path = "../alba-core" }
-alba-executors = { path = "../alba-executors" }
+alba-core.workspace = true
+alba-executors.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
 globset.workspace = true
@@ -20,5 +22,5 @@ tokio-util.workspace = true
 which.workspace = true
 
 [dev-dependencies]
-alba-executors = { path = "../alba-executors", features = ["test-util"] }
+alba-executors = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
