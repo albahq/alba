@@ -81,6 +81,10 @@ pub enum Command {
         #[command(subcommand)]
         command: HooksCommand,
     },
+    /// Update alba to the latest release. Only for an alba the release
+    /// installers put in place; a `cargo install alba` updates itself the
+    /// same way it was installed.
+    Update,
 }
 
 /// A subcommand of `alba hooks`.

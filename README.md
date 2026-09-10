@@ -21,9 +21,13 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/albahq/alba/releases/la
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/albahq/alba/releases/latest/download/alba-installer.ps1 | iex"
 ```
 
+Once installed that way, `alba update` fetches the latest release and
+replaces the binary in place.
+
 With a Rust toolchain, `cargo install alba` builds the same binary from
-crates.io, and `cargo install --path crates/alba` builds it from a checkout.
-Alba has no other runtime dependencies.
+crates.io, and `cargo install --path crates/alba` builds it from a checkout;
+an alba installed like this updates with `cargo install alba` again, not
+with `alba update`. Alba has no other runtime dependencies.
 
 ## A Beamfile
 
@@ -115,6 +119,7 @@ alba                # runs the declared `default` beam, or lists beams if none i
 alba check          # loads and validates the Beamfile without running anything
 alba run <beam>     # runs a beam and everything it needs
 alba affected <ref> # lists the beams a git diff affects, runs nothing
+alba update         # replaces this binary with the latest release
 ```
 
 On a terminal, running any of these opens the interactive interface

@@ -35,6 +35,11 @@ fn run(cli: Cli) -> i32 {
     if let Some(Command::Plugin { command }) = &cli.command {
         return commands::plugin::run(command);
     }
+    // `update` replaces the binary itself and has no use for a Beamfile
+    // either.
+    if let Some(Command::Update) = &cli.command {
+        return commands::update::run();
+    }
 
     let beamfile = match resolve_beamfile(cli.file.as_deref()) {
         Ok(path) => path,
@@ -78,6 +83,7 @@ fn run(cli: Cli) -> i32 {
         // even loaded — see the `if let` there for why.
         Some(Command::Cache { .. }) => unreachable!("cache is dispatched before loading"),
         Some(Command::Plugin { .. }) => unreachable!("plugin is dispatched before loading"),
+        Some(Command::Update) => unreachable!("update is dispatched before loading"),
         Some(Command::Check) => commands::check::run(&project, &beamfile),
         Some(Command::Hook { name, args }) => {
             commands::hook::run(&project, &sources, &beamfile, &name, args)

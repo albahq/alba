@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `alba update`: fetch the latest release and replace the binary in place.
+  Only for an alba the release installers put in place; one built with
+  `cargo install` is told to update the same way it was installed.
+
 ## [0.1.0](https://github.com/albahq/alba/releases/tag/v0.1.0) - 2026-09-10
 
 The first release of Alba, a task runner driven by a Beamfile.

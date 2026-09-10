@@ -20,6 +20,7 @@ alba-executors.workspace = true
 alba-shell.workspace = true
 alba-syntax.workspace = true
 alba-tui.workspace = true
+axoupdater.workspace = true
 clap.workspace = true
 owo-colors.workspace = true
 serde.workspace = true
