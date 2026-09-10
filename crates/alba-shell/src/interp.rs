@@ -464,12 +464,12 @@ async fn run_external_command(
         let candidate = state.cwd.join(name);
         candidate.exists().then_some(candidate)
     } else {
-        which::which_in(name, state.get("PATH"), &state.cwd).ok()
+        which::which_in(name, state.path(), &state.cwd).ok()
     };
 
     let Some(path) = resolved else {
         let mut stderr = io.stderr.writer();
-        let _ = writeln!(stderr, "{}", not_found_message(name, state.get("PATH")));
+        let _ = writeln!(stderr, "{}", not_found_message(name, state.path()));
         return Flow::Next(127);
     };
 
