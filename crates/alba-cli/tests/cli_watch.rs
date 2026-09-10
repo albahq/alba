@@ -96,6 +96,7 @@ impl WatchProcess {
     /// honouring Ctrl-C must fail this test with a diagnostic instead of
     /// hanging the suite, and a bare `wait()` cannot be rescued by `Drop`
     /// — that only kills the process once `wait()` has already returned.
+    #[cfg(unix)]
     fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
