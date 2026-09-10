@@ -44,3 +44,8 @@ which = "7"
 insta = "1"
 tempfile = "3"
 unicode-width = "0.2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
