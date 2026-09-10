@@ -18,6 +18,7 @@ alba-tui = { path = "crates/alba-tui", version = "0.1.0" }
 ansi-to-tui = "7"
 arboard = "3"
 assert_cmd = "2"
+axoupdater = { version = "0.10", default-features = false, features = ["github_releases"] }
 async-trait = "0.1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
