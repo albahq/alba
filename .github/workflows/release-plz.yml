@@ -1,0 +1,56 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+# Both jobs run with a personal access token rather than the workflow's
+# own GITHUB_TOKEN: pushes made with GITHUB_TOKEN never trigger other
+# workflows, so the release pull request would get no CI run and the
+# version tag would never start the dist release (release.yml).
+jobs:
+  # Publish the crates and push the version tag once a release pull
+  # request has been merged. Nothing happens on an ordinary push.
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The full history is needed to release from the latest commit
+          # of the release pull request.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Open or refresh the release pull request: next version and changelog.
+  release-pr:
+    name: Release pull request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
