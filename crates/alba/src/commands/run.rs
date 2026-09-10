@@ -690,14 +690,21 @@ async fn consume(
     let mut announced = false;
     loop {
         tokio::select! {
-            event = incoming.recv() => match event {
-                Some(event) => renderer.handle(&event),
-                None => break,
-            },
+            // Biased so the announcement wins the tie. A run that ends the
+            // moment it is cancelled leaves both branches ready at once,
+            // and an unbiased select picks between them at random: half
+            // the time it would take the closed channel, break, and let a
+            // cancelled run finish having said nothing about why.
+            biased;
+
             () = cancel.cancelled(), if !announced => {
                 announced = true;
                 err.line("cancelling...");
             }
+            event = incoming.recv() => match event {
+                Some(event) => renderer.handle(&event),
+                None => break,
+            },
         }
     }
 }
