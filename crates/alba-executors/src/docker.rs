@@ -545,12 +545,14 @@ mod tests {
 
     #[test]
     fn container_cwd_is_identity_on_unix_and_workspace_relative_on_windows() {
-        let mapping = PathMapping::new(std::path::Path::new("/proj"), None);
         #[cfg(unix)]
-        assert_eq!(
-            mapping.container_cwd(std::path::Path::new("/proj/api")),
-            "/proj/api"
-        );
+        {
+            let mapping = PathMapping::new(std::path::Path::new("/proj"), None);
+            assert_eq!(
+                mapping.container_cwd(std::path::Path::new("/proj/api")),
+                "/proj/api"
+            );
+        }
         #[cfg(windows)]
         {
             let mapping = PathMapping::new(std::path::Path::new(r"C:\proj"), None);

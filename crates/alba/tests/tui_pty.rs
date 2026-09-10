@@ -13,7 +13,9 @@ const GREEN: &str = "version \"1\"\n\nbeam green {\n  run \"echo hello-from-the-
 
 /// A beam that fails after printing a coloured line, for the replay's own
 /// colour test.
+#[cfg(unix)]
 const RED: &str = "version \"1\"\n\nbeam red {\n  run \"sh red.sh\"\n}\n";
+#[cfg(unix)]
 const RED_SCRIPT: &str = "printf '\\033[31mred\\033[0m\\n'\nexit 1\n";
 
 /// Entering and leaving the alternate screen: the two escape sequences a
