@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "alba",
+  "version": "0.1.0",
+  "description": "Marketplace for Alba, the Beamfile task runner. Hosts the Alba Claude Code plugin.",
+  "owner": {
+    "name": "JDevelop",
+    "email": "admin@jdevelop.io",
+    "url": "https://github.com/albahq"
+  },
+  "plugins": [
+    {
+      "name": "alba",
+      "source": "./claude-code-plugin",
+      "description": "Teaches Claude Code how Alba works: read and write Beamfiles, run the alba CLI, and validate a Beamfile after every edit.",
+      "version": "0.1.0",
+      "category": "development"
+    }
+  ]
+}

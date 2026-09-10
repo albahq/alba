@@ -860,6 +860,24 @@ $ alba plugin check target/debug/alba-executor-example
 conformant: protocol v1
 ```
 
+## Claude Code plugin
+
+Alba ships a [Claude Code](https://claude.ai/code) plugin, unrelated to the
+executor plugins above, so the assistant understands Alba and can read,
+write, and run `Beamfile`s in your project. Run both commands inside Claude
+Code:
+
+```text
+/plugin marketplace add albahq/alba
+/plugin install alba
+```
+
+The first registers this repository's marketplace
+(`.claude-plugin/marketplace.json`) as a source; the second installs the
+`alba` plugin from it. See
+[`claude-code-plugin/README.md`](claude-code-plugin/README.md) for what it
+provides.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, the checks every

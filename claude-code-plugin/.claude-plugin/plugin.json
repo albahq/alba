@@ -1,0 +1,13 @@
+{
+  "name": "alba",
+  "version": "0.1.0",
+  "description": "Teaches Claude Code how Alba works: read and write Beamfiles, run the alba CLI, and validate a Beamfile after every edit.",
+  "author": {
+    "name": "JDevelop",
+    "email": "admin@jdevelop.io",
+    "url": "https://github.com/albahq"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/albahq/alba/tree/main/claude-code-plugin",
+  "keywords": ["alba", "task-runner", "build-tool", "beamfile", "rust"]
+}
