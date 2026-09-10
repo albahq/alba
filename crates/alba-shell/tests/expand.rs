@@ -25,6 +25,15 @@ async fn run(src: &str) -> (i32, Vec<(ShellStream, String)>) {
     run_in(src, std::env::current_dir().unwrap()).await
 }
 
+/// A path spelled the way the shell itself spells one: forward slashes,
+/// which a glob already yields (see `globs_sort_and_use_forward_slashes`).
+/// Interpolating a windows path verbatim would instead hand the lexer a
+/// run of backslash escapes, and the separators would be eaten before any
+/// expansion ran.
+fn shell_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 fn stdout(lines: &[(ShellStream, String)]) -> Vec<&str> {
     lines
         .iter()
@@ -125,7 +134,7 @@ async fn an_absolute_glob_pattern_matches_and_yields_absolute_results() {
     // of the cwd prefix would still resolve and the test would pass for
     // the wrong reason. A sibling tempdir guarantees no prefix relation.
     let elsewhere = tempfile::tempdir().unwrap();
-    let src = format!("cd {}/only_*", dir.path().display());
+    let src = format!("cd {}/only_*", shell_path(dir.path()));
     let (code, lines) = run_in(&src, elsewhere.path().to_path_buf()).await;
     assert_eq!(code, 0, "lines: {lines:?}");
 }
@@ -134,7 +143,7 @@ async fn an_absolute_glob_pattern_matches_and_yields_absolute_results() {
 async fn an_unmatched_absolute_glob_stays_literal() {
     let dir = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
-    let pattern = format!("{}/no_such_*", dir.path().display());
+    let pattern = format!("{}/no_such_*", shell_path(dir.path()));
     let (code, lines) = run_in(&format!("cd {pattern}"), elsewhere.path().to_path_buf()).await;
     assert_eq!(code, 1);
     assert!(

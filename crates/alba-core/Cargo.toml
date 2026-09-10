@@ -3,9 +3,11 @@ name = "alba-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Core domain model for Alba: beams, Beamfiles, evaluation, and the beam graph"
 
 [dependencies]
-alba-syntax = { path = "../alba-syntax" }
+alba-syntax.workspace = true
 glob.workspace = true
 globset.workspace = true
 ignore.workspace = true

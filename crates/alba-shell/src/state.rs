@@ -110,9 +110,47 @@ impl ShellState {
             .collect()
     }
 
+    /// `$PATH`, for external command lookup. Matched case-insensitively
+    /// when the exact spelling is absent: windows names the variable
+    /// `Path`, and a run started from the process environment inherits
+    /// it under that name. Only the lookup is lenient — the variable
+    /// keeps whatever name it was given, and so does every child that
+    /// inherits it.
+    pub fn path(&self) -> Option<&str> {
+        self.get("PATH").or_else(|| {
+            self.vars
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                .map(|(_, var)| var.value.as_str())
+        })
+    }
+
     /// `$HOME`, falling back to `$USERPROFILE` (windows), for `cd` with
     /// no argument and for tilde expansion.
     pub fn home(&self) -> Option<&str> {
         self.get("HOME").or_else(|| self.get("USERPROFILE"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_falls_back_to_the_spelling_windows_uses() {
+        let state = ShellState::new(vec![("Path".into(), "/bin".into())], PathBuf::from("/"));
+        assert_eq!(state.path(), Some("/bin"));
+    }
+
+    #[test]
+    fn path_prefers_the_exact_spelling_when_both_are_present() {
+        let state = ShellState::new(
+            vec![
+                ("Path".into(), "/fallback".into()),
+                ("PATH".into(), "/exact".into()),
+            ],
+            PathBuf::from("/"),
+        );
+        assert_eq!(state.path(), Some("/exact"));
     }
 }

@@ -1,20 +1,25 @@
 [package]
-name = "alba-cli"
+name = "alba"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Alba, the Beamfile task runner: parallel beams, caching, watch mode, and an interactive interface"
+readme = "../../README.md"
+keywords = ["task-runner", "build", "make", "monorepo", "cli"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
 
 [[bin]]
 name = "alba"
 path = "src/main.rs"
 
 [dependencies]
-alba-core = { path = "../alba-core" }
-alba-engine = { path = "../alba-engine" }
-alba-executors = { path = "../alba-executors" }
-alba-shell = { path = "../alba-shell" }
-alba-syntax = { path = "../alba-syntax" }
-alba-tui = { path = "../alba-tui" }
+alba-core.workspace = true
+alba-engine.workspace = true
+alba-executors.workspace = true
+alba-shell.workspace = true
+alba-syntax.workspace = true
+alba-tui.workspace = true
 clap.workspace = true
 owo-colors.workspace = true
 serde.workspace = true

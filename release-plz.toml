@@ -1,0 +1,45 @@
+# release-plz drives the release pull request, the crates.io publish, and
+# the version tag. Building the binaries and the GitHub release from that
+# tag is dist's job (see `dist-workspace.toml`).
+
+[workspace]
+# The whole workspace moves as one version behind one tag: the crates below
+# `alba` have no consumers of their own, so per-crate tags and changelogs
+# would only add noise. Tags and changelogs are re-enabled on `alba` alone.
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+# The library crates are published for `cargo install alba` to resolve them,
+# not as a public API, so a semver check against the previous release would
+# only slow the release down.
+semver_check = false
+# Commits follow gitmoji + Conventional Commits (`✨ feat(scope): ...`).
+# The changelog preprocessor below strips the emoji, but the version bump is
+# computed from the raw message, so the two emojis that matter are mapped
+# here: a sparkle is a feature (minor), a collision is a breaking change
+# (major). Everything else is a patch.
+custom_minor_increment_regex = "^✨"
+custom_major_increment_regex = "^💥"
+
+[[package]]
+name = "alba"
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+# One changelog for the whole workspace: commits that only touch a library
+# crate still describe a change to the runner its users install.
+changelog_include = [
+  "alba-core",
+  "alba-engine",
+  "alba-executors",
+  "alba-shell",
+  "alba-syntax",
+  "alba-tui",
+]
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+
+[changelog]
+# Strip the gitmoji so the conventional part of the subject is parsed.
+commit_preprocessors = [
+  { pattern = ' *(:\w+:|[\p{Emoji_Presentation}\p{Extended_Pictographic}\u{200D}]) *', replace = "" },
+]

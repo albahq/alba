@@ -35,7 +35,7 @@ beam install {
   description "Install the alba binary into the user's cargo bin"
   inputs ["crates/**/*.rs", "Cargo.toml", "Cargo.lock"]
   outputs ["{env('HOME', '')}/.cargo/bin/alba"]
-  run "cargo install --path crates/alba-cli"
+  run "cargo install --path crates/alba"
 }
 
 hook pre-commit { beam fmt }

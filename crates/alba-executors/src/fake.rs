@@ -251,7 +251,7 @@ impl ExecSession for FakeSession {
         // Nothing real to reach — this fake never spawns a process — but
         // recorded as its own event rather than folded into `Closed`, so a
         // test asserting the engine's own choice between the two (a future
-        // consumer of `kill`, mirroring `alba-cli`'s) can tell them apart.
+        // consumer of `kill`, mirroring `alba`'s) can tell them apart.
         self.state
             .events
             .lock()

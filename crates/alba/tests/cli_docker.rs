@@ -5,7 +5,7 @@
 //!
 //! Every test is `#[ignore]`d — see the reason string on each — because they
 //! require `docker` on the `PATH` and a running daemon; run them explicitly
-//! with `cargo test -p alba-cli --test cli_docker -- --ignored`.
+//! with `cargo test -p alba --test cli_docker -- --ignored`.
 //!
 //! Each test's beam carries a name unique to both the test and the process
 //! that runs it (see `beam_name`), mirroring `alba-executors/tests/docker.rs`'s

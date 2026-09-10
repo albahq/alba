@@ -2,7 +2,7 @@
 //! bottom bar, a vertical divider between the tree and log panes, the
 //! junction line that closes both columns, and the footer carrying the
 //! run beneath it — the interactive mirror of the CLI's headless
-//! renderers (see `alba-cli/src/render/`), but a pure function of
+//! renderers (see `alba/src/render/`), but a pure function of
 //! [`AppState`] rather than a stream consumer.
 //!
 //! Nothing here samples a clock or touches the terminal: `now` arrives
@@ -226,8 +226,8 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
 }
 
 /// How long something took, as one decimal of a second (`4.1s`) — the
-/// same shape as `alba-cli`'s `format_duration`, kept as its own copy
-/// here because the dependency direction (`alba-cli` → `alba-tui`) runs
+/// same shape as `alba`'s `format_duration`, kept as its own copy
+/// here because the dependency direction (`alba` → `alba-tui`) runs
 /// the wrong way for this crate to import it.
 fn format_duration(duration: Duration) -> String {
     format!("{:.1}s", duration.as_secs_f64())

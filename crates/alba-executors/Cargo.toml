@@ -3,6 +3,8 @@ name = "alba-executors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Executors that run Alba beam actions: embedded shell, system shell, docker, and plugins"
 
 [features]
 test-util = []
@@ -12,7 +14,7 @@ name = "fake-plugin"
 path = "tests/support/fake_plugin.rs"
 
 [dependencies]
-alba-shell = { path = "../alba-shell" }
+alba-shell.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,3 +27,7 @@ nix = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# A test-only helper binary, not something to ship in a release.
+[package.metadata.dist]
+dist = false

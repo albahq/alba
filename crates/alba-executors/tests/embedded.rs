@@ -184,6 +184,14 @@ async fn cancellation_returns_promptly_when_a_stage_outlives_the_run() {
     );
 }
 
+// Unix only, and the gap is real rather than a test artefact: tokio reads
+// a child's pipes through the blocking pool on windows, so a read the run
+// abandoned keeps running until whatever holds the write end lets go, and
+// aborting its task cannot stop it. Dropping the runtime then waits that
+// out. Reaching the same contract there needs overlapped reads on named
+// pipes, which this crate does not do — a sibling of the process-group gap
+// `spawn::terminate` documents.
+#[cfg(unix)]
 #[test]
 fn a_cancelled_run_does_not_pin_the_host_process() {
     // The other half of the same contract, and the half a user actually

@@ -13,8 +13,27 @@ const GREEN: &str = "version \"1\"\n\nbeam green {\n  run \"echo hello-from-the-
 
 /// A beam that fails after printing a coloured line, for the replay's own
 /// colour test.
+#[cfg(unix)]
 const RED: &str = "version \"1\"\n\nbeam red {\n  run \"sh red.sh\"\n}\n";
+#[cfg(unix)]
 const RED_SCRIPT: &str = "printf '\\033[31mred\\033[0m\\n'\nexit 1\n";
+
+/// A cursor position request and the report that answers it. ConPTY asks
+/// the terminal where the cursor is and holds the session's output until
+/// something answers, so a driver that never replies sees nothing at all;
+/// nothing on unix asks, which makes the reply harmless there.
+const CURSOR_QUERY: &str = "\u{1b}[6n";
+const CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
+
+/// Answer every cursor query in `seen` that has not been answered yet.
+fn answer_cursor_queries(seen: &str, answered: &mut usize, writer: &mut Box<dyn Write + Send>) {
+    let asked = seen.matches(CURSOR_QUERY).count();
+    while *answered < asked {
+        writer.write_all(CURSOR_REPORT).unwrap();
+        writer.flush().unwrap();
+        *answered += 1;
+    }
+}
 
 /// Entering and leaving the alternate screen: the two escape sequences a
 /// real terminal session must produce and, on quit, retract.
@@ -54,7 +73,7 @@ const RUN_OK: &str = "ok";
 const RUN_FAILED: &str = "failed";
 
 /// What the exit replay owes for this fixture's green run: the count
-/// `alba-cli`'s `render::print_summary` puts in its summary line
+/// `alba`'s `render::print_summary` puts in its summary line
 /// (`✓ 1 succeeded · 0.0s`), written to stderr once the alternate screen
 /// is already restored. Nothing the interface draws ever spells this —
 /// the frame's footer counts with glyphs instead (`✔ 1`) — so seeing it
@@ -145,6 +164,7 @@ fn drive_with_script(
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = String::new();
+    let mut answered = 0usize;
 
     // Read until the run has actually finished, evidenced by the footer's
     // own outcome word — not merely the alternate screen opening,
@@ -169,6 +189,7 @@ fn drive_with_script(
             Ok(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
             Err(_) => panic!("the run never finished on the pty; got: {seen:?}"),
         }
+        answer_cursor_queries(&seen, &mut answered, &mut writer);
         if seen.contains(ALTERNATE_SCREEN_ENTER)
             && (seen.contains(RUN_OK) || seen.contains(RUN_FAILED))
         {

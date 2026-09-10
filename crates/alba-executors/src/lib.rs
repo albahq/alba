@@ -64,7 +64,7 @@ pub trait Executor: Send + Sync {
 /// for every outcome — that bracket is its whole contract (see the module
 /// doc comment). `kill` is a second, narrower way out, for a caller
 /// outside that bracket that must abandon a session immediately rather
-/// than negotiate an end to it: `alba plugin check` (in `alba-cli`) is the
+/// than negotiate an end to it: `alba plugin check` (in `alba`) is the
 /// motivating case, giving up on a plugin that ran past its own timeout or
 /// broke protocol mid-command. Implementations must make it reach whatever
 /// a `Drop` alone would not — a spawned process's whole process group, not

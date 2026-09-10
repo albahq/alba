@@ -3,6 +3,8 @@ name = "alba-syntax"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Lexer, parser, AST, and diagnostics for the Beamfile DSL"
 
 [dependencies]
 # `fancy-no-backtrace` is the minimal miette feature set that exposes

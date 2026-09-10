@@ -174,9 +174,16 @@ async fn an_unknown_command_reports_127_with_a_message() {
 
 #[tokio::test]
 async fn a_near_miss_of_a_builtin_gets_a_suggestion() {
-    // `pdw` is one transposition away from the `pwd` builtin.
-    let (_, lines) = run("pdw").await;
-    assert!(lines.iter().any(|(_, t)| t.contains("did you mean `pwd`?")));
+    // `pdw` is one transposition away from the `pwd` builtin. The
+    // suggestion also ranks everything on PATH, and a machine that
+    // happens to carry a nearer neighbour would win the tie and answer
+    // something else — so this runs with an empty PATH, leaving the
+    // builtins as the only candidates the assertion is about.
+    let (_, lines) = run_with_env("pdw", vec![("PATH".to_string(), String::new())]).await;
+    assert!(
+        lines.iter().any(|(_, t)| t.contains("did you mean `pwd`?")),
+        "lines: {lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -374,8 +381,10 @@ async fn exit_without_an_argument_still_uses_the_last_code() {
 async fn a_distant_name_gets_no_suggestion() {
     // `nosuch` is two edits from the builtin `touch`, which is not a
     // typo of it by any reading. Two edits only count as a typo when both
-    // names are long enough for it to mean something.
-    let (_, lines) = run("nosuch").await;
+    // names are long enough for it to mean something. Empty PATH for the
+    // same reason as the near-miss test above: a nearer neighbour on the
+    // machine running this would answer where the builtins stay silent.
+    let (_, lines) = run_with_env("nosuch", vec![("PATH".to_string(), String::new())]).await;
     assert!(
         !lines.iter().any(|(_, t)| t.contains("did you mean")),
         "lines: {lines:?}"
