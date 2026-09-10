@@ -3,18 +3,18 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/albahq/alba"
 
 [workspace.dependencies]
-alba-core = { path = "crates/alba-core", version = "0.1.0" }
-alba-engine = { path = "crates/alba-engine", version = "0.1.0" }
-alba-executors = { path = "crates/alba-executors", version = "0.1.0" }
-alba-shell = { path = "crates/alba-shell", version = "0.1.0" }
-alba-syntax = { path = "crates/alba-syntax", version = "0.1.0" }
-alba-tui = { path = "crates/alba-tui", version = "0.1.0" }
+alba-core = { path = "crates/alba-core", version = "0.2.0" }
+alba-engine = { path = "crates/alba-engine", version = "0.2.0" }
+alba-executors = { path = "crates/alba-executors", version = "0.2.0" }
+alba-shell = { path = "crates/alba-shell", version = "0.2.0" }
+alba-syntax = { path = "crates/alba-syntax", version = "0.2.0" }
+alba-tui = { path = "crates/alba-tui", version = "0.2.0" }
 ansi-to-tui = "7"
 arboard = "3"
 assert_cmd = "2"

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/albahq/alba/compare/v0.1.0...v0.2.0) - 2026-09-10
+
+### Added
+
+- *(cli)* add alba update to self-update from the latest release
+
 ### Added
 
 - `alba update`: fetch the latest release and replace the binary in place.
