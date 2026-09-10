@@ -31,7 +31,7 @@ if command -v alba >/dev/null 2>&1; then
   summary="$(alba check --file "$beamfile" 2>&1)" || true
   [ -n "$summary" ] && context="$context"$'\n'"$summary"
 else
-  context="$context"$'\n'"The 'alba' binary is not installed: ask the user to install it (cargo install --path crates/alba-cli) before running beams."
+  context="$context"$'\n'"The 'alba' binary is not installed: ask the user to install it (see https://github.com/albahq/alba#install, or cargo install alba) before running beams."
 fi
 
 escape_for_json() {
