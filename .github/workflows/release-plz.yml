@@ -33,8 +33,13 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Open or refresh the release pull request: next version and changelog.
+  # Runs after `release`, never beside it: on the push that merges a
+  # release pull request, a `release-pr` started in parallel compares the
+  # workspace against a registry the publish has not reached yet, and
+  # opens a pull request for a patch release that does not exist.
   release-pr:
     name: Release pull request
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: write
