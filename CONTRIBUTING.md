@@ -58,3 +58,15 @@ scope is usually the crate name without its `alba-` prefix (`syntax`, `core`,
 
 A pull request is merged once CI is green on all three platforms and a
 maintainer has reviewed it.
+
+## Releases
+
+Releases are cut from `main` by [release-plz](https://release-plz.ieni.dev/):
+every push opens or refreshes a pull request that bumps the workspace
+version and writes `CHANGELOG.md` from the commits since the last release.
+Nothing else is needed from a contributor; the commit convention above is
+what decides the next version (`✨ feat` is a minor bump, `💥` a major one,
+anything else a patch) and where a change lands in the changelog.
+
+Merging that pull request publishes the crates to crates.io and pushes the
+`v<version>` tag, which builds the binaries and the GitHub release.

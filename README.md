@@ -8,12 +8,22 @@ readable.
 
 ## Install
 
+Prebuilt binaries for Linux, macOS, and Windows come with every
+[release](https://github.com/albahq/alba/releases). The installer scripts
+download the right one and put `alba` into Cargo's bin directory
+(`~/.cargo/bin` by default), no Rust toolchain required:
+
 ```sh
-cargo install --path crates/alba
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/albahq/alba/releases/latest/download/alba-installer.sh | sh
 ```
 
-This builds the `alba` binary and installs it into Cargo's bin directory
-(`~/.cargo/bin` by default). Alba has no other runtime dependencies.
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/albahq/alba/releases/latest/download/alba-installer.ps1 | iex"
+```
+
+With a Rust toolchain, `cargo install alba` builds the same binary from
+crates.io, and `cargo install --path crates/alba` builds it from a checkout.
+Alba has no other runtime dependencies.
 
 ## A Beamfile
 
