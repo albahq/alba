@@ -11,12 +11,18 @@
 //! match.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-/// The files under `base` matching any of `patterns`, as
+/// The files matching any of `patterns`, resolved from `base`, as
 /// `(relative path with '/' separators, absolute path)` pairs sorted by
 /// relative path — sorted so a fingerprint built from the list is
 /// deterministic across platforms and directory iteration orders.
+///
+/// A pattern may climb out of `base` through leading `..` components
+/// (`../../Dockerfile`): each pattern is walked from its own
+/// [`anchor_pattern`], and every file is named by its shortest path from
+/// `base`, `../` included, so a file reached by two spellings of the same
+/// path is listed once.
 ///
 /// `.gitignore` files are honored even outside a git repository
 /// (`require_git(false)`), so behaviour does not silently change when a
@@ -35,14 +41,67 @@ use std::path::{Path, PathBuf};
 /// from a [`crate::Project`] assembled some other way; it is skipped on
 /// its own, leaving its siblings' matches intact.
 pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> {
+    let mut anchors: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for pattern in patterns {
+        let (anchor, rest) = anchor_pattern(base, pattern);
+        match anchors.iter_mut().find(|(dir, _)| *dir == anchor) {
+            Some((_, group)) => group.push(rest),
+            None => anchors.push((anchor, vec![rest])),
+        }
+    }
+
+    let base_components = lexical_components(base);
+    let mut files: Vec<(String, PathBuf)> = anchors
+        .iter()
+        .flat_map(|(anchor, group)| walk(anchor, group))
+        .map(|absolute| (relative_name(&base_components, &absolute), absolute))
+        .collect();
+    files.sort();
+    files.dedup_by(|later, earlier| later.0 == earlier.0);
+    files
+}
+
+/// Where `pattern`'s matches live: `base` with the pattern's leading `.`
+/// and `..` components applied, and the rest of the pattern, relative to
+/// that directory. `../../Dockerfile` declared in `/repo/contexts/shared`
+/// anchors at `/repo` as `Dockerfile`.
+///
+/// Lexical on purpose: `..` names the parent of the directory as the
+/// Beamfile spells it, the way its author reads it, not the parent of
+/// wherever a symbolic link on the way leads. Every consumer that matches
+/// a path against `inputs` (the cache, affected runs, watch mode) anchors
+/// through here, so they cannot disagree about what a pattern names.
+pub fn anchor_pattern(base: &Path, pattern: &str) -> (PathBuf, String) {
+    let mut anchor = base.to_path_buf();
+    let mut rest = pattern;
+    loop {
+        if let Some(tail) = rest.strip_prefix("./") {
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("../") {
+            if anchor.file_name().is_some() {
+                anchor.pop();
+            } else if !anchor.has_root() {
+                // A relative base already at, or above, its own start.
+                anchor.push("..");
+            }
+            rest = tail;
+        } else {
+            return (anchor, rest.to_string());
+        }
+    }
+}
+
+/// The absolute paths of the files under `anchor` matching `patterns`,
+/// which are relative to it.
+fn walk(anchor: &Path, patterns: &[String]) -> Vec<PathBuf> {
     let matcher = Matcher::compile(patterns);
     if matcher.is_empty() {
         return Vec::new();
     }
 
     // Owned copies: the walker's filter must outlive this call's borrows.
-    let (root, roots) = (base.to_path_buf(), matcher.roots.clone());
-    let walker = ignore::WalkBuilder::new(base)
+    let (root, roots) = (anchor.to_path_buf(), matcher.roots.clone());
+    let walker = ignore::WalkBuilder::new(anchor)
         .hidden(false)
         .require_git(false)
         .git_global(false)
@@ -59,16 +118,48 @@ pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> 
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        let Ok(relative) = entry.path().strip_prefix(base) else {
+        let Ok(relative) = entry.path().strip_prefix(anchor) else {
             continue;
         };
         let unified = relative.to_string_lossy().replace('\\', "/");
         if matcher.set.is_match(&unified) {
-            files.push((unified, entry.into_path()));
+            files.push(entry.into_path());
         }
     }
-    files.sort();
     files
+}
+
+/// `path`'s components with `.` dropped and `..` folded into the component
+/// before it, so two spellings of one path compare equal.
+fn lexical_components(path: &Path) -> Vec<Component<'_>> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(components.last(), Some(Component::Normal(_))) => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    components
+}
+
+/// The shortest '/'-separated path from the base (given as its
+/// [`lexical_components`]) to `path`, climbing with `..` when `path` lies
+/// outside it.
+fn relative_name(base: &[Component<'_>], path: &Path) -> String {
+    let path = lexical_components(path);
+    let shared = base
+        .iter()
+        .zip(&path)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let climb = std::iter::repeat_n("..".to_string(), base.len() - shared);
+    let descend = path[shared..]
+        .iter()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned());
+    climb.chain(descend).collect::<Vec<_>>().join("/")
 }
 
 /// Whether every `outputs` pattern is satisfied on disk: a literal path
@@ -165,6 +256,45 @@ fn literal_prefix(pattern: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_dot_components_move_the_anchor_and_leave_the_rest() {
+        let anchor = |base: &str, pattern: &str| {
+            let (dir, rest) = anchor_pattern(Path::new(base), pattern);
+            (dir.to_string_lossy().replace('\\', "/"), rest)
+        };
+
+        assert_eq!(
+            anchor("/repo/contexts/shared", "../../Dockerfile"),
+            ("/repo".to_string(), "Dockerfile".to_string())
+        );
+        assert_eq!(
+            anchor("/repo", "./src/**/*.rs"),
+            ("/repo".to_string(), "src/**/*.rs".to_string())
+        );
+        assert_eq!(
+            anchor("/repo", "src/**/*.rs"),
+            ("/repo".to_string(), "src/**/*.rs".to_string())
+        );
+        // A filesystem root has no parent: climbing past it stays there.
+        assert_eq!(anchor("/", "../x"), ("/".to_string(), "x".to_string()));
+        // A relative base keeps climbing above its own start.
+        assert_eq!(anchor(".", "../x"), ("./..".to_string(), "x".to_string()));
+    }
+
+    #[test]
+    fn a_name_climbs_out_of_the_base_only_as_far_as_needed() {
+        let base = lexical_components(Path::new("/repo/contexts/shared"));
+        let name = |path: &str| relative_name(&base, Path::new(path));
+
+        assert_eq!(name("/repo/contexts/shared/src/a.php"), "src/a.php");
+        assert_eq!(name("/repo/Dockerfile"), "../../Dockerfile");
+        assert_eq!(
+            name("/repo/contexts/shared/../../Dockerfile"),
+            "../../Dockerfile"
+        );
+        assert_eq!(name("/repo/contexts/other/b.php"), "../other/b.php");
+    }
 
     #[test]
     fn a_literal_prefix_stops_at_the_first_metacharacter() {

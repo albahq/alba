@@ -82,6 +82,42 @@ fn a_pattern_matching_nothing_yields_an_empty_list() {
     assert_eq!(relative_paths(dir.path(), &["*.rs"]), Vec::<String>::new());
 }
 
+/// An imported Beamfile's beam may depend on a file above its own
+/// directory, such as a `Dockerfile` at the project root: walking the
+/// declaring directory alone could never reach it, and the pattern used to
+/// match nothing without a word.
+#[test]
+fn a_pattern_climbing_out_of_the_base_matches_the_files_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Dockerfile", "FROM php");
+    write(dir.path(), "config/app.yaml", "app");
+    write(dir.path(), "contexts/shared/src/a.php", "a");
+    let base = dir.path().join("contexts/shared");
+
+    assert_eq!(
+        relative_paths(
+            &base,
+            &["src/**", "../../Dockerfile", "../../config/*.yaml"]
+        ),
+        vec!["../../Dockerfile", "../../config/app.yaml", "src/a.php"]
+    );
+}
+
+/// A file is named by its shortest path from the base, whichever pattern
+/// reached it: a file matched both from below and through `..` is listed
+/// once, so the fingerprint does not depend on how it was spelled.
+#[test]
+fn a_file_reached_by_several_spellings_is_listed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app/src/a.rs", "a");
+    let base = dir.path().join("app");
+
+    assert_eq!(
+        relative_paths(&base, &["src/*.rs", "./src/a.rs", "../app/src/a.rs"]),
+        vec!["src/a.rs"]
+    );
+}
+
 #[test]
 fn outputs_are_satisfied_by_literal_existence_and_glob_matches() {
     let dir = tempfile::tempdir().unwrap();
