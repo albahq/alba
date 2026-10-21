@@ -25,7 +25,7 @@ levels is `api:db:migrate`.
 | --- | --- | --- |
 | `description` | string template | Shown in listings. |
 | `needs` | `[beam, api:beam, ...]` | Prerequisites; all must succeed first. |
-| `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory. Turns caching on, and drives `--watch` and `--affected`. |
+| `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. Turns caching on, and drives `--watch` and `--affected`. |
 | `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. A missing output forces a rerun. |
 | `run` | `"cmd"` or `["cmd1", "cmd2"]` | String templates. Commands run in order on the same executor. |
 | `env` | `{ NAME = "value", OTHER = param }` | Values are string templates or a bare `let` / parameter name. |
