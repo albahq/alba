@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/albahq/alba/compare/v0.2.0...v0.2.1) - 2026-10-21
+
+### Fixed
+
+- *(cli)* watch inputs above the project root
+- *(core)* reject `.` and `..` inside an inputs pattern
+- *(core)* match inputs outside the Beamfile directory
+- *(engine)* watch inputs above their Beamfile
+- *(engine)* affect beams through inputs above their Beamfile
+
+### Other
+
+- *(cli)* correct how plugin tests find the example binary
+- *(readme)* document inputs above the Beamfile directory
+- update Cargo.lock dependencies
+
 ## [0.2.0](https://github.com/albahq/alba/compare/v0.1.0...v0.2.0) - 2026-09-10
 
 ### Added
