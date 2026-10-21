@@ -271,7 +271,12 @@ cache entry only stands in for work whose result is actually still there.
 Both `inputs` and `outputs` patterns resolve relative to the directory of
 the Beamfile that declares the beam, never to the beam's `cwd`, so a beam
 with `cwd "sub"` writing `out.txt` must declare it as `outputs
-["sub/out.txt"]`.
+["sub/out.txt"]`. An `inputs` pattern may climb out of that directory
+through leading `..` components: a beam imported from `contexts/shared/`
+declares `inputs ["../../Dockerfile"]` to depend on the project root's
+`Dockerfile`, and the cache, affected runs, and watch mode all follow it.
+A `.` or `..` anywhere past the start of an `inputs` pattern is rejected
+when the Beamfile loads.
 
 `alba run <beam> --force` ignores the cache on the way in: the beam runs
 regardless of what changed. If it succeeds, its result is written back to
@@ -408,10 +413,11 @@ loads.
 Two things are worth knowing before leaning on watch mode. A beam that
 writes to a git-tracked file matched by its own `inputs` triggers itself on
 every run and loops forever, so keep generated output git-ignored. And
-watch roots are computed once at startup, from the project root and the
-directory of any Beamfile loaded from outside it: an import added
-mid-session whose directory lies outside those roots is not watched until
-the session is restarted.
+watch roots are computed once at startup, from the project root, the
+directory of any Beamfile loaded from outside it, and the directory any
+input climbing above the root matches under: an import added mid-session
+whose directory lies outside those roots, or such an input directory
+created mid-session, is not watched until the session is restarted.
 
 ## Interactive interface
 
