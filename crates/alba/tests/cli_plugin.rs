@@ -32,11 +32,11 @@ fn project(beamfile: &str) -> tempfile::TempDir {
 /// contend with.
 ///
 /// `cargo_bin` resolves a path already built into the workspace's target
-/// directory (it does not build anything itself), which is why the full
-/// gate matters here: `cargo test --workspace` builds every workspace
-/// binary, `alba-executor-example` included, so by the time this runs the
-/// file is already on disk to link into the isolated directory built
-/// below.
+/// directory (it does not build anything itself), and `cargo test` does
+/// not build another package's binary either, which is why the full gate
+/// matters here: `alba run test` and CI both run `cargo build --workspace`
+/// first, so by the time this runs `alba-executor-example` is already on
+/// disk to link into the isolated directory built below.
 ///
 /// The returned `TempDir` must be kept alive by the caller for as long as
 /// the `PATH` is in use: it owns the directory the child process resolves
