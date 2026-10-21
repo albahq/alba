@@ -91,6 +91,15 @@ pub fn anchor_pattern(base: &Path, pattern: &str) -> (PathBuf, String) {
     }
 }
 
+/// Whether `pattern` holds a `.` or `..` component past the leading ones
+/// [`anchor_pattern`] applies: such a component is matched as a literal
+/// name no walked path ever holds, so the load rejects the pattern.
+pub(crate) fn has_inner_dot_component(pattern: &str) -> bool {
+    let (_, rest) = anchor_pattern(Path::new("."), pattern);
+    rest.split('/')
+        .any(|component| matches!(component, "." | ".."))
+}
+
 /// The absolute paths of the files under `anchor` matching `patterns`,
 /// which are relative to it.
 fn walk(anchor: &Path, patterns: &[String]) -> Vec<PathBuf> {
