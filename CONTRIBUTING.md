@@ -29,7 +29,7 @@ Linux, macOS, and Windows.
 alba run check      # fmt, lint, and test
 alba run fmt        # cargo fmt --check
 alba run lint       # cargo clippy --all-targets -- -D warnings
-alba run test       # cargo test --workspace
+alba run test       # cargo build --workspace, then cargo test --workspace
 ```
 
 Any change to behaviour comes with a test. Any change to user-facing
