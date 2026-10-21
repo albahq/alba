@@ -91,6 +91,22 @@ pub fn anchor_pattern(base: &Path, pattern: &str) -> (PathBuf, String) {
     }
 }
 
+/// The deepest directory every match of `pattern`, resolved from `base`,
+/// lies under: its [`anchor_pattern`] joined with the pattern's leading
+/// literal directories. Watching it recursively sees every file the
+/// pattern can ever match.
+pub fn pattern_dir(base: &Path, pattern: &str) -> PathBuf {
+    let (anchor, rest) = anchor_pattern(base, pattern);
+    let mut literal = literal_prefix(&rest);
+    if literal.len() == rest.split('/').count() {
+        // A fully literal pattern names a file, which lies in its parent.
+        literal.pop();
+    }
+    literal
+        .iter()
+        .fold(anchor, |dir, component| dir.join(component))
+}
+
 /// Whether `pattern` holds a `.` or `..` component past the leading ones
 /// [`anchor_pattern`] applies: such a component is matched as a literal
 /// name no walked path ever holds, so the load rejects the pattern.
@@ -303,6 +319,21 @@ mod tests {
             "../../Dockerfile"
         );
         assert_eq!(name("/repo/contexts/other/b.php"), "../other/b.php");
+    }
+
+    #[test]
+    fn a_pattern_dir_is_the_deepest_directory_every_match_lies_under() {
+        let dir = |pattern: &str| {
+            pattern_dir(Path::new("/repo/project"), pattern)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+
+        assert_eq!(dir("src/**/*.rs"), "/repo/project/src");
+        assert_eq!(dir("../shared/config/*.yaml"), "/repo/shared/config");
+        // A fully literal pattern names a file, which lies in its parent.
+        assert_eq!(dir("../Dockerfile"), "/repo");
+        assert_eq!(dir("**/*.rs"), "/repo/project");
     }
 
     #[test]

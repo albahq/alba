@@ -263,7 +263,7 @@ async fn watch_execute(
         err.line(&warning);
     }
 
-    let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources)) {
+    let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources, project)) {
         Ok(watcher) => watcher,
         Err(error) => {
             err.line(&format!("cannot start the file watcher: {error}"));
@@ -368,7 +368,7 @@ async fn tui_execute(
         return EXIT_ALBA_ERROR;
     }
 
-    let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources)) {
+    let watcher = match alba_engine::NotifyWatcher::new(&watch_roots(beamfile, sources, project)) {
         Ok(watcher) => watcher,
         Err(error) => {
             err.line(&format!("cannot start the file watcher: {error}"));
@@ -597,15 +597,28 @@ fn no_inputs_warning(project: &Project, target: &BeamId, subgraph: &[BeamId]) ->
 
 /// The directories [`alba_engine::NotifyWatcher`] puts under recursive
 /// watch: the project root, plus the directory of any Beamfile loaded from
-/// outside it (an import in a sibling tree).
+/// outside it (an import in a sibling tree), plus the directory any input
+/// climbing above the root matches under ([`alba_core::pattern_dir`]).
 ///
 /// Roots are fixed for the session. An import *added mid-session* that
 /// lives outside these roots emits no events until the next
 /// `alba run --watch` — a known limitation, not an oversight: re-deriving
 /// the roots would mean tearing down and rebuilding the watcher on every
-/// Beamfile save.
-fn watch_roots(beamfile: &Path, sources: &SourceMap) -> Vec<PathBuf> {
-    roots_of(beamfile, sources.paths())
+/// Beamfile save. The same holds for an input directory outside the root
+/// that only appears mid-session: it cannot be watched before it exists.
+fn watch_roots(beamfile: &Path, sources: &SourceMap, project: &Project) -> Vec<PathBuf> {
+    let mut roots = roots_of(beamfile, sources.paths());
+    let input_dirs = project.beams.iter().flat_map(|beam| {
+        beam.inputs
+            .iter()
+            .map(|pattern| alba_core::pattern_dir(&beam.dir, pattern))
+    });
+    for dir in input_dirs {
+        if dir.is_dir() && !roots.iter().any(|root| dir.starts_with(root)) {
+            roots.push(dir);
+        }
+    }
+    roots
 }
 
 /// [`watch_roots`] over the loaded paths themselves, so the rules can be
@@ -948,6 +961,38 @@ mod tests {
         );
 
         assert_eq!(roots, vec![root, sibling]);
+    }
+
+    /// An input above the project root, such as configuration shared by
+    /// sibling projects, lies outside the root's recursive watch, so the
+    /// directory it matches under joins the roots. One inside the root
+    /// (`../../Dockerfile` from an import two levels down) adds nothing,
+    /// and neither does a directory that does not exist yet.
+    #[test]
+    fn an_input_above_the_root_adds_the_directory_it_matches_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(root.join("contexts/core")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(
+            root.join("Beamfile"),
+            "import \"contexts/core/Beamfile\" as core\n\
+             beam lint { inputs [\"../shared/*.yaml\", \"../missing/*.yaml\"] run \"x\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("contexts/core/Beamfile"),
+            "beam test { inputs [\"../../Dockerfile\"] run \"x\" }\n",
+        )
+        .unwrap();
+        let beamfile = root.join("Beamfile");
+        let (project, sources) = alba_core::load_project(&beamfile).unwrap();
+
+        assert_eq!(
+            watch_roots(&beamfile, &sources, &project),
+            vec![root, shared]
+        );
     }
 
     #[test]

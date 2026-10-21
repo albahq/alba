@@ -24,7 +24,7 @@ mod model;
 
 pub use error::CoreError;
 pub use eval::{Scope, eval_expr, render_template, suggest};
-pub use files::{anchor_pattern, expand_globs, outputs_satisfied};
+pub use files::{anchor_pattern, expand_globs, outputs_satisfied, pattern_dir};
 pub use graph::{execution_subgraph, validate_graph};
 pub use loader::{LoadError, SourceMap, load_project};
 pub use model::{Beam, BeamId, ExecutorKind, Hook, OptionValue, Project, SourceId, Value};
