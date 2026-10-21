@@ -18,10 +18,12 @@ beam lint {
   run "cargo clippy --all-targets -- -D warnings"
 }
 
+# The plugin tests run the alba-executor-example binary, which
+# `cargo test` does not build on its own.
 beam test {
   description "Run the test suite"
   inputs ["crates/**/*.rs", "Cargo.toml", "Cargo.lock"]
-  run "cargo test --workspace"
+  run ["cargo build --workspace", "cargo test --workspace"]
 }
 
 beam build {
