@@ -29,9 +29,10 @@ pub(crate) struct WatchSet {
     groups: Vec<InputGroup>,
 }
 
-/// One beam directory's worth of `inputs`: patterns are relative to the
-/// defining Beamfile's directory (`Beam::dir`), so beams from different
-/// imports resolve against different bases and cannot be pooled.
+/// One anchor's worth of `inputs`: each pattern is relative to its
+/// [`alba_core::anchor_pattern`], the defining Beamfile's directory
+/// (`Beam::dir`) moved by the pattern's leading `..`, so patterns that
+/// resolve against different bases cannot be pooled.
 struct InputGroup {
     base: PathBuf,
     patterns: Vec<String>,
@@ -61,24 +62,22 @@ impl WatchSet {
                 .as_ref()
                 .is_none_or(|subgraph| subgraph.contains(&beam.id))
         }) {
-            if beam.inputs.is_empty() {
-                continue;
-            }
-            let base = normalize(&beam.dir);
-            match groups.iter_mut().find(|group| group.base == base) {
-                Some(group) => {
-                    for pattern in &beam.inputs {
-                        if !group.patterns.contains(pattern) {
-                            group.patterns.push(pattern.clone());
+            for pattern in &beam.inputs {
+                let (anchor, rest) = alba_core::anchor_pattern(&beam.dir, pattern);
+                let base = normalize(&anchor);
+                match groups.iter_mut().find(|group| group.base == base) {
+                    Some(group) => {
+                        if !group.patterns.contains(&rest) {
+                            group.patterns.push(rest);
                         }
                     }
+                    None => groups.push(InputGroup {
+                        base,
+                        patterns: vec![rest],
+                        set: globset::GlobSet::empty(),
+                        files: HashSet::new(),
+                    }),
                 }
-                None => groups.push(InputGroup {
-                    base,
-                    patterns: beam.inputs.clone(),
-                    set: globset::GlobSet::empty(),
-                    files: HashSet::new(),
-                }),
             }
         }
         for group in &mut groups {
@@ -307,6 +306,32 @@ mod tests {
         // this count would be 2 if `expand_globs`'s own `.gitignore`
         // handling weren't what's actually doing the excluding.
         assert_eq!(set.file_count(), 1);
+    }
+
+    /// An imported beam's input may lie above its own Beamfile, such as a
+    /// `Dockerfile` at the project root: it is watched like any other.
+    #[test]
+    fn an_input_above_its_beamfile_classifies_as_input() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("contexts/shared")).unwrap();
+        std::fs::write(dir.path().join("Dockerfile"), "FROM php").unwrap();
+        std::fs::write(
+            dir.path().join("Beamfile"),
+            "import \"contexts/shared/Beamfile\" as shared\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("contexts/shared/Beamfile"),
+            "beam test { inputs [\"../../Dockerfile\"] run \"echo test\" }\n",
+        )
+        .unwrap();
+
+        let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+        let mut set = WatchSet::new(&project, None, &sources).unwrap();
+        assert!(matches!(
+            set.classify(&dir.path().join("Dockerfile")),
+            Relevance::Input
+        ));
     }
 
     /// A `Some` target that names no beam in the project is a `CoreError`,
