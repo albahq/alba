@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use alba_core::git::changed_files;
-use alba_core::{Beam, BeamId, Project, SourceMap, execution_subgraph};
+use alba_core::{BeamId, Project, SourceMap, execution_subgraph};
 
 use crate::EngineError;
 use crate::scheduler::Targets;
@@ -127,27 +127,29 @@ pub(crate) fn affected_beams(
         }
     }
 
-    // Beams sharing a `dir` (the common case: one Beamfile, no imports)
-    // share the same relative view of `changed`, and their patterns are
-    // compiled into one `GlobSet` per `dir` rather than one per beam:
+    // Patterns sharing an anchor (the common case: one Beamfile, no
+    // imports, no `..`) share the same relative view of `changed`, and are
+    // compiled into one `GlobSet` per anchor rather than one per beam:
     // compiling is what dominates, so matching each changed path once
     // against the combined set — instead of once per beam's own set —
     // is what keeps this linear rather than quadratic in beams.
-    let mut groups: HashMap<&Path, Vec<&Beam>> = HashMap::new();
+    let mut groups: HashMap<PathBuf, Vec<(String, &str)>> = HashMap::new();
     for beam in &project.beams {
-        if !beam.inputs.is_empty() {
-            groups.entry(beam.dir.as_path()).or_default().push(beam);
+        for pattern in &beam.inputs {
+            let (anchor, rest) = alba_core::anchor_pattern(&beam.dir, pattern);
+            groups
+                .entry(anchor)
+                .or_default()
+                .push((rest, beam.id.0.as_str()));
         }
     }
-    for (base, beams) in groups {
+    for (base, patterns) in &groups {
         let mut builder = globset::GlobSetBuilder::new();
         let mut owners: Vec<&str> = Vec::new();
-        for beam in &beams {
-            for pattern in &beam.inputs {
-                if let Ok(glob) = globset::Glob::new(pattern) {
-                    builder.add(glob);
-                    owners.push(beam.id.0.as_str());
-                }
+        for (pattern, owner) in patterns {
+            if let Ok(glob) = globset::Glob::new(pattern) {
+                builder.add(glob);
+                owners.push(owner);
             }
         }
         let Ok(set) = builder.build() else { continue };

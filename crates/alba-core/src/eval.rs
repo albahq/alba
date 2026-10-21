@@ -1104,6 +1104,15 @@ fn build_patterns(
                 template.span,
             ));
         }
+        if field == "inputs" && crate::files::has_inner_dot_component(&pattern) {
+            return Err(CoreError::new(
+                format!(
+                    "invalid `inputs` pattern `{pattern}` in beam `{beam}`: \
+                     `.` and `..` may only start a pattern"
+                ),
+                template.span,
+            ));
+        }
         patterns.push(pattern);
     }
     Ok(patterns)
@@ -1579,6 +1588,34 @@ beam b {
         .unwrap_err();
         assert!(err.message.contains("invalid `inputs` pattern `a[b`"));
         assert!(err.message.contains("beam `b`"));
+    }
+
+    /// Only a pattern's leading `.` and `..` components lead somewhere
+    /// (see `anchor_pattern`): one further in is compared as a literal
+    /// directory name, which no walked path ever holds, so the pattern
+    /// would silently match nothing.
+    #[test]
+    fn inputs_reject_a_dot_component_past_the_start() {
+        for pattern in ["src/../Dockerfile", "src/./a.rs", "../src/**/../x"] {
+            let source = format!("beam b {{\n  inputs [\"{pattern}\"]\n  run \"x\"\n}}\n");
+            let err = load_str(&source).unwrap_err();
+            assert!(
+                err.message
+                    .contains(&format!("invalid `inputs` pattern `{pattern}`")),
+                "{}",
+                err.message
+            );
+        }
+
+        load_str(
+            r#"
+beam b {
+  inputs ["../../Dockerfile", "./src/*.rs"]
+  run "x"
+}
+"#,
+        )
+        .expect("leading `.` and `..` components are anchored, not rejected");
     }
 
     #[test]
