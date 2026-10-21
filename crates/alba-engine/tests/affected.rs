@@ -44,13 +44,7 @@ beam lint { inputs ["**/*.rs"] run "lint" }
 /// A committed repository holding the two Beamfiles and one file per
 /// input pattern.
 fn repository() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    git(dir.path(), &["init", "-q", "-b", "main"]);
-    git(dir.path(), &["config", "user.email", "alba@example.com"]);
-    git(dir.path(), &["config", "user.name", "Alba"]);
-    git(dir.path(), &["config", "commit.gpgsign", "false"]);
-    write(dir.path().join("Beamfile"), BEAMFILE);
-    write(dir.path().join("api/Beamfile"), API_BEAMFILE);
+    let mut files = vec![("Beamfile", BEAMFILE), ("api/Beamfile", API_BEAMFILE)];
     for file in [
         "schema/a.json",
         "src/lib.rs",
@@ -58,7 +52,20 @@ fn repository() -> tempfile::TempDir {
         "deploy/x",
         "api/src/lib.rs",
     ] {
-        write(dir.path().join(file), "v1");
+        files.push((file, "v1"));
+    }
+    repository_with(&files)
+}
+
+/// A repository holding `files`, all committed.
+fn repository_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    for (file, content) in files {
+        write(dir.path().join(file), content);
     }
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
@@ -124,6 +131,30 @@ fn an_imported_beam_matches_paths_under_its_own_directory() {
     // Root `src/` is not under `api/`, so `api:lint`'s `**/*.rs` misses it.
     let dir = repository();
     assert!(!names(&affected_after(&dir, &["src/lib.rs"])).contains(&"api:lint"));
+}
+
+/// An imported beam's input may lie above its own Beamfile, such as a
+/// `Dockerfile` at the project root: changing that file affects the beam,
+/// while a file of the same name under the import's directory does not.
+#[test]
+fn an_input_above_its_beamfile_affects_the_beam_declaring_it() {
+    let dir = repository_with(&[
+        (
+            "Beamfile",
+            "import \"contexts/shared/Beamfile\" as shared\n",
+        ),
+        (
+            "contexts/shared/Beamfile",
+            "beam test { inputs [\"../../Dockerfile\"] run \"test\" }\n",
+        ),
+        ("Dockerfile", "v1"),
+        ("contexts/shared/Dockerfile", "v1"),
+    ]);
+    assert!(affected_after(&dir, &["contexts/shared/Dockerfile"]).is_empty());
+    assert_eq!(
+        names(&affected_after(&dir, &["Dockerfile"])),
+        ["shared:test"]
+    );
 }
 
 #[test]
