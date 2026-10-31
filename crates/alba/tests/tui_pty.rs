@@ -130,6 +130,9 @@ fn drive_with_script(
     let mut command = CommandBuilder::new(assert_cmd::cargo::cargo_bin("alba"));
     command.args(["run", beam]);
     command.cwd(project.path());
+    // The color assertions below exercise both modes explicitly; do not
+    // inherit a developer or CI NO_COLOR setting into the default case.
+    command.env_remove("NO_COLOR");
     for (name, value) in env {
         command.env(name, value);
     }
