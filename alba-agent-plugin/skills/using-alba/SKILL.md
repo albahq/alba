@@ -40,7 +40,7 @@ Alba is a task runner written in Rust, an alternative to `make`, `just`, and
 
 1. Read the `Beamfile` before changing it. Keep its existing style.
 2. To run something: `alba run <beam> [params]`, or `alba check` to
-   validate. Off a terminal (which is how Claude runs it), output is plain
+   validate. When running without an interactive terminal, output is plain
    text; add `--log-format json` for one event per line.
 3. After editing a Beamfile, run `alba check --file <path>` and fix every
    diagnostic before moving on. Exit code `2` means the Beamfile itself is

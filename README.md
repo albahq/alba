@@ -881,23 +881,23 @@ $ alba plugin check target/debug/alba-executor-example
 conformant: protocol v1
 ```
 
-## Claude Code plugin
+## AI agent plugin
 
-Alba ships a [Claude Code](https://claude.ai/code) plugin, unrelated to the
-executor plugins above, so the assistant understands Alba and can read,
-write, and run `Beamfile`s in your project. Run both commands inside Claude
-Code:
+Alba ships an AI agent plugin, unrelated to the executor plugins above, so
+coding assistants understand Alba and can read, write, and run `Beamfile`s
+in your project. For Claude Code, run:
 
 ```text
 /plugin marketplace add albahq/alba
 /plugin install alba
 ```
 
-The first registers this repository's marketplace
+The first registers this repository's Claude marketplace
 (`.claude-plugin/marketplace.json`) as a source; the second installs the
-`alba` plugin from it. See
-[`claude-code-plugin/README.md`](claude-code-plugin/README.md) for what it
-provides.
+`alba` plugin from it. For Codex, add the repository as a plugin marketplace
+with `codex plugin marketplace add albahq/alba`, then install **Alba Agent**
+from the Plugins directory in the Codex desktop app. Both tools use the
+shared plugin in [`alba-agent-plugin/README.md`](alba-agent-plugin/README.md).
 
 ## Contributing
 

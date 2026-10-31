@@ -13,7 +13,7 @@ alba plugin check <BINARY>    # drives an executor plugin through the protocol
 Global: `--file <PATH>` (default `./Beamfile`), `-h`, `-V`.
 
 On a terminal, every command opens the interactive interface. Off a
-terminal (how Claude runs it) output is plain text. `--no-ui` forces the
+terminal (how coding agents commonly run it) output is plain text. `--no-ui` forces the
 text renderers on a terminal.
 
 ## `alba run` flags

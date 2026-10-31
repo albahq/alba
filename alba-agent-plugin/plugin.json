@@ -1,0 +1,28 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "alba",
+  "version": "0.1.0",
+  "description": "Helps AI coding agents read and write Alba Beamfiles and use the alba CLI.",
+  "author": {
+    "name": "JDevelop",
+    "email": "admin@jdevelop.io",
+    "url": "https://github.com/albahq"
+  },
+  "homepage": "https://github.com/albahq/alba/tree/main/alba-agent-plugin",
+  "repository": "https://github.com/albahq/alba",
+  "license": "MIT",
+  "keywords": ["alba", "task-runner", "build-tool", "beamfile", "agent"],
+  "extensions": {
+    "com.openai": {
+      "hooks": [],
+      "interface": {
+        "displayName": "Alba Agent",
+        "shortDescription": "Use Alba beams and edit Beamfiles with AI coding agents.",
+        "longDescription": "Explains Alba's Beamfile syntax and CLI, with references for authoring and validating beams.",
+        "developerName": "JDevelop",
+        "category": "Developer tools",
+        "websiteURL": "https://github.com/albahq/alba"
+      }
+    }
+  }
+}

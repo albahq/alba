@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SessionStart hook: when the project has a Beamfile, tell Claude that Alba
+# SessionStart hook: when the project has a Beamfile, tell the agent that Alba
 # is in use and list the declared beams. The beam names come from the
 # Beamfile's own text (a bare `alba` would run the default beam, and there
 # is no list subcommand); `alba check` adds its summary when the binary is
