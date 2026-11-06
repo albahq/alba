@@ -22,6 +22,9 @@ Alba is a task runner written in Rust, an alternative to `make`, `just`, and
 - **`needs` builds a DAG.** Independent beams run in parallel; a beam waits
   for everything it needs. `allow_failure true` lets a beam fail without
   failing its dependents.
+- **Imports namespace beams.** `import "api/Beamfile" as api` exposes
+  `api:build`; `needs [*:test]` depends on the `test` beam of every direct
+  import that declares one (alba 0.3.0 and later).
 - **`default <beam>`** is what a bare `alba` runs. Without one, bare `alba`
   lists the beams.
 - **Caching is opt-in per beam** through `inputs` globs: a beam with
