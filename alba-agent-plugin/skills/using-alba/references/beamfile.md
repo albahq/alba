@@ -19,11 +19,11 @@ Only the root Beamfile's `default` and `hook` declarations count; an
 imported file's are ignored. Namespaces chain: a beam imported through two
 levels is `api:db:migrate`.
 
-In `needs` only, `*` stands for any one import alias: `needs [*:test]`
-depends on the `test` beam of every direct import that declares one, in
-import order. Each `*` matches exactly one level (`*:*:test` reaches
-`api:db:test`), the beam name is always spelled out (`api:*` is rejected),
-and a pattern matching no beam is a load error.
+In `needs` only (alba 0.3.0 and later), `*` stands for any one import
+alias: `needs [*:test]` depends on the `test` beam of every direct import
+that declares one, in import order. Each `*` matches exactly one level
+(`*:*:test` reaches `api:db:test`), the beam name is always spelled out
+(`api:*` is rejected), and a pattern matching no beam is a load error.
 
 ## Beam fields
 
