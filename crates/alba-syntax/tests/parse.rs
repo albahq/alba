@@ -21,7 +21,7 @@ beam build {
 }
 
 beam test {
-  needs [build]
+  needs [build, *:test]
   run "cargo test"
 }
 

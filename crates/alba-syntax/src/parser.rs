@@ -33,8 +33,8 @@
 //!   a parse error (`duplicate executor option`), for the same reason.
 
 use crate::ast::{
-    BeamDecl, BeamRef, ExecutorDecl, ExecutorOptionValue, File, HookDecl, Import, LetBinding,
-    NamedString, Spanned,
+    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File,
+    HookDecl, Import, LetBinding, NamedString, NeedRef, Spanned,
 };
 use crate::expr::Expr;
 use crate::lexer::Lexer;
@@ -103,7 +103,7 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
 #[derive(Default)]
 struct BeamFields {
     description: Option<StringTemplate>,
-    needs: Vec<Spanned<BeamRef>>,
+    needs: Vec<Spanned<NeedRef>>,
     inputs: Vec<StringTemplate>,
     outputs: Vec<StringTemplate>,
     run: Vec<StringTemplate>,
@@ -244,7 +244,9 @@ impl<'a> Parser<'a> {
 
     /// `codegen`, `api:build`, or `api:db:migrate`: as many `alias:`
     /// segments as the reference spells, since a beam reached through a
-    /// chain of imports has one id segment per alias in that chain.
+    /// chain of imports has one id segment per alias in that chain. A
+    /// `needs` entry is read by [`Parser::parse_need`] instead, which also
+    /// accepts `*`.
     fn parse_beam_ref(&mut self) -> Result<Spanned<BeamRef>, ParseError> {
         let mut segments = vec![self.eat_ident()?];
         while self.check(&TokenKind::Colon) {
@@ -266,8 +268,62 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_needs_list(&mut self) -> Result<Vec<Spanned<BeamRef>>, ParseError> {
-        self.parse_bracketed_list(Self::parse_beam_ref)
+    /// One `needs` entry: a [`BeamRef`] spelled the same way
+    /// [`Parser::parse_beam_ref`] reads one, except that any alias segment
+    /// may be `*`, which makes the entry a [`BeamPattern`]. The last
+    /// segment names the beam and is never `*`.
+    fn parse_need(&mut self) -> Result<Spanned<NeedRef>, ParseError> {
+        let mut segments = vec![self.eat_alias_pattern()?];
+        while self.check(&TokenKind::Colon) {
+            self.advance();
+            segments.push(self.eat_alias_pattern()?);
+        }
+
+        let span = Span::new(
+            segments[0].span.start,
+            segments[segments.len() - 1].span.end,
+        );
+        let last = segments.pop().expect("at least one segment was parsed");
+        let AliasPattern::Alias(name) = last.value else {
+            return Err(ParseError {
+                message: "`*` cannot stand for a beam name".to_string(),
+                span: last.span,
+                help: Some(
+                    "`*` stands for one import alias, as in `*:test`; spell out the beam's name"
+                        .to_string(),
+                ),
+            });
+        };
+        let namespace: Vec<AliasPattern> = segments.into_iter().map(|s| s.value).collect();
+
+        // Every alias spelled out means one beam, not a pattern.
+        let spelled_out: Option<Vec<String>> = namespace
+            .iter()
+            .map(|segment| match segment {
+                AliasPattern::Alias(alias) => Some(alias.clone()),
+                AliasPattern::Any => None,
+            })
+            .collect();
+        let need = match spelled_out {
+            Some(namespace) => NeedRef::Beam(BeamRef { namespace, name }),
+            None => NeedRef::Pattern(BeamPattern { namespace, name }),
+        };
+        Ok(Spanned::new(need, span))
+    }
+
+    /// An identifier or `*`: one segment of a `needs` entry.
+    fn eat_alias_pattern(&mut self) -> Result<Spanned<AliasPattern>, ParseError> {
+        let segment = match self.peek().kind.clone() {
+            TokenKind::Star => AliasPattern::Any,
+            TokenKind::Ident(name) => AliasPattern::Alias(name),
+            _ => return Err(self.unexpected("an identifier or `*`")),
+        };
+        let span = self.advance().span;
+        Ok(Spanned::new(segment, span))
+    }
+
+    fn parse_needs_list(&mut self) -> Result<Vec<Spanned<NeedRef>>, ParseError> {
+        self.parse_bracketed_list(Self::parse_need)
     }
 
     /// `run "cmd"` (single command) or `run ["cmd", "cmd"]` (sequential list).
@@ -634,6 +690,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::OrOr => "`||`".to_string(),
         TokenKind::Plus => "`+`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
+        TokenKind::Star => "`*`".to_string(),
         TokenKind::Newline => "a newline".to_string(),
         TokenKind::Eof => EOF_DESCRIPTION.to_string(),
     }
@@ -676,6 +733,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use crate::ast::{BeamRef, NeedRef};
     use crate::parse;
 
     #[test]
@@ -703,7 +761,10 @@ beam deploy(target) {
         assert_eq!(file.beams.len(), 2);
         assert_eq!(file.default.as_ref().unwrap().value, "build");
         let build = &file.beams[0];
-        assert_eq!(build.needs[0].value.namespace, ["api"]);
+        let NeedRef::Beam(api_build) = &build.needs[0].value else {
+            panic!("`api:build` is a beam reference, not a pattern");
+        };
+        assert_eq!(api_build.namespace, ["api"]);
         let deploy = &file.beams[1];
         assert_eq!(deploy.params[0].value, "target");
         assert!(deploy.allow_failure);
@@ -734,8 +795,20 @@ beam deploy(target) {
         let file = parse("beam x {\n  needs [\n    a,\n    b,\n  ]\n}").unwrap();
         let needs = &file.beams[0].needs;
         assert_eq!(needs.len(), 2);
-        assert_eq!(needs[0].value.name, "a");
-        assert_eq!(needs[1].value.name, "b");
+        assert_eq!(
+            needs[0].value,
+            NeedRef::Beam(BeamRef {
+                namespace: vec![],
+                name: "a".to_string()
+            })
+        );
+        assert_eq!(
+            needs[1].value,
+            NeedRef::Beam(BeamRef {
+                namespace: vec![],
+                name: "b".to_string()
+            })
+        );
     }
 
     /// A beam reached through a chain of import aliases has a
@@ -747,8 +820,11 @@ beam deploy(target) {
         let file = parse("beam x { needs [api:db:migrate] }").unwrap();
 
         let entry = &file.beams[0].needs[0];
-        assert_eq!(entry.value.namespace, ["api", "db"]);
-        assert_eq!(entry.value.name, "migrate");
+        let NeedRef::Beam(reference) = &entry.value else {
+            panic!("`api:db:migrate` is a beam reference, not a pattern");
+        };
+        assert_eq!(reference.namespace, ["api", "db"]);
+        assert_eq!(reference.name, "migrate");
         assert_eq!(
             &"beam x { needs [api:db:migrate] }"[entry.span.start..entry.span.end],
             "api:db:migrate"

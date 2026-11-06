@@ -64,6 +64,9 @@ pub enum TokenKind {
     Plus,
     /// `.`, member access (`git.branch`).
     Dot,
+    /// `*`, standing for any one import alias in a `needs` entry
+    /// (`*:test`).
+    Star,
 
     /// A statement separator. Emitted only strictly between two other
     /// tokens: leading and trailing newline trivia (including blank lines

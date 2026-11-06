@@ -9,8 +9,8 @@ mod template;
 mod token;
 
 pub use ast::{
-    BeamDecl, BeamRef, ExecutorDecl, ExecutorOptionValue, File, HookDecl, Import, LetBinding,
-    NamedString, Spanned,
+    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File,
+    HookDecl, Import, LetBinding, NamedString, NeedRef, Spanned,
 };
 pub use diagnostics::{Diagnostic, render_diagnostic};
 pub use expr::{BinOp, Expr};

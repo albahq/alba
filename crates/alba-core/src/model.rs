@@ -1,11 +1,12 @@
 //! The typed project model that `alba-core` evaluates a Beamfile's AST
 //! into: [`Project`], its [`Beam`]s, and the small value types they carry.
 //!
-//! Scope boundary: a [`Beam`]'s `needs` list is converted straight from
-//! the AST's `BeamRef`s (namespaced by [`crate::loader::load_project`]
-//! when it came from an `import`) without validating that the referenced
-//! beam actually exists — that is [`crate::validate_graph`]'s job, not
-//! this module's.
+//! Scope boundary: a [`Beam`]'s `needs` list holds plain ids, converted
+//! from the AST's `needs` entries (a pattern such as `*:test` already
+//! expanded into the ids it matches, and namespaced by
+//! [`crate::loader::load_project`] when it came from an `import`) without
+//! validating that a referenced beam actually exists: that is
+//! [`crate::validate_graph`]'s job, not this module's.
 
 use std::path::PathBuf;
 

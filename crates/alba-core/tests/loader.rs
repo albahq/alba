@@ -608,3 +608,151 @@ fn an_invalid_hook_in_an_imported_file_is_ignored_not_rejected() {
 
     assert!(project.hooks.is_empty());
 }
+
+/// The ids `beam` needs, in the order its `needs` list resolved to.
+fn needs_of<'a>(project: &'a alba_core::Project, beam: &str) -> Vec<&'a str> {
+    project
+        .beams
+        .iter()
+        .find(|b| b.id.0 == beam)
+        .unwrap_or_else(|| panic!("no beam `{beam}` was loaded"))
+        .needs
+        .iter()
+        .map(|n| n.value.0.as_str())
+        .collect()
+}
+
+#[test]
+fn a_star_alias_needs_the_beam_of_that_name_in_every_import_declaring_it() {
+    // `*:test` stands for the `test` beam of each import, in import order;
+    // an import without a `test` beam is simply not part of the expansion.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\n\
+         import \"docs/Beamfile\" as docs\n\
+         import \"web/Beamfile\" as web\n\
+         beam test { needs [*:test] }",
+    );
+    write(
+        dir.path().join("api/Beamfile"),
+        "beam test { run \"echo api\" }",
+    );
+    write(
+        dir.path().join("docs/Beamfile"),
+        "beam build { run \"echo docs\" }",
+    );
+    write(
+        dir.path().join("web/Beamfile"),
+        "beam test { run \"echo web\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    assert_eq!(needs_of(&project, "test"), ["api:test", "web:test"]);
+}
+
+#[test]
+fn each_star_stands_for_exactly_one_alias() {
+    // `*:test` reaches one level of imports; a `test` two levels down is
+    // `*:*:test`'s, and a star can sit next to a spelled-out alias. An
+    // import aliased `test` is no match either: `api:test:lint` is a beam
+    // named `lint`.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\n\
+         beam shallow { needs [*:test] }\n\
+         beam deep { needs [*:*:test] }\n\
+         beam mixed { needs [api:*:test] }",
+    );
+    write(
+        dir.path().join("api/Beamfile"),
+        "import \"db/Beamfile\" as db\n\
+         import \"lint/Beamfile\" as test\n\
+         beam test { run \"echo api\" }",
+    );
+    write(
+        dir.path().join("api/db/Beamfile"),
+        "beam test { run \"echo db\" }",
+    );
+    write(
+        dir.path().join("api/lint/Beamfile"),
+        "beam lint { run \"echo lint\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    assert_eq!(needs_of(&project, "shallow"), ["api:test"]);
+    assert_eq!(needs_of(&project, "deep"), ["api:db:test"]);
+    assert_eq!(needs_of(&project, "mixed"), ["api:db:test"]);
+}
+
+#[test]
+fn a_pattern_matching_no_beam_is_a_load_error_at_the_pattern() {
+    // An empty expansion would silently run nothing, which a typo such as
+    // `*:tset` should never get away with.
+    let dir = tempfile::tempdir().unwrap();
+    let root = "import \"api/Beamfile\" as api\nbeam test { needs [*:tset] }";
+    write(dir.path().join("Beamfile"), root);
+    write(
+        dir.path().join("api/Beamfile"),
+        "beam test { run \"echo api\" }",
+    );
+
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+
+    assert_eq!(err.error.message, "`*:tset` matches no beam");
+    assert_eq!(err.error.source_id, SourceId(0));
+    let span = err.error.span.expect("the pattern has a span");
+    assert_eq!(&root[span.start..span.end], "*:tset");
+}
+
+#[test]
+fn a_star_cannot_stand_for_the_beam_name() {
+    // A pattern picks one named beam per import; `api:*` (every beam of an
+    // import) is not something `needs` can say.
+    for need in ["api:*", "*"] {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path().join("Beamfile"),
+            &format!("import \"api/Beamfile\" as api\nbeam all {{ needs [{need}] }}"),
+        );
+        write(
+            dir.path().join("api/Beamfile"),
+            "beam test { run \"echo api\" }",
+        );
+
+        let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+
+        assert_eq!(
+            err.error.message, "`*` cannot stand for a beam name",
+            "for `{need}`"
+        );
+    }
+}
+
+#[test]
+fn a_pattern_in_an_imported_file_expands_within_that_file() {
+    // `shared` is imported twice: its `*:test` expands against its own
+    // imports once, then each copy is namespaced by the alias it is
+    // reached through.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"shared/Beamfile\" as a\nimport \"shared/Beamfile\" as b\nbeam root { run \"echo\" }",
+    );
+    write(
+        dir.path().join("shared/Beamfile"),
+        "import \"x/Beamfile\" as x\nbeam test { needs [*:test] }",
+    );
+    write(
+        dir.path().join("shared/x/Beamfile"),
+        "beam test { run \"echo x\" }",
+    );
+
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    assert_eq!(needs_of(&project, "a:test"), ["a:x:test"]);
+    assert_eq!(needs_of(&project, "b:test"), ["b:x:test"]);
+}

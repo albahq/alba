@@ -66,8 +66,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use alba_syntax::{
-    BeamDecl, BeamRef, BinOp, ExecutorDecl, ExecutorOptionValue, Expr, File, ParseError, Span,
-    Spanned, StringTemplate, TemplatePart,
+    AliasPattern, BeamDecl, BeamPattern, BeamRef, BinOp, ExecutorDecl, ExecutorOptionValue, Expr,
+    File, NeedRef, ParseError, Span, Spanned, StringTemplate, TemplatePart,
 };
 
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
@@ -925,6 +925,7 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
         Path::new("."),
         Arc::new(LazyGit::new(PathBuf::from("."))),
         true,
+        &[],
     )?;
     crate::graph::validate_graph(&project)?;
     Ok(project)
@@ -936,11 +937,17 @@ pub fn load_str(source: &str) -> Result<Project, CoreError> {
 /// [`SourceIdScope`]). Does not resolve `file.imports` — that recursion,
 /// and the namespace prefixing it requires, belongs to
 /// [`crate::loader::load_project`], which calls this once per file.
+///
+/// `imported` is every beam `file`'s imports brought in, ids already
+/// namespaced relative to `file`: what a `needs` pattern such as `*:test`
+/// is matched against (see [`resolve_need`]). Empty for a file without
+/// imports.
 pub(crate) fn build_project(
     file: &File,
     dir: &Path,
     git: Arc<LazyGit>,
     is_root: bool,
+    imported: &[Beam],
 ) -> Result<Project, CoreError> {
     let mut lets = Scope::with_git(git);
     for binding in &file.lets {
@@ -957,7 +964,7 @@ pub(crate) fn build_project(
     let beams = file
         .beams
         .iter()
-        .map(|decl| build_beam(decl, &lets, dir))
+        .map(|decl| build_beam(decl, &lets, dir, imported))
         .collect::<Result<Vec<_>, _>>()?;
 
     let default = file
@@ -1017,7 +1024,85 @@ fn beam_ref_to_id(r: &BeamRef) -> BeamId {
     }
 }
 
-fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreError> {
+/// Resolves one `needs` entry to the beam ids it stands for: a
+/// [`NeedRef::Beam`] to its one id, unchecked (whether that beam exists
+/// is [`crate::validate_graph`]'s concern), a [`NeedRef::Pattern`] to
+/// whatever [`expand_pattern`] finds among `imported`.
+fn resolve_need(
+    need: &Spanned<NeedRef>,
+    imported: &[Beam],
+) -> Result<Vec<Spanned<BeamId>>, CoreError> {
+    match &need.value {
+        NeedRef::Beam(reference) => Ok(vec![Spanned::new(beam_ref_to_id(reference), need.span)]),
+        NeedRef::Pattern(pattern) => expand_pattern(pattern, need.span, imported),
+    }
+}
+
+/// Every beam among `imported` that `pattern` matches, in load order,
+/// each keeping the pattern's `span`. A pattern always has at least one
+/// alias segment, so `imported` is the only place a match can come from.
+///
+/// Matching nothing is an error rather than an empty expansion: `*:tset`
+/// is far likelier a typo than a deliberate no-op, and an empty expansion
+/// would silently run nothing.
+fn expand_pattern(
+    pattern: &BeamPattern,
+    span: Span,
+    imported: &[Beam],
+) -> Result<Vec<Spanned<BeamId>>, CoreError> {
+    let matches: Vec<Spanned<BeamId>> = imported
+        .iter()
+        .filter(|beam| pattern_matches(pattern, &beam.id))
+        .map(|beam| Spanned::new(beam.id.clone(), span))
+        .collect();
+    if matches.is_empty() {
+        return Err(CoreError::new(
+            format!("`{}` matches no beam", describe_pattern(pattern)),
+            span,
+        )
+        .with_help(format!(
+            "each `*` stands for exactly one import alias: no Beamfile imported at that depth declares a beam named `{}`",
+            pattern.name
+        )));
+    }
+    Ok(matches)
+}
+
+/// Whether `id` has exactly one segment per alias segment of `pattern`,
+/// plus its name, each alias equal to the pattern's or matched by `*`.
+fn pattern_matches(pattern: &BeamPattern, id: &BeamId) -> bool {
+    let mut segments = id.0.split(':');
+    let aliases_match = pattern
+        .namespace
+        .iter()
+        .all(|alias| match (alias, segments.next()) {
+            (AliasPattern::Any, Some(_)) => true,
+            (AliasPattern::Alias(expected), Some(segment)) => expected == segment,
+            (_, None) => false,
+        });
+    aliases_match && segments.next() == Some(pattern.name.as_str()) && segments.next().is_none()
+}
+
+/// `pattern` as it is written in a Beamfile (`*:test`), for messages.
+fn describe_pattern(pattern: &BeamPattern) -> String {
+    let mut segments: Vec<&str> = pattern
+        .namespace
+        .iter()
+        .map(|alias| match alias {
+            AliasPattern::Alias(alias) => alias.as_str(),
+            AliasPattern::Any => "*",
+        })
+        .collect();
+    segments.push(&pattern.name);
+    segments.join(":")
+}
+
+fn build_beam(
+    decl: &BeamDecl,
+    lets: &Scope,
+    dir: &Path,
+    imported: &[Beam],
+) -> Result<Beam, CoreError> {
     let params: Vec<String> = decl.params.iter().map(|p| p.value.clone()).collect();
 
     let description = decl
@@ -1026,11 +1111,10 @@ fn build_beam(decl: &BeamDecl, lets: &Scope, dir: &Path) -> Result<Beam, CoreErr
         .map(|t| render_load_time_template("description", t, lets, &params))
         .transpose()?;
 
-    let needs = decl
-        .needs
-        .iter()
-        .map(|n| Spanned::new(beam_ref_to_id(&n.value), n.span))
-        .collect();
+    let mut needs = Vec::new();
+    for need in &decl.needs {
+        needs.extend(resolve_need(need, imported)?);
+    }
 
     let beam_name = decl.name.value.as_str();
     let inputs = build_patterns("inputs", beam_name, &decl.inputs, lets, &params)?;
