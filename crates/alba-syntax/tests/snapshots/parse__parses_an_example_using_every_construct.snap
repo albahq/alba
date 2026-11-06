@@ -146,22 +146,26 @@ File {
             ),
             needs: [
                 Spanned {
-                    value: BeamRef {
-                        namespace: [
-                            "api",
-                        ],
-                        name: "build",
-                    },
+                    value: Beam(
+                        BeamRef {
+                            namespace: [
+                                "api",
+                            ],
+                            name: "build",
+                        },
+                    ),
                     span: Span {
                         start: 192,
                         end: 201,
                     },
                 },
                 Spanned {
-                    value: BeamRef {
-                        namespace: [],
-                        name: "codegen",
-                    },
+                    value: Beam(
+                        BeamRef {
+                            namespace: [],
+                            name: "codegen",
+                        },
+                    ),
                     span: Span {
                         start: 203,
                         end: 210,
@@ -292,13 +296,29 @@ File {
             description: None,
             needs: [
                 Spanned {
-                    value: BeamRef {
-                        namespace: [],
-                        name: "build",
-                    },
+                    value: Beam(
+                        BeamRef {
+                            namespace: [],
+                            name: "build",
+                        },
+                    ),
                     span: Span {
                         start: 368,
                         end: 373,
+                    },
+                },
+                Spanned {
+                    value: Pattern(
+                        BeamPattern {
+                            namespace: [
+                                Any,
+                            ],
+                            name: "test",
+                        },
+                    ),
+                    span: Span {
+                        start: 375,
+                        end: 381,
                     },
                 },
             ],
@@ -312,8 +332,8 @@ File {
                         ),
                     ],
                     span: Span {
-                        start: 381,
-                        end: 393,
+                        start: 389,
+                        end: 401,
                     },
                 },
             ],
@@ -323,15 +343,15 @@ File {
             allow_failure: false,
             span: Span {
                 start: 347,
-                end: 395,
+                end: 403,
             },
         },
         BeamDecl {
             name: Spanned {
                 value: "lint",
                 span: Span {
-                    start: 402,
-                    end: 406,
+                    start: 410,
+                    end: 414,
                 },
             },
             params: [],
@@ -347,8 +367,8 @@ File {
                         ),
                     ],
                     span: Span {
-                        start: 436,
-                        end: 465,
+                        start: 444,
+                        end: 473,
                     },
                 },
             ],
@@ -357,24 +377,24 @@ File {
             executor: None,
             allow_failure: true,
             span: Span {
-                start: 397,
-                end: 467,
+                start: 405,
+                end: 475,
             },
         },
         BeamDecl {
             name: Spanned {
                 value: "deploy",
                 span: Span {
-                    start: 474,
-                    end: 480,
+                    start: 482,
+                    end: 488,
                 },
             },
             params: [
                 Spanned {
                     value: "target",
                     span: Span {
-                        start: 481,
-                        end: 487,
+                        start: 489,
+                        end: 495,
                     },
                 },
             ],
@@ -386,20 +406,22 @@ File {
                         ),
                     ],
                     span: Span {
-                        start: 505,
-                        end: 531,
+                        start: 513,
+                        end: 539,
                     },
                 },
             ),
             needs: [
                 Spanned {
-                    value: BeamRef {
-                        namespace: [],
-                        name: "test",
-                    },
+                    value: Beam(
+                        BeamRef {
+                            namespace: [],
+                            name: "test",
+                        },
+                    ),
                     span: Span {
-                        start: 541,
-                        end: 545,
+                        start: 549,
+                        end: 553,
                     },
                 },
             ],
@@ -416,16 +438,16 @@ File {
                                 Spanned {
                                     value: "target",
                                     span: Span {
-                                        start: 654,
-                                        end: 660,
+                                        start: 662,
+                                        end: 668,
                                     },
                                 },
                             ),
                         ),
                     ],
                     span: Span {
-                        start: 632,
-                        end: 662,
+                        start: 640,
+                        end: 670,
                     },
                 },
             ],
@@ -434,8 +456,8 @@ File {
                     Spanned {
                         value: "DEPLOY_TARGET",
                         span: Span {
-                            start: 601,
-                            end: 614,
+                            start: 609,
+                            end: 622,
                         },
                     },
                     StringTemplate {
@@ -445,16 +467,16 @@ File {
                                     Spanned {
                                         value: "target",
                                         span: Span {
-                                            start: 617,
-                                            end: 623,
+                                            start: 625,
+                                            end: 631,
                                         },
                                     },
                                 ),
                             ),
                         ],
                         span: Span {
-                            start: 617,
-                            end: 623,
+                            start: 625,
+                            end: 631,
                         },
                     },
                 ),
@@ -465,8 +487,8 @@ File {
                     name: Spanned {
                         value: "docker",
                         span: Span {
-                            start: 558,
-                            end: 564,
+                            start: 566,
+                            end: 572,
                         },
                     },
                     options: [
@@ -474,8 +496,8 @@ File {
                             Spanned {
                                 value: "image",
                                 span: Span {
-                                    start: 567,
-                                    end: 572,
+                                    start: 575,
+                                    end: 580,
                                 },
                             },
                             Str(
@@ -486,8 +508,8 @@ File {
                                         ),
                                     ],
                                     span: Span {
-                                        start: 573,
-                                        end: 590,
+                                        start: 581,
+                                        end: 598,
                                     },
                                 },
                             ),
@@ -497,8 +519,8 @@ File {
             ),
             allow_failure: false,
             span: Span {
-                start: 469,
-                end: 664,
+                start: 477,
+                end: 672,
             },
         },
     ],

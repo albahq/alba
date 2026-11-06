@@ -19,12 +19,18 @@ Only the root Beamfile's `default` and `hook` declarations count; an
 imported file's are ignored. Namespaces chain: a beam imported through two
 levels is `api:db:migrate`.
 
+In `needs` only, `*` stands for any one import alias: `needs [*:test]`
+depends on the `test` beam of every direct import that declares one, in
+import order. Each `*` matches exactly one level (`*:*:test` reaches
+`api:db:test`), the beam name is always spelled out (`api:*` is rejected),
+and a pattern matching no beam is a load error.
+
 ## Beam fields
 
 | Field | Value | Notes |
 | --- | --- | --- |
 | `description` | string template | Shown in listings. |
-| `needs` | `[beam, api:beam, ...]` | Prerequisites; all must succeed first. |
+| `needs` | `[beam, api:beam, *:beam, ...]` | Prerequisites; all must succeed first. `*` stands for any one import alias. |
 | `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. Turns caching on, and drives `--watch` and `--affected`. |
 | `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. A missing output forces a rerun. |
 | `run` | `"cmd"` or `["cmd1", "cmd2"]` | String templates. Commands run in order on the same executor. |

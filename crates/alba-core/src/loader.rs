@@ -19,6 +19,12 @@
 //!   beam reached through two levels of aliasing ends up with a
 //!   two-segment id (`api:db:migrate`), and `needs` can spell as many
 //!   segments as a reference needs.
+//! - A `needs` pattern (`*:test`, each `*` standing for exactly one
+//!   alias) expands in the file that declares it, against the beams its
+//!   own imports brought in, which is why a file's imports load before its
+//!   own beams are built. The expansion is then namespaced by the
+//!   importer like any other `needs` entry, so a file imported under two
+//!   aliases gets a correctly prefixed copy of it under each.
 //! - `default` is read only from the root file; an imported file's
 //!   `default` is parsed (so it's still a valid Beamfile on its own) but
 //!   never propagated.
@@ -366,9 +372,9 @@ impl Loader {
         let file: File = alba_syntax::parse(source).map_err(parse_error_to_core_error)?;
         check_duplicate_aliases(&file)?;
 
-        let local = build_project(&file, beam_dir, git, is_root)?;
-        let mut beams = local.beams;
-
+        // Imports load before this file's own beams are built: a `needs`
+        // pattern such as `*:test` expands against the beams they bring in.
+        let mut imported = Vec::new();
         for import in &file.imports {
             let import_path = import_base.join(&import.path.value);
             let (mut child_beams, _child_default, _child_hooks) =
@@ -380,8 +386,12 @@ impl Loader {
                     need.value.0 = format!("{alias}:{}", need.value.0);
                 }
             }
-            beams.extend(child_beams);
+            imported.extend(child_beams);
         }
+
+        let local = build_project(&file, beam_dir, git, is_root, &imported)?;
+        let mut beams = local.beams;
+        beams.extend(imported);
 
         Ok((beams, local.default, local.hooks))
     }

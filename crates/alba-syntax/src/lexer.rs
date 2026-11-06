@@ -169,6 +169,7 @@ impl<'src> Lexer<'src> {
             ':' => single(TokenKind::Colon),
             '+' => single(TokenKind::Plus),
             '.' => single(TokenKind::Dot),
+            '*' => single(TokenKind::Star),
             '=' => {
                 if self.peek_char() == Some('=') {
                     self.chars.next();

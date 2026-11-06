@@ -53,9 +53,10 @@ pub struct LetBinding {
     pub value: Expr,
 }
 
-/// A reference to a beam in a `needs [...]` list, optionally namespaced by
-/// the import aliases it is reached through (`api:build`, `api:db:migrate`,
-/// or plain `codegen`).
+/// A reference to one beam, optionally namespaced by the import aliases
+/// it is reached through (`api:build`, `api:db:migrate`, or plain
+/// `codegen`): a `needs` entry without `*` (see [`NeedRef`]), or the beam
+/// a `hook` runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeamRef {
     /// The alias segments preceding the name, outermost first: empty for a
@@ -65,6 +66,37 @@ pub struct BeamRef {
     /// spell one.
     pub namespace: Vec<String>,
     pub name: String,
+}
+
+/// One entry of a `needs [...]` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeedRef {
+    /// `codegen`, `api:build`: exactly one beam, which has to exist.
+    Beam(BeamRef),
+    /// `*:test`, `api:*:test`: every beam the pattern matches. At least
+    /// one of its alias segments is [`AliasPattern::Any`]; an entry
+    /// without one is parsed as a [`NeedRef::Beam`] instead.
+    Pattern(BeamPattern),
+}
+
+/// A beam reference in which an alias segment may be `*`. Only aliases
+/// can be: the beam name is always spelled out, so a pattern selects one
+/// beam per matching import rather than every beam of an import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeamPattern {
+    /// The alias segments preceding the name, outermost first, as in
+    /// [`BeamRef::namespace`].
+    pub namespace: Vec<AliasPattern>,
+    pub name: String,
+}
+
+/// One alias segment of a [`BeamPattern`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasPattern {
+    /// An alias spelled out, matching only itself.
+    Alias(String),
+    /// `*`, matching exactly one alias, whichever it is.
+    Any,
 }
 
 /// A `NAME = value` entry in an `env { ... }` block: a name paired with its
@@ -96,7 +128,7 @@ pub struct BeamDecl {
     pub name: Spanned<String>,
     pub params: Vec<Spanned<String>>,
     pub description: Option<StringTemplate>,
-    pub needs: Vec<Spanned<BeamRef>>,
+    pub needs: Vec<Spanned<NeedRef>>,
     pub inputs: Vec<StringTemplate>,
     pub outputs: Vec<StringTemplate>,
     /// One entry for the single-string form of `run`, N entries for the

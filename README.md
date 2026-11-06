@@ -112,6 +112,35 @@ pointing at the expression that accessed it.
 `git` is a reserved name: `let git = ...`, and a parameter named `git`, are
 both rejected at parse time.
 
+### Imports
+
+`import "api/Beamfile" as api` loads another Beamfile, resolved relative to
+the importing file's directory, and makes its beams available under the
+alias: `api:build`, `api:test`. Imports nest, so a beam reached through two
+levels is `api:db:migrate`. Only the root Beamfile's `default` and `hook`
+declarations count.
+
+A `*` in a `needs` entry stands for any one import alias, which lets the
+root aggregate the same beam across every import without listing them:
+
+```
+import "api/Beamfile" as api
+import "web/Beamfile" as web
+import "docs/Beamfile" as docs
+
+beam test {
+  needs [*:test]
+}
+```
+
+Here `test` needs `api:test` and `web:test`, in import order; `docs`
+declares no `test` beam, so it is left out. Each `*` matches exactly one
+alias: `*:test` does not reach `api:db:test`, which `*:*:test` or
+`api:*:test` does. The beam name itself is always spelled out, so `api:*`
+is rejected, and a pattern that matches no beam at all is a load error
+rather than an empty dependency. Patterns are only accepted in `needs`:
+`default` and `hook` each name exactly one beam.
+
 ## Usage
 
 ```sh
