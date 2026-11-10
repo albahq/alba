@@ -111,11 +111,15 @@ impl Session {
     /// alive until the wait is over, so nothing the session watches or
     /// reads closes under it.
     async fn ended(self) -> WatchExit {
+        self.ended_with_report().await.exit
+    }
+
+    /// Like [`Session::ended`], keeping the whole [`SessionEnd`].
+    async fn ended_with_report(self) -> SessionEnd {
         tokio::time::timeout(Duration::from_secs(5), self.handle)
             .await
             .expect("the session must end on its own")
             .expect("the session task must not panic")
-            .exit
     }
 }
 
@@ -1102,7 +1106,7 @@ async fn a_shutdown_command_mid_run_shuts_executors_down_after_the_run_closes() 
     let executor = Arc::clone(&session.executor);
 
     commands.send(SessionCommand::Shutdown).unwrap();
-    let end = session.finish_with_report().await;
+    let end = session.ended_with_report().await;
 
     assert_eq!(end.exit, WatchExit::Interrupted);
     assert_shut_down_once_after_the_run_wound_down(&executor);
@@ -1129,7 +1133,7 @@ async fn a_shutdown_command_while_waiting_shuts_executors_down_once() {
     let executor = Arc::clone(&session.executor);
 
     commands.send(SessionCommand::Shutdown).unwrap();
-    let end = session.finish_with_report().await;
+    let end = session.ended_with_report().await;
 
     assert_eq!(end.exit, WatchExit::Interrupted);
     assert_shut_down_once_after_the_run_wound_down(&executor);
