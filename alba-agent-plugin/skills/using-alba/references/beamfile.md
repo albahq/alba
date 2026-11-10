@@ -51,6 +51,7 @@ beam deploy(target) {
     image "deployer:latest"
     volumes ["/host/cache:/cache"]
     workdir "/srv"
+    user "host"
   }
   run ["./scripts/preflight.sh", "./scripts/deploy.sh {target}"]
 }
@@ -103,10 +104,13 @@ literal.
 ## Executors
 
 - **`system_shell`**: `sh` on Unix, PowerShell on Windows. No static check.
-- **`docker { image "..." [volumes [...]] [workdir "..."] }`**: one
-  container per beam, kept alive across the beam's commands, removed when
-  the beam ends. The project directory is bind-mounted. `image` is
+- **`docker { image "..." [volumes [...]] [workdir "..."] [user "..."] }`**:
+  one container per beam, kept alive across the beam's commands, removed
+  when the beam ends. The project directory is bind-mounted. `image` is
   required; `volumes` entries are `host:container` with no `:ro` suffix.
+  `user "host"` runs the commands as whoever runs Alba, so files written
+  into the project are not owned by root; any other value goes to `docker
+  run --user` as declared.
 - **`<name> { option value ... }`**: an external `alba-executor-<name>`
   binary on the `PATH`. Resolution happens at plan time; a missing plugin
   fails the whole run before any beam starts.
