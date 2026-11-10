@@ -319,24 +319,19 @@ async fn watch_execute(
     // Same reasoning as [`execute`]: the engine dropped the last sender by
     // returning, so this joins on a drained renderer, and a `JoinError`
     // means it panicked and the session's report is incomplete.
-    if consumer.await.is_err() {
+    let renderer_panicked = consumer.await.is_err();
+
+    // The executors were shut down before the session returned, so what
+    // they could not release is reported last, where it cannot be missed,
+    // and on every path out, a panicked renderer included.
+    for line in session_report(&end) {
+        err.line(&line);
+    }
+    if renderer_panicked {
         err.line("the output renderer panicked; this session's report is incomplete");
         return EXIT_ALBA_ERROR;
     }
-
-    // The executors were shut down before the session returned, so whatever
-    // they could not release is reported last, where it cannot be missed.
-    for message in &end.cleanup_errors {
-        err.line(&format!("cleanup failed: {message}"));
-    }
-    match end.exit {
-        WatchExit::Interrupted if end.cleanup_errors.is_empty() => 0,
-        WatchExit::Interrupted => EXIT_ALBA_ERROR,
-        WatchExit::WatcherClosed => {
-            err.line("the file watcher stopped; ending the session");
-            EXIT_ALBA_ERROR
-        }
-    }
+    watch_exit_code(&end)
 }
 
 /// The interactive counterpart of [`watch_execute`]: the same session loop,
@@ -509,8 +504,35 @@ fn selection_label(selection: &Selection) -> String {
     }
 }
 
-/// The stderr line a session owes when it did not end on its own terms,
-/// `None` for the ordinary goodbye.
+/// The exit code of a headless watch whose renderer held up: `0` for an
+/// orderly goodbye, [`EXIT_ALBA_ERROR`] for a dead watcher or for state an
+/// executor could not release.
+fn watch_exit_code(end: &SessionEnd) -> i32 {
+    match end.exit {
+        WatchExit::Interrupted if end.cleanup_errors.is_empty() => 0,
+        WatchExit::Interrupted | WatchExit::WatcherClosed => EXIT_ALBA_ERROR,
+    }
+}
+
+/// The stderr lines a finished session owes, shared by the headless watch
+/// and the interface so they cannot drift: the watcher line first when its
+/// watcher died, then one `cleanup failed: <message>` per executor that
+/// could not release its state. Empty for an ordinary goodbye.
+fn session_report(end: &SessionEnd) -> Vec<String> {
+    let mut lines = Vec::new();
+    if end.exit == WatchExit::WatcherClosed {
+        lines.push("the file watcher stopped; ending the session".to_string());
+    }
+    lines.extend(
+        end.cleanup_errors
+            .iter()
+            .map(|message| format!("cleanup failed: {message}")),
+    );
+    lines
+}
+
+/// The stderr lines (newline-joined) a session owes when it did not end on
+/// its own terms, `None` for the ordinary goodbye.
 ///
 /// [`WatchExit::WatcherClosed`] is the one the interface *cannot* report
 /// itself: the session ending closes the event channel, which the
@@ -536,15 +558,7 @@ fn session_failure(end: Result<SessionEnd, tokio::task::JoinError>) -> Option<St
             );
         }
     };
-    let mut lines = Vec::new();
-    if end.exit == WatchExit::WatcherClosed {
-        lines.push("the file watcher stopped; ending the session".to_string());
-    }
-    lines.extend(
-        end.cleanup_errors
-            .iter()
-            .map(|message| format!("cleanup failed: {message}")),
-    );
+    let lines = session_report(&end);
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
@@ -1261,6 +1275,33 @@ mod tests {
         let plain = replayed_with(&outcome, None, false);
         assert!(plain.iter().any(|l| l == "red"), "{plain:?}");
         assert!(plain.iter().all(|l| !l.contains('\u{1b}')), "{plain:?}");
+    }
+
+    /// The headless watch's exit code: the session's own, unless an
+    /// executor could not release its state.
+    #[test]
+    fn a_headless_watch_that_left_state_behind_exits_with_an_alba_error() {
+        let clean = ended(WatchExit::Interrupted, &[]);
+        assert_eq!(watch_exit_code(&clean), 0);
+        let dirty = ended(WatchExit::Interrupted, &["db would not stop"]);
+        assert_eq!(watch_exit_code(&dirty), EXIT_ALBA_ERROR);
+        let closed = ended(WatchExit::WatcherClosed, &[]);
+        assert_eq!(watch_exit_code(&closed), EXIT_ALBA_ERROR);
+    }
+
+    /// Both front ends print the watcher line first, then the cleanup
+    /// lines, because they share one report.
+    #[test]
+    fn the_session_report_names_the_watcher_before_the_cleanup() {
+        let end = ended(WatchExit::WatcherClosed, &["a", "b"]);
+        assert_eq!(
+            session_report(&end),
+            vec![
+                "the file watcher stopped; ending the session".to_string(),
+                "cleanup failed: a".to_string(),
+                "cleanup failed: b".to_string(),
+            ]
+        );
     }
 
     /// An orderly goodbye is not a failure and owes no line.

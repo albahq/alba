@@ -1063,6 +1063,78 @@ async fn a_shutdown_command_ends_a_running_session() {
     assert!(matches!(session.ended().await, WatchExit::Interrupted));
 }
 
+/// A delayed beam keeps its run in flight while the session is told to
+/// leave, so the shutdown has to wait for that run's `Closed`.
+fn slow_compile() -> FakeExecutor {
+    FakeExecutor::new().on(
+        "compile",
+        FakeBehavior {
+            exit_code: 0,
+            delay: Duration::from_secs(30),
+            output_lines: Vec::new(),
+        },
+    )
+}
+
+/// Asserts the executor saw exactly one `ShutDown`, after everything it
+/// had opened was closed.
+fn assert_shut_down_once_after_the_run_wound_down(executor: &FakeExecutor) {
+    let events = executor.events();
+    let shutdowns: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| (*event == FakeEvent::ShutDown).then_some(index))
+        .collect();
+    assert_eq!(shutdowns.len(), 1, "{events:?}");
+    let last_closed = events
+        .iter()
+        .rposition(|event| matches!(event, FakeEvent::Closed { .. }))
+        .expect("the in-flight run must have been closed");
+    assert!(last_closed < shutdowns[0], "{events:?}");
+    assert_eq!(shutdowns[0], events.len() - 1, "{events:?}");
+}
+
+/// `Shutdown` mid-run: the run winds down, then the executors go.
+#[tokio::test]
+async fn a_shutdown_command_mid_run_shuts_executors_down_after_the_run_closes() {
+    let (mut session, commands) = start_commandable(TWO_BEAMS, "docs", slow_compile(), true);
+    session.event_matching(is_beam_started).await;
+    let executor = Arc::clone(&session.executor);
+
+    commands.send(SessionCommand::Shutdown).unwrap();
+    let end = session.finish_with_report().await;
+
+    assert_eq!(end.exit, WatchExit::Interrupted);
+    assert_shut_down_once_after_the_run_wound_down(&executor);
+}
+
+/// Cancellation mid-run takes the same road out.
+#[tokio::test]
+async fn a_cancellation_mid_run_shuts_executors_down_after_the_run_closes() {
+    let mut session = start(TWO_BEAMS, "docs", slow_compile(), false);
+    session.event_matching(is_beam_started).await;
+    let executor = Arc::clone(&session.executor);
+
+    let end = session.finish_with_report().await;
+
+    assert_eq!(end.exit, WatchExit::Interrupted);
+    assert_shut_down_once_after_the_run_wound_down(&executor);
+}
+
+/// `Shutdown` while parked: nothing in flight, still one shutdown.
+#[tokio::test]
+async fn a_shutdown_command_while_waiting_shuts_executors_down_once() {
+    let (mut session, commands) = start_commandable(ONE_BEAM, "build", FakeExecutor::new(), true);
+    session.event_matching(is_waiting).await;
+    let executor = Arc::clone(&session.executor);
+
+    commands.send(SessionCommand::Shutdown).unwrap();
+    let end = session.finish_with_report().await;
+
+    assert_eq!(end.exit, WatchExit::Interrupted);
+    assert_shut_down_once_after_the_run_wound_down(&executor);
+}
+
 /// A parked session answers commands too: a driver must be able to quit a
 /// session that is executing nothing while the Beamfile will not load.
 #[tokio::test]
