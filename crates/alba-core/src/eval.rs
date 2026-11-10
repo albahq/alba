@@ -1264,14 +1264,15 @@ fn no_options(
 }
 
 /// Builds `ExecutorKind::Docker` from its already-rendered options:
-/// `image` (required), `volumes` (a list of `host:container` entries),
-/// `workdir` (an absolute container path), and `user` (who the commands run
-/// as).
+/// `image` and `build` (at least one of the two), `volumes` (a list of
+/// `host:container` entries), `workdir` (an absolute container path), and
+/// `user` (who the commands run as).
 fn build_docker(
     decl: &ExecutorDecl,
     options: Vec<(String, Span, OptionValue)>,
 ) -> Result<ExecutorKind, CoreError> {
     let mut image = None;
+    let mut build = None;
     let mut volumes = Vec::new();
     let mut workdir = None;
     let mut user = None;
@@ -1281,6 +1282,13 @@ fn build_docker(
             ("image", _) => {
                 return Err(CoreError::new(
                     "executor `docker` option `image` must be a string".to_string(),
+                    span,
+                ));
+            }
+            ("build", OptionValue::Str(v)) if !v.is_empty() => build = Some(v),
+            ("build", _) => {
+                return Err(CoreError::new(
+                    "executor `docker` option `build` must be a non-empty string".to_string(),
                     span,
                 ));
             }
@@ -1325,7 +1333,7 @@ fn build_docker(
                     format!("executor `docker` does not take an option `{other}`"),
                     span,
                 );
-                let known = ["image", "volumes", "workdir", "user"];
+                let known = ["image", "build", "volumes", "workdir", "user"];
                 return Err(match suggest(other, known.into_iter()) {
                     Some(c) => err.with_help(format!("did you mean `{c}`?")),
                     None => err,
@@ -1333,14 +1341,15 @@ fn build_docker(
             }
         }
     }
-    let image = image.ok_or_else(|| {
-        CoreError::new(
-            "executor `docker` requires an `image` option".to_string(),
+    if image.is_none() && build.is_none() {
+        return Err(CoreError::new(
+            "executor `docker` requires an `image` or a `build` option".to_string(),
             decl.name.span,
-        )
-    })?;
+        ));
+    }
     Ok(ExecutorKind::Docker {
         image,
+        build,
         volumes,
         workdir,
         user,
@@ -1799,7 +1808,8 @@ beam b { run "x" }
         assert_eq!(
             project.beams[0].executor,
             ExecutorKind::Docker {
-                image: "registry/app:latest".to_string(),
+                image: Some("registry/app:latest".to_string()),
+                build: None,
                 volumes: Vec::new(),
                 workdir: None,
                 user: None,
@@ -1816,7 +1826,8 @@ beam b { run "x" }
         assert_eq!(
             project.beams[0].executor,
             ExecutorKind::Docker {
-                image: "x".into(),
+                image: Some("x".into()),
+                build: None,
                 volumes: vec!["h:/c".into()],
                 workdir: Some("/w".into()),
                 user: None,
@@ -1832,7 +1843,8 @@ beam b { run "x" }
         assert_eq!(
             project.beams[0].executor,
             ExecutorKind::Docker {
-                image: "x".into(),
+                image: Some("x".into()),
+                build: None,
                 volumes: Vec::new(),
                 workdir: None,
                 user: Some("1000:1000".into()),
@@ -1850,6 +1862,67 @@ beam b { run "x" }
             assert!(
                 err.message
                     .contains("executor `docker` option `user` must be a non-empty string"),
+                "unexpected message for {source}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn executor_docker_carries_a_build_context_instead_of_an_image() {
+        let project =
+            load_str(r#"beam d { executor docker { build "docker/php" } run "x" }"#).unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Docker {
+                image: None,
+                build: Some("docker/php".into()),
+                volumes: Vec::new(),
+                workdir: None,
+                user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn executor_docker_carries_a_build_context_and_the_image_it_is_tagged_as() {
+        let project = load_str(
+            r#"beam d { executor docker { build "docker/php" image "app-php" } run "x" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Docker {
+                image: Some("app-php".into()),
+                build: Some("docker/php".into()),
+                volumes: Vec::new(),
+                workdir: None,
+                user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn docker_requires_an_image_or_a_build_context() {
+        let err = load_str(r#"beam d { executor docker { workdir "/w" } run "x" }"#).unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `docker` requires an `image` or a `build` option"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn docker_build_must_be_a_non_empty_string() {
+        for source in [
+            r#"beam d { executor docker { build "" } run "x" }"#,
+            r#"beam d { executor docker { build ["docker/php"] } run "x" }"#,
+        ] {
+            let err = load_str(source).unwrap_err();
+            assert!(
+                err.message
+                    .contains("executor `docker` option `build` must be a non-empty string"),
                 "unexpected message for {source}: {}",
                 err.message
             );

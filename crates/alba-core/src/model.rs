@@ -39,14 +39,19 @@ pub enum ExecutorKind {
     /// `executor system_shell`: the host shell, the per-beam opt-out from
     /// the embedded shell.
     SystemShell,
-    /// `executor docker { image "..." volumes [...] workdir "..." user
-    /// "..." }`: the engine runs this beam's commands inside a container
-    /// built from `image`, with `volumes` bind-mounted (`host:container`
-    /// each), `workdir` as the container's working directory when set, and
-    /// `user` as who the commands run as when set (anything `docker run
-    /// --user` accepts, or `host` for whoever runs Alba).
+    /// `executor docker { image "..." build "..." volumes [...] workdir
+    /// "..." user "..." }`: the engine runs this beam's commands inside a
+    /// container started from `image`, or from the image built out of the
+    /// `build` context (a directory relative to the declaring Beamfile's)
+    /// when one is declared; with both, the built image is tagged `image`.
+    /// At least one of the two is always set. `volumes` are bind-mounted
+    /// (`host:container` each), `workdir` is the container's working
+    /// directory when set, and `user` is who the commands run as when set
+    /// (anything `docker run --user` accepts, or `host` for whoever runs
+    /// Alba).
     Docker {
-        image: String,
+        image: Option<String>,
+        build: Option<String>,
         volumes: Vec<String>,
         workdir: Option<String>,
         user: Option<String>,

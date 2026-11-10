@@ -142,12 +142,14 @@ fn executor_label(kind: &ExecutorKind) -> String {
         ExecutorKind::SystemShell => "system".to_string(),
         ExecutorKind::Docker {
             image,
+            build,
             volumes,
             workdir,
             user,
         } => {
             let mut label = String::from("docker");
-            push_field(&mut label, image);
+            push_field(&mut label, image.as_deref().unwrap_or(""));
+            push_field(&mut label, build.as_deref().unwrap_or(""));
             push_field(&mut label, &volumes.len().to_string());
             for volume in volumes {
                 push_field(&mut label, volume);
@@ -215,11 +217,13 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
         ExecutorKind::Shell | ExecutorKind::SystemShell => serde_json::Value::Null,
         ExecutorKind::Docker {
             image,
+            build,
             volumes,
             workdir,
             user,
         } => serde_json::json!({
             "image": image,
+            "build": build,
             "volumes": volumes,
             "workdir": workdir,
             "user": user,
@@ -1186,43 +1190,62 @@ mod tests {
     #[test]
     fn a_docker_label_changes_with_every_piece_of_its_configuration() {
         let base = ExecutorKind::Docker {
-            image: "alpine:3".into(),
+            image: Some("alpine:3".into()),
+            build: None,
             volumes: vec![],
             workdir: None,
             user: None,
         };
         let other_image = ExecutorKind::Docker {
-            image: "alpine:4".into(),
+            image: Some("alpine:4".into()),
+            build: None,
             volumes: vec![],
             workdir: None,
             user: None,
         };
         let with_volume = ExecutorKind::Docker {
-            image: "alpine:3".into(),
+            image: Some("alpine:3".into()),
+            build: None,
             volumes: vec!["h:/c".into()],
             workdir: None,
             user: None,
         };
         let with_workdir = ExecutorKind::Docker {
-            image: "alpine:3".into(),
+            image: Some("alpine:3".into()),
+            build: None,
             volumes: vec![],
             workdir: Some("/w".into()),
             user: None,
         };
         let with_user = ExecutorKind::Docker {
-            image: "alpine:3".into(),
+            image: Some("alpine:3".into()),
+            build: None,
             volumes: vec![],
             workdir: None,
             user: Some("host".into()),
         };
-        let labels: Vec<String> = [&base, &other_image, &with_volume, &with_workdir, &with_user]
-            .iter()
-            .map(|kind| executor_label(kind))
-            .collect();
+        let with_build = ExecutorKind::Docker {
+            image: Some("alpine:3".into()),
+            build: Some("docker".into()),
+            volumes: vec![],
+            workdir: None,
+            user: None,
+        };
+        let labels: Vec<String> = [
+            &base,
+            &other_image,
+            &with_volume,
+            &with_workdir,
+            &with_user,
+            &with_build,
+        ]
+        .iter()
+        .map(|kind| executor_label(kind))
+        .collect();
         let unique: std::collections::HashSet<&String> = labels.iter().collect();
         assert_eq!(
             unique.len(),
-            5,
+            6,
             "every configuration must label distinctly: {labels:?}"
         );
     }
@@ -1246,13 +1269,15 @@ mod tests {
     #[test]
     fn a_volume_cannot_forge_a_workdir_boundary() {
         let injected_volume = ExecutorKind::Docker {
-            image: "img".into(),
+            image: Some("img".into()),
+            build: None,
             volumes: vec!["a;workdir=X".into()],
             workdir: None,
             user: None,
         };
         let real_workdir = ExecutorKind::Docker {
-            image: "img".into(),
+            image: Some("img".into()),
+            build: None,
             volumes: vec!["a".into()],
             workdir: Some("X;workdir=".into()),
             user: None,
@@ -1268,13 +1293,15 @@ mod tests {
     #[test]
     fn a_comma_inside_a_volume_cannot_forge_a_second_volume() {
         let one_volume = ExecutorKind::Docker {
-            image: "img".into(),
+            image: Some("img".into()),
+            build: None,
             volumes: vec!["a,b".into()],
             workdir: None,
             user: None,
         };
         let two_volumes = ExecutorKind::Docker {
-            image: "img".into(),
+            image: Some("img".into()),
+            build: None,
             volumes: vec!["a".into(), "b".into()],
             workdir: None,
             user: None,

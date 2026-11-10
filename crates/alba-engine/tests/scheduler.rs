@@ -757,6 +757,7 @@ beam ship {
                 beam: "ship".to_string(),
                 options: serde_json::json!({
                     "image": "alpine:3",
+                    "build": null,
                     "volumes": [],
                     "workdir": "/w",
                     "user": "host",
