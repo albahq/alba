@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection,
+    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection, SessionEnd,
     SessionError, WatchExit,
 };
 use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
@@ -288,7 +288,7 @@ async fn watch_execute(
     tokio::spawn(watch_interrupts(cancel.clone()));
     let consumer = tokio::spawn(consume(incoming, watch_renderer(flags), cancel.clone()));
 
-    let exit = alba_engine::watch(
+    let end = alba_engine::watch(
         beamfile,
         project.clone(),
         sources.clone(),
@@ -324,8 +324,14 @@ async fn watch_execute(
         return EXIT_ALBA_ERROR;
     }
 
-    match exit {
-        WatchExit::Interrupted => 0,
+    // The executors were shut down before the session returned, so whatever
+    // they could not release is reported last, where it cannot be missed.
+    for message in &end.cleanup_errors {
+        err.line(&format!("cleanup failed: {message}"));
+    }
+    match end.exit {
+        WatchExit::Interrupted if end.cleanup_errors.is_empty() => 0,
+        WatchExit::Interrupted => EXIT_ALBA_ERROR,
         WatchExit::WatcherClosed => {
             err.line("the file watcher stopped; ending the session");
             EXIT_ALBA_ERROR
@@ -454,7 +460,7 @@ async fn tui_execute(
     // Everything below writes to a terminal the guard restored when
     // `alba_tui::run` returned, so the alternate screen is gone and stderr
     // reaches the shell the user is left looking at.
-    if let Some(message) = failure {
+    if let Some(message) = &failure {
         err.line(message);
     }
 
@@ -517,12 +523,29 @@ fn selection_label(selection: &Selection) -> String {
 /// reported rather than swallowed, for the same reason [`execute`] reports
 /// a panicking renderer: the report the interface just gave is incomplete
 /// and must not pass for a clean result.
-fn session_failure(exit: Result<WatchExit, tokio::task::JoinError>) -> Option<&'static str> {
-    match exit {
-        Ok(WatchExit::Interrupted) => None,
-        Ok(WatchExit::WatcherClosed) => Some("the file watcher stopped; ending the session"),
-        Err(_) => Some("the session ended unexpectedly; this session's report is incomplete"),
+///
+/// What the executors could not release at the session's end is reported
+/// here too, one `cleanup failed: <message>` line each: the interface owns
+/// the screen until it leaves, so this is the first moment it can be said.
+fn session_failure(end: Result<SessionEnd, tokio::task::JoinError>) -> Option<String> {
+    let end = match end {
+        Ok(end) => end,
+        Err(_) => {
+            return Some(
+                "the session ended unexpectedly; this session's report is incomplete".to_string(),
+            );
+        }
+    };
+    let mut lines = Vec::new();
+    if end.exit == WatchExit::WatcherClosed {
+        lines.push("the file watcher stopped; ending the session".to_string());
     }
+    lines.extend(
+        end.cleanup_errors
+            .iter()
+            .map(|message| format!("cleanup failed: {message}")),
+    );
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// What quitting the interface leaves behind on stderr: the last run's
@@ -1243,7 +1266,42 @@ mod tests {
     /// An orderly goodbye is not a failure and owes no line.
     #[test]
     fn an_interrupted_session_is_not_a_failure() {
-        assert_eq!(session_failure(Ok(WatchExit::Interrupted)), None);
+        assert_eq!(
+            session_failure(Ok(ended(WatchExit::Interrupted, &[]))),
+            None
+        );
+    }
+
+    fn ended(exit: WatchExit, cleanup_errors: &[&str]) -> SessionEnd {
+        SessionEnd {
+            exit,
+            cleanup_errors: cleanup_errors.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// What an executor could not release is owed to the user even when
+    /// the session itself ended in an orderly way.
+    #[test]
+    fn an_interrupted_session_that_left_state_behind_is_a_failure() {
+        let message = session_failure(Ok(ended(WatchExit::Interrupted, &["db would not stop"])))
+            .expect("a failed cleanup must be reported");
+        assert!(
+            message.contains("cleanup failed: db would not stop"),
+            "got: {message}"
+        );
+    }
+
+    /// A dead watcher and a failed cleanup are both reported, not one in
+    /// place of the other.
+    #[test]
+    fn a_dead_watcher_and_a_failed_cleanup_are_both_reported() {
+        let message = session_failure(Ok(ended(WatchExit::WatcherClosed, &["db would not stop"])))
+            .expect("both must be reported");
+        assert!(message.contains("file watcher"), "got: {message}");
+        assert!(
+            message.contains("cleanup failed: db would not stop"),
+            "got: {message}"
+        );
     }
 
     /// The one the interface cannot report itself: the session ending
@@ -1251,7 +1309,7 @@ mod tests {
     /// so the screen would just vanish without a word.
     #[test]
     fn a_dead_watcher_is_reported_the_way_the_headless_session_reports_it() {
-        let message = session_failure(Ok(WatchExit::WatcherClosed))
+        let message = session_failure(Ok(ended(WatchExit::WatcherClosed, &[])))
             .expect("a session whose watcher died must say so");
         assert!(message.contains("file watcher"), "got: {message}");
     }

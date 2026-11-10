@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 use alba_core::{BeamId, load_project};
 use alba_engine::{
     CacheOptions, EngineError, Executors, RunEvent, RunOptions, Selection, SessionCommand,
-    SessionError, WatchBatch, WatchExit, Watcher, session, watch,
+    SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session, watch,
 };
-use alba_executors::{FakeBehavior, FakeExecutor};
+use alba_executors::{FakeBehavior, FakeEvent, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
@@ -45,7 +45,7 @@ struct Session {
     batches: UnboundedSender<WatchBatch>,
     events: UnboundedReceiver<RunEvent>,
     cancel: CancellationToken,
-    handle: tokio::task::JoinHandle<WatchExit>,
+    handle: tokio::task::JoinHandle<SessionEnd>,
 }
 
 impl Session {
@@ -94,6 +94,11 @@ impl Session {
     }
 
     async fn finish(self) -> WatchExit {
+        self.finish_with_report().await.exit
+    }
+
+    /// Like [`Session::finish`], keeping the whole [`SessionEnd`].
+    async fn finish_with_report(self) -> SessionEnd {
         self.cancel.cancel();
         tokio::time::timeout(Duration::from_secs(5), self.handle)
             .await
@@ -110,6 +115,7 @@ impl Session {
             .await
             .expect("the session must end on its own")
             .expect("the session task must not panic")
+            .exit
     }
 }
 
@@ -467,7 +473,77 @@ async fn a_closed_watcher_ends_the_session() {
         .await
         .expect("the session must end when the watcher closes")
         .expect("the session task must not panic");
-    assert!(matches!(exit, WatchExit::WatcherClosed));
+    assert!(matches!(exit.exit, WatchExit::WatcherClosed));
+}
+
+/// Executors hold state across a session's runs, so the session ends by
+/// releasing it: once, after the last run, and as the very last thing the
+/// executor sees.
+#[tokio::test]
+async fn a_session_shuts_its_executors_down_once_when_it_ends() {
+    let mut session = start(TWO_BEAMS, "docs", FakeExecutor::new(), false);
+    session.event_matching(is_waiting).await;
+
+    let changed = session.touch("src/main.rs", "fn main() { changed(); }");
+    session.send(vec![changed]);
+    session.event_matching(is_triggered).await;
+    session.event_matching(is_run_finished).await;
+    session.event_matching(is_waiting).await;
+
+    let executor = Arc::clone(&session.executor);
+    let end = session.finish_with_report().await;
+
+    let events = executor.events();
+    let shutdowns = events
+        .iter()
+        .filter(|event| **event == FakeEvent::ShutDown)
+        .count();
+    assert_eq!(shutdowns, 1, "{events:?}");
+    assert_eq!(events.last(), Some(&FakeEvent::ShutDown), "{events:?}");
+    assert_eq!(end.exit, WatchExit::Interrupted);
+    assert!(end.cleanup_errors.is_empty(), "{:?}", end.cleanup_errors);
+}
+
+/// A session that ends because its watcher died owes the same release.
+#[tokio::test]
+async fn a_session_that_loses_its_watcher_still_shuts_down() {
+    let mut session = start(TWO_BEAMS, "docs", FakeExecutor::new(), false);
+    session.event_matching(is_waiting).await;
+    drop(std::mem::replace(
+        &mut session.batches,
+        unbounded_channel().0,
+    ));
+
+    let executor = Arc::clone(&session.executor);
+    let end = tokio::time::timeout(Duration::from_secs(5), session.handle)
+        .await
+        .expect("the session must end when the watcher closes")
+        .expect("the session task must not panic");
+
+    assert_eq!(end.exit, WatchExit::WatcherClosed);
+    let shutdowns = executor
+        .events()
+        .iter()
+        .filter(|event| **event == FakeEvent::ShutDown)
+        .count();
+    assert_eq!(shutdowns, 1);
+}
+
+/// What an executor could not release comes back to the caller, which owns
+/// the terminal and the exit code.
+#[tokio::test]
+async fn a_session_reports_what_shutdown_could_not_release() {
+    let mut session = start(
+        TWO_BEAMS,
+        "docs",
+        FakeExecutor::new().fail_shutdown("db would not stop"),
+        false,
+    );
+    session.event_matching(is_waiting).await;
+
+    let end = session.finish_with_report().await;
+
+    assert_eq!(end.cleanup_errors, vec!["db would not stop".to_string()]);
 }
 
 /// A rescan (overflow) triggers a run with no named paths.

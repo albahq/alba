@@ -49,6 +49,7 @@ pub trait Watcher: Send {
 
 /// Why a session ended. Sessions have no failure exit — mid-session
 /// trouble is reported and survived — so this is the complete list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchExit {
     /// The caller's token fired: the user is done.
     Interrupted,
@@ -56,6 +57,19 @@ pub enum WatchExit {
     /// idling while watching nothing would look exactly like a healthy
     /// quiet session.
     WatcherClosed,
+}
+
+/// How a session ended, and what shutting its executors down could not
+/// release.
+///
+/// The session cannot report the second part itself: it may end under a
+/// full-screen interface, and the exit code is the caller's to decide.
+/// `cleanup_errors` holds one message per executor that failed to release
+/// its state, empty when everything went back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEnd {
+    pub exit: WatchExit,
+    pub cleanup_errors: Vec<String>,
 }
 
 /// Mid-session trouble, handed to the caller's `on_error` for rendering.
@@ -101,7 +115,7 @@ pub async fn watch(
     cancel: CancellationToken,
     watcher: Box<dyn Watcher>,
     render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
-) -> WatchExit {
+) -> SessionEnd {
     session(
         beamfile,
         project,
