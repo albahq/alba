@@ -107,7 +107,8 @@ literal.
 - **`docker { image "..." [build "..."] [dockerfile "..."] [volumes [...]]
   [workdir "..."] [user "..."] }`**: one container per beam, kept alive
   across the beam's commands, removed when the beam ends. The project
-  directory is bind-mounted.
+  directory is bind-mounted. `build`, `dockerfile`, `user`, and a
+  relative volume path need alba 0.4.0 or later.
   - `volumes` entries are `host:container` with no `:ro` suffix; a
     container part starting with `./` is relative to the declaring
     Beamfile's directory (`"deps:./node_modules"`).
