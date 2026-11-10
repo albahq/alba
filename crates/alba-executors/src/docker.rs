@@ -60,7 +60,17 @@ impl DockerExecutor {
 
 #[derive(Debug, PartialEq, serde::Deserialize)]
 struct DockerConfig {
-    image: String,
+    // The image the container starts from. Optional because a `build`
+    // context can stand in for it; the loader guarantees at least one of
+    // the two, and `open` rejects a hand-authored `options` with neither.
+    #[serde(default)]
+    image: Option<String>,
+    // A build context: a directory holding a `Dockerfile`, relative to the
+    // beam's own directory. When set, the container starts from the image
+    // built out of it (see `build_image`), tagged `image` when both are
+    // declared.
+    #[serde(default)]
+    build: Option<String>,
     // The engine's rendered JSON (`executor_options` in `alba-engine`)
     // always sends `volumes` as an array, possibly empty, never absent and
     // never `null` — the DSL's `volumes ["h:/c"]` being optional only
@@ -91,13 +101,24 @@ const HOST_USER: &str = "host";
 impl Executor for DockerExecutor {
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
         let config: DockerConfig =
-            serde_json::from_value(beam.options).map_err(|error| ExecError {
+            serde_json::from_value(beam.options.clone()).map_err(|error| ExecError {
                 message: format!("invalid docker options: {error}"),
             })?;
+        let image = match (&config.build, &config.image) {
+            (Some(context), tag) => {
+                build_image(&beam.dir.join(context), context, tag.as_deref(), &beam).await?
+            }
+            (None, Some(image)) => image.clone(),
+            (None, None) => {
+                return Err(ExecError {
+                    message: "invalid docker options: neither `image` nor `build` is set".into(),
+                });
+            }
+        };
         let name = container_name(&beam.beam);
         let mapping = PathMapping::new(&self.project_root, config.workdir.clone());
 
-        let args = run_args(&config, &self.project_root, &name, &beam.beam);
+        let args = run_args(&config, &image, &self.project_root, &name, &beam.beam);
         let mut child = Command::new("docker")
             .args(&args)
             .stdin(Stdio::null())
@@ -168,10 +189,7 @@ impl Executor for DockerExecutor {
         if !status.success() {
             let code = status.code().unwrap_or(-1);
             return Err(ExecError {
-                message: format!(
-                    "docker run exited with code {code} for image `{}`",
-                    config.image
-                ),
+                message: format!("docker run exited with code {code} for image `{image}`"),
             });
         }
 
@@ -326,6 +344,96 @@ impl ExecSession for DockerSession {
     }
 }
 
+/// Builds the image a beam's container starts from out of `context` (a
+/// directory holding a `Dockerfile`), and returns that image's id.
+///
+/// The build runs before every session rather than once: docker's own
+/// layer cache is what makes the repeat cheap, and it is the only party
+/// that knows whether the context changed. `--quiet` keeps that repeat
+/// silent — on success docker prints the image id alone, on failure it
+/// still prints the whole build log — so one line on the beam's output
+/// says what is happening while a first, slow build runs. `declared` is
+/// the context as the Beamfile spells it, for that line and for the error.
+///
+/// The container is started from the returned id, never from `tag`: the
+/// tag only names the image for whoever wants to reuse it outside Alba,
+/// and the id cannot be repointed between the build and the run.
+async fn build_image(
+    context: &Path,
+    declared: &str,
+    tag: Option<&str>,
+    beam: &BeamContext,
+) -> Result<String, ExecError> {
+    let _ = beam.output.send(crate::OutputLine {
+        stream: Stream::Stderr,
+        text: format!("building the image from `{declared}`"),
+    });
+
+    let mut child = Command::new("docker")
+        .args(build_args(context, tag))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(docker_spawn_error)?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .expect("child spawned with piped stdout");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("child spawned with piped stderr");
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut buf).await;
+        buf
+    });
+    let stderr_task = tokio::spawn(stream_lines(stderr, Stream::Stderr, beam.output.clone()));
+
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(|error| ExecError {
+            message: format!("failed to wait for `docker build`: {error}"),
+        })?,
+        _ = beam.cancel.cancelled() => {
+            // Killing the local `docker build` process is what cancels the
+            // build daemon-side: unlike `docker run -d`, it stays attached
+            // to the build for its whole duration.
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(ExecError {
+                message: "image build cancelled".into(),
+            });
+        }
+    };
+
+    let image = stdout_task.await.unwrap_or_default();
+    let _ = stderr_task.await;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return Err(ExecError {
+            message: format!("docker build exited with code {code} for context `{declared}`"),
+        });
+    }
+
+    Ok(image.trim().to_string())
+}
+
+/// Builds the argument vector for `docker build`: see [`build_image`].
+fn build_args(context: &Path, tag: Option<&str>) -> Vec<String> {
+    let mut args = vec!["build".to_string(), "--quiet".to_string()];
+    if let Some(tag) = tag {
+        args.push("--tag".to_string());
+        args.push(tag.to_string());
+    }
+    args.push(context.display().to_string());
+    args
+}
+
 /// Maps a spawn failure of the `docker` binary itself (as opposed to a
 /// non-zero exit from a `docker` subcommand) to a hint that the executor
 /// needs `docker` on the `PATH`.
@@ -435,10 +543,17 @@ impl PathMapping {
 
 /// Builds the argument vector for `docker run -d`, which starts the
 /// dormant container backing one beam session (see the module doc
-/// comment). The project root is bind-mounted so the container sees the
-/// same files the beam's commands would see running on the host; the
-/// beam's declared volumes are appended verbatim after it.
-fn run_args(config: &DockerConfig, project_root: &Path, name: &str, beam: &str) -> Vec<String> {
+/// comment) from `image` — the declared one, or the id of the one just
+/// built. The project root is bind-mounted so the container sees the same
+/// files the beam's commands would see running on the host; the beam's
+/// declared volumes are appended verbatim after it.
+fn run_args(
+    config: &DockerConfig,
+    image: &str,
+    project_root: &Path,
+    name: &str,
+    beam: &str,
+) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
         "-d".to_string(),
@@ -470,7 +585,7 @@ fn run_args(config: &DockerConfig, project_root: &Path, name: &str, beam: &str) 
         args.push(user);
     }
 
-    args.push(config.image.clone());
+    args.push(image.to_string());
     args.push("sh".to_string());
     args.push("-c".to_string());
     args.push("sleep 2147483647".to_string());
@@ -537,7 +652,8 @@ mod tests {
         assert_eq!(
             config,
             DockerConfig {
-                image: "alpine:3".into(),
+                image: Some("alpine:3".into()),
+                build: None,
                 volumes: vec![],
                 workdir: None,
                 user: None,
@@ -548,13 +664,15 @@ mod tests {
     #[test]
     fn run_args_mount_the_project_and_keep_the_container_dormant() {
         let config = DockerConfig {
-            image: "alpine:3".into(),
+            image: Some("alpine:3".into()),
+            build: None,
             volumes: vec!["h:/c".into()],
             workdir: None,
             user: None,
         };
         let args = run_args(
             &config,
+            "alpine:3",
             std::path::Path::new("/proj"),
             "alba-build-1-0",
             "build",

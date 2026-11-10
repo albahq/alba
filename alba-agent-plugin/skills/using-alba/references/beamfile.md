@@ -104,10 +104,15 @@ literal.
 ## Executors
 
 - **`system_shell`**: `sh` on Unix, PowerShell on Windows. No static check.
-- **`docker { image "..." [volumes [...]] [workdir "..."] [user "..."] }`**:
-  one container per beam, kept alive across the beam's commands, removed
-  when the beam ends. The project directory is bind-mounted. `image` is
-  required; `volumes` entries are `host:container` with no `:ro` suffix.
+- **`docker { image "..." [build "..."] [volumes [...]] [workdir "..."]
+  [user "..."] }`**: one container per beam, kept alive across the beam's
+  commands, removed when the beam ends. The project directory is
+  bind-mounted. `volumes` entries are `host:container` with no `:ro`
+  suffix. `build "docker/php"` builds the image from that context
+  (relative to the declaring Beamfile's directory) before the beam runs,
+  instead of naming one; `image` is then optional and tags the result.
+  List the `Dockerfile` in `inputs`: the cache does not look inside the
+  build context.
   `user "host"` runs the commands as whoever runs Alba, so files written
   into the project are not owned by root; any other value goes to `docker
   run --user` as declared.

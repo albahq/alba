@@ -393,3 +393,151 @@ fn host_user() -> String {
     };
     format!("{}:{}", id("-u"), id("-g"))
 }
+
+/// Unconditional cleanup for the images one test builds, found by the
+/// `alba.test` label its Dockerfile carries (see [`build_context`]).
+struct ImageGuard {
+    label: String,
+}
+
+impl ImageGuard {
+    fn new(beam: &str) -> Self {
+        Self {
+            label: beam.to_string(),
+        }
+    }
+}
+
+impl Drop for ImageGuard {
+    fn drop(&mut self) {
+        let Ok(output) = std::process::Command::new("docker")
+            .args([
+                "images",
+                "-q",
+                "--filter",
+                &format!("label=alba.test={}", self.label),
+            ])
+            .output()
+        else {
+            return;
+        };
+        for id in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+            let _ = std::process::Command::new("docker")
+                .args(["rmi", "-f", id])
+                .output();
+        }
+    }
+}
+
+/// Writes a build context under `project_root/docker`: an image that
+/// differs from `alpine:3` by one file, `/baked.txt`, so a test can tell
+/// its commands ran in the image built from this context.
+fn build_context(project_root: &Path, beam: &str) {
+    let context = project_root.join("docker");
+    std::fs::create_dir(&context).unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        format!("FROM alpine:3\nLABEL alba.test={beam}\nRUN echo baked > /baked.txt\n"),
+    )
+    .unwrap();
+}
+
+/// A beam that declares a build context runs in the image built from it,
+/// with no image to name or to build beforehand.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn commands_run_in_the_image_built_from_the_declared_context() {
+    let beam = beam_name("build-context");
+    let _guard = ContainerGuard::new(&beam);
+    let _images = ImageGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    build_context(project_root.path(), &beam);
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"build": "docker"}),
+    );
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec("cat /baked.txt", project_root.path()), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(drain_text(&mut rx).await, ["baked"]);
+
+    session.close().await.unwrap();
+}
+
+/// With both a build context and an image, the built image carries that
+/// name, so it can be reused outside Alba.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn the_built_image_is_tagged_with_the_declared_image_name() {
+    let beam = beam_name("build-tag");
+    let _guard = ContainerGuard::new(&beam);
+    let _images = ImageGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    build_context(project_root.path(), &beam);
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"build": "docker", "image": beam}),
+    );
+    let session = executor.open(beam_ctx).await.unwrap();
+    session.close().await.unwrap();
+
+    let tagged = std::process::Command::new("docker")
+        .args(["run", "--rm", &beam, "cat", "/baked.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&tagged.stdout).trim(), "baked");
+}
+
+/// A context docker cannot build fails the session with the reason docker
+/// gave, rather than a later, unrelated `docker run` error.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_context_that_does_not_build_fails_the_session_with_dockers_reason() {
+    let beam = beam_name("build-fails");
+    let _guard = ContainerGuard::new(&beam);
+    let _images = ImageGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    let context = project_root.path().join("docker");
+    std::fs::create_dir(&context).unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        format!("FROM alpine:3\nLABEL alba.test={beam}\nRUN exit 3\n"),
+    )
+    .unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+
+    let (beam_ctx, mut output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"build": "docker"}),
+    );
+    let error = match executor.open(beam_ctx).await {
+        Ok(_) => panic!("a context that does not build must not open a session"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.message.contains("docker build exited with code"),
+        "unexpected message: {}",
+        error.message
+    );
+    let lines = drain_text(&mut output_rx).await.join("\n");
+    assert!(
+        lines.contains("exit 3"),
+        "docker's own build error must reach the beam's output: {lines}"
+    );
+}

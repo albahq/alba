@@ -834,9 +834,9 @@ beam ship {
 }
 ```
 
-`image` is required; `volumes` (a list of `host:container` entries),
-`workdir` (an absolute path inside the container), and `user` (who the
-commands run as) are optional. Alba
+`image` names the image the container starts from; `volumes` (a list of
+`host:container` entries), `workdir` (an absolute path inside the
+container), and `user` (who the commands run as) are optional. Alba
 starts one container per beam and keeps it alive, dormant, for every
 command that beam's `run` list runs, so state a command leaves behind
 (files written, anything a previous command set up) is visible to the
@@ -859,6 +859,28 @@ correctly, since only the last colon counts). A docker-style suffix
 appended after the container path, such as `:ro` for a read-only mount,
 does not fit that shape and is rejected at load time rather than reaching
 `docker` at all.
+
+`build` takes the place of `image` when the project carries its own
+`Dockerfile`: it names a build context, a directory relative to the
+declaring Beamfile's (it may climb out of it with leading `..`
+components), and the container starts from the image built out of it.
+
+```
+beam test {
+  inputs ["src/**", "docker/php/Dockerfile"]
+  executor docker { build "docker/php" }
+  run "vendor/bin/phpunit"
+}
+```
+
+Alba runs `docker build` before the beam's commands, every time the beam
+actually runs: docker's own layer cache makes the repeat cheap, and a
+build that fails fails the beam with docker's build log on its output.
+Declaring `image` alongside `build` tags the built image with that name,
+for reuse outside Alba; at least one of the two is required. A cached
+beam is not rebuilt at all, and the cache does not look inside the build
+context: list the `Dockerfile`, and whatever else it copies, in the
+beam's `inputs` so that changing the image reruns the beam.
 
 Without `user`, the commands run as the image's own default user,
 usually root, and so does every file they write into the project

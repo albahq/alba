@@ -72,6 +72,41 @@ impl Drop for ContainerGuard {
     }
 }
 
+/// Unconditional cleanup for the image one test builds, found by the
+/// `alba.test` label its Dockerfile carries.
+struct ImageGuard {
+    label: String,
+}
+
+impl ImageGuard {
+    fn new(beam: &str) -> Self {
+        Self {
+            label: beam.to_string(),
+        }
+    }
+}
+
+impl Drop for ImageGuard {
+    fn drop(&mut self) {
+        let Ok(output) = std::process::Command::new("docker")
+            .args([
+                "images",
+                "-q",
+                "--filter",
+                &format!("label=alba.test={}", self.label),
+            ])
+            .output()
+        else {
+            return;
+        };
+        for id in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+            let _ = std::process::Command::new("docker")
+                .args(["rmi", "-f", id])
+                .output();
+        }
+    }
+}
+
 /// A beam declaring `executor docker` actually runs its command inside the
 /// named image, through the real `alba` binary end to end.
 #[test]
@@ -137,4 +172,31 @@ fn a_missing_image_fails_the_beam_not_the_run_machinery() {
         .code(1)
         .stdout(predicates::str::contains(beam.as_str()))
         .stderr(predicates::str::contains("1 failed"));
+}
+
+/// A beam declaring a build context runs in the image built from it: the
+/// context is resolved from the Beamfile's own directory, and nothing has
+/// to build or name the image beforehand.
+#[test]
+#[ignore = "requires a running docker daemon"]
+fn a_docker_beam_runs_in_the_image_built_from_its_context() {
+    let beam = beam_name("build");
+    let _guard = ContainerGuard::new(&beam);
+    let _image = ImageGuard::new(&beam);
+    let dir = project(&format!(
+        "beam {beam} {{\n  executor docker {{ build \"docker\" }}\n  run \"cat /baked.txt\"\n}}\n"
+    ));
+    std::fs::create_dir(dir.path().join("docker")).unwrap();
+    std::fs::write(
+        dir.path().join("docker/Dockerfile"),
+        format!("FROM alpine:3\nLABEL alba.test={beam}\nRUN echo baked in > /baked.txt\n"),
+    )
+    .unwrap();
+
+    alba()
+        .current_dir(&dir)
+        .args(["run", &beam])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("baked in"));
 }
