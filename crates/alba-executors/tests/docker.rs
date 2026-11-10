@@ -321,3 +321,75 @@ async fn cancelling_execute_returns_within_the_stop_grace() {
     // cancellation's expected outcome.
     session.close().await.unwrap();
 }
+
+/// A declared `user` is who the beam's commands run as, whatever user the
+/// image itself defaults to (`alpine:3` defaults to root).
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn commands_run_as_the_declared_user() {
+    let beam = beam_name("declared-user");
+    let _guard = ContainerGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"image": "alpine:3", "user": "1234:5678"}),
+    );
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec("echo $(id -u):$(id -g)", project_root.path()), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    let lines = drain_text(&mut rx).await;
+    assert_eq!(lines, ["1234:5678"]);
+
+    session.close().await.unwrap();
+}
+
+/// `user "host"` runs the commands as whoever runs Alba, so a file a beam
+/// writes into the project mount belongs to that person and not to root.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn the_host_user_runs_the_commands_when_asked() {
+    let beam = beam_name("host-user");
+    let _guard = ContainerGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"image": "alpine:3", "user": "host"}),
+    );
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec("echo $(id -u):$(id -g)", project_root.path()), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    let lines = drain_text(&mut rx).await;
+    assert_eq!(lines, [host_user()]);
+
+    session.close().await.unwrap();
+}
+
+/// The `uid:gid` of the process running the tests, read from the `id`
+/// command rather than from the code under test.
+#[cfg(unix)]
+fn host_user() -> String {
+    let id = |flag: &str| {
+        let output = std::process::Command::new("id").arg(flag).output().unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    format!("{}:{}", id("-u"), id("-g"))
+}

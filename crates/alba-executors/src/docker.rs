@@ -76,7 +76,16 @@ struct DockerConfig {
     // an `Option`, not just a defaulted `Vec`.
     #[serde(default)]
     workdir: Option<String>,
+    // Who the beam's commands run as: anything `docker run --user`
+    // accepts, or `host` (see `HOST_USER`). Absent or `null` leaves the
+    // choice to the image.
+    #[serde(default)]
+    user: Option<String>,
 }
+
+/// The `user` value that stands for whoever runs Alba, rather than for a
+/// user of the image: see [`container_user`].
+const HOST_USER: &str = "host";
 
 #[async_trait::async_trait]
 impl Executor for DockerExecutor {
@@ -456,11 +465,44 @@ fn run_args(config: &DockerConfig, project_root: &Path, name: &str, beam: &str) 
         args.push(volume.clone());
     }
 
+    if let Some(user) = config.user.as_deref().and_then(container_user) {
+        args.push("--user".to_string());
+        args.push(user);
+    }
+
     args.push(config.image.clone());
     args.push("sh".to_string());
     args.push("-c".to_string());
     args.push("sleep 2147483647".to_string());
     args
+}
+
+/// Resolves a declared `user` to what `docker run --user` takes. Every
+/// value is passed through as declared but [`HOST_USER`], which becomes the
+/// `uid:gid` of the Alba process itself: files a beam writes into the
+/// project mount then belong to the person running Alba, not to whatever
+/// user the image defaults to (usually root).
+///
+/// Windows has no uid to hand over, and Docker Desktop already maps the
+/// ownership of bind-mounted files there, so `host` leaves the image's own
+/// user in place.
+fn container_user(declared: &str) -> Option<String> {
+    if declared != HOST_USER {
+        return Some(declared.to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        Some(format!(
+            "{}:{}",
+            nix::unistd::getuid(),
+            nix::unistd::getgid()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 /// Builds the argument vector for `docker exec`, running one already
@@ -498,6 +540,7 @@ mod tests {
                 image: "alpine:3".into(),
                 volumes: vec![],
                 workdir: None,
+                user: None,
             }
         );
     }
@@ -508,6 +551,7 @@ mod tests {
             image: "alpine:3".into(),
             volumes: vec!["h:/c".into()],
             workdir: None,
+            user: None,
         };
         let args = run_args(
             &config,

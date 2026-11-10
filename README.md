@@ -828,13 +828,15 @@ beam ship {
     image "alpine:3"
     volumes ["/host/cache:/cache"]
     workdir "/srv"
+    user "host"
   }
   run "./deploy.sh"
 }
 ```
 
-`image` is required; `volumes` (a list of `host:container` entries) and
-`workdir` (an absolute path inside the container) are optional. Alba
+`image` is required; `volumes` (a list of `host:container` entries),
+`workdir` (an absolute path inside the container), and `user` (who the
+commands run as) are optional. Alba
 starts one container per beam and keeps it alive, dormant, for every
 command that beam's `run` list runs, so state a command leaves behind
 (files written, anything a previous command set up) is visible to the
@@ -857,6 +859,18 @@ correctly, since only the last colon counts). A docker-style suffix
 appended after the container path, such as `:ro` for a read-only mount,
 does not fit that shape and is rejected at load time rather than reaching
 `docker` at all.
+
+Without `user`, the commands run as the image's own default user,
+usually root, and so does every file they write into the project
+directory: on Linux those files end up owned by root on the host. `user
+"host"` runs the commands as whoever runs Alba instead, so what a beam
+writes belongs to that person. Any other value is handed to `docker run
+--user` as declared: a name the image knows (`user "node"`), a uid, or a
+`uid:gid` pair. An image has no account for an arbitrary host uid, so a
+tool that needs a writable home directory may want `env { HOME = "/tmp"
+}` alongside `user "host"`. On Windows, where there is no uid to hand
+over and Docker Desktop maps file ownership itself, `user "host"` leaves
+the image's default user in place.
 
 Running a docker beam requires `docker` on the `PATH`; it reaches
 whichever daemon that `docker` CLI is itself configured to talk to

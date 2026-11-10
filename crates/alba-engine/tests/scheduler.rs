@@ -729,7 +729,7 @@ beam b { needs [a] run "step b" }
 async fn a_docker_beam_dispatches_to_the_docker_slot_with_its_options() {
     const SOURCE: &str = r#"
 beam ship {
-  executor docker { image "alpine:3" workdir "/w" }
+  executor docker { image "alpine:3" workdir "/w" user "host" }
   run "deploy"
 }
 "#;
@@ -755,7 +755,12 @@ beam ship {
         vec![
             FakeEvent::Opened {
                 beam: "ship".to_string(),
-                options: serde_json::json!({"image": "alpine:3", "volumes": [], "workdir": "/w"}),
+                options: serde_json::json!({
+                    "image": "alpine:3",
+                    "volumes": [],
+                    "workdir": "/w",
+                    "user": "host",
+                }),
             },
             FakeEvent::Executed {
                 command: "deploy".to_string(),
