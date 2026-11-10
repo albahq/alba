@@ -220,7 +220,7 @@ before reading anything else. An ordinary run emits six kinds:
 | `beam_cached` | `beam`, for a beam the cache answered instead of running. |
 | `beam_output` | `beam`, `stream` (`stdout` or `stderr`), `text`, `replayed` (`true` for a line replayed from the cache rather than produced now). |
 | `beam_finished` | `beam`, `status`, `exit_code` (`null` unless the beam ran and exited non-zero), `duration_ms`. |
-| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned. |
+| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned, and `cleanup_errors`, the errors met while releasing what executors held for the run (a non-empty list makes the exit code `1`). |
 
 A watch session's stream carries three more kinds; see
 [Watch mode](#watch-mode). No run summary is printed to stderr in this
@@ -232,7 +232,7 @@ would have restated there.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. |
-| `1` | A beam failed (and was not `allow_failure`). |
+| `1` | A beam failed (and was not `allow_failure`), or an executor could not release what it held for the run. |
 | `2` | Alba itself failed: a missing Beamfile, a parse or validation error, a bad invocation, an unschedulable run. |
 | `130` | The user interrupted the run (Ctrl-C). |
 

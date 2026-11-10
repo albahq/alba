@@ -770,11 +770,12 @@ beam ship {
             FakeEvent::Closed {
                 beam: "ship".to_string(),
             },
+            FakeEvent::ShutDown,
         ]
     );
     assert!(
-        fake_a.events().is_empty(),
-        "neither the embedded nor the system slot must see this beam"
+        fake_a.events() == [FakeEvent::ShutDown],
+        "neither the embedded nor the system slot must see this beam, only the shutdown"
     );
 }
 
@@ -1047,8 +1048,8 @@ beam build { needs [helper] run "step build" }
 
 /// A plugin binary missing from the `PATH` is caught during planning, the
 /// same as any other unschedulable run: nothing is spawned, and the fake
-/// executor — which would stand in for every built-in kind — never sees a
-/// single event.
+/// executor — which would stand in for every built-in kind — sees nothing
+/// but the shutdown every run ends with.
 #[tokio::test]
 async fn a_run_with_an_unresolvable_plugin_fails_before_starting_anything() {
     const SOURCE: &str = r#"
@@ -1059,7 +1060,7 @@ beam d { executor notinstalled run "x" }
     let outcome = run_target(SOURCE, "d", options(2, false), executor.clone()).await;
 
     assert!(matches!(outcome.error(), EngineError::Unschedulable(_)));
-    assert!(executor.events().is_empty());
+    assert_eq!(executor.events(), vec![FakeEvent::ShutDown]);
 }
 
 /// A beam's single session brackets every one of its commands: `open` runs
@@ -1092,6 +1093,7 @@ beam build { run ["echo a", "echo b"] }
             FakeEvent::Closed {
                 beam: "build".to_string(),
             },
+            FakeEvent::ShutDown,
         ]
     );
 }
@@ -1111,7 +1113,7 @@ beam build { run ["boom", "echo never"] }
     assert_eq!(ids(&outcome.summary().failed), ["build"]);
     let events = executor.events();
     assert!(
-        matches!(events.last(), Some(FakeEvent::Closed { beam }) if beam == "build"),
+        matches!(events.iter().rev().nth(1), Some(FakeEvent::Closed { beam }) if beam == "build"),
         "the session must still close after the failing command: {events:?}"
     );
     assert!(
@@ -1345,4 +1347,126 @@ beam own {
         "the beam's own value wins: {own:?}"
     );
     assert!(own.contains(&("CLICOLOR_FORCE".to_string(), "1".to_string())));
+}
+
+fn shut_downs(executor: &FakeExecutor) -> usize {
+    executor
+        .events()
+        .iter()
+        .filter(|event| **event == FakeEvent::ShutDown)
+        .count()
+}
+
+#[tokio::test]
+async fn the_executors_shut_down_once_after_every_session_closed() {
+    const SOURCE: &str = r#"
+beam build { run ["one", "two"] }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target(SOURCE, "build", options(1, false), executor.clone()).await;
+
+    outcome.summary();
+    let events = executor.events();
+    assert!(
+        events.ends_with(&[
+            FakeEvent::Closed {
+                beam: "build".to_string()
+            },
+            FakeEvent::ShutDown
+        ]),
+        "shutdown must follow the last close, got {events:?}"
+    );
+    assert_eq!(shut_downs(&executor), 1);
+}
+
+#[tokio::test]
+async fn the_executors_shut_down_when_a_beam_fails() {
+    const SOURCE: &str = r#"
+beam build { run "fail" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("fail", behavior(1, 0)));
+    let outcome = run_target(SOURCE, "build", options(1, false), executor.clone()).await;
+
+    assert_eq!(ids(&outcome.summary().failed), ["build"]);
+    assert_eq!(shut_downs(&executor), 1);
+    assert_eq!(executor.events().last(), Some(&FakeEvent::ShutDown));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_executors_shut_down_when_the_run_is_cancelled() {
+    const SOURCE: &str = r#"
+beam build { run "slow" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().on("slow", behavior(0, 30_000)));
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+
+    let outcome =
+        run_target_with_cancel(SOURCE, "build", options(1, false), executor.clone(), cancel).await;
+
+    outcome.summary();
+    let events = executor.events();
+    assert_eq!(shut_downs(&executor), 1);
+    let closed = events
+        .iter()
+        .position(|event| matches!(event, FakeEvent::Closed { .. }))
+        .expect("the session must be closed");
+    let shut_down = events
+        .iter()
+        .position(|event| *event == FakeEvent::ShutDown)
+        .unwrap();
+    assert!(closed < shut_down, "got {events:?}");
+}
+
+#[tokio::test]
+async fn an_executor_filling_several_slots_shuts_down_once() {
+    const SOURCE: &str = r#"
+beam build { run "one" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target_with_executors(
+        SOURCE,
+        "build",
+        options(1, false),
+        Executors::uniform(executor.clone()),
+        CancellationToken::new(),
+    )
+    .await;
+
+    outcome.summary();
+    assert_eq!(shut_downs(&executor), 1);
+}
+
+#[tokio::test]
+async fn a_shutdown_failure_fails_a_run_whose_beams_all_passed() {
+    const SOURCE: &str = r#"
+beam build { run "one" }
+"#;
+
+    let executor = Arc::new(FakeExecutor::new().fail_shutdown("db would not stop"));
+    let outcome = run_target(SOURCE, "build", options(1, false), executor.clone()).await;
+
+    let summary = outcome.summary();
+    assert!(summary.failed.is_empty());
+    assert_eq!(summary.cleanup_errors, ["db would not stop"]);
+    assert_eq!(summary.exit_code(), 1);
+
+    let finished = outcome
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            RunEvent::RunFinished { summary } => Some(summary),
+            _ => None,
+        })
+        .expect("a RunFinished event");
+    assert_eq!(finished.cleanup_errors, ["db would not stop"]);
 }

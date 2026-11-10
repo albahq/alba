@@ -111,6 +111,27 @@ impl Executors {
         }
     }
 
+    /// Shuts down every distinct executor among the slots, once each
+    /// (`Arc::ptr_eq`: [`Executors::uniform`] fills all three with one),
+    /// attempting every slot even after one failed. Returns the error
+    /// messages in slot order.
+    pub async fn shutdown(&self) -> Vec<String> {
+        let slots = [&self.embedded, &self.system, &self.docker];
+        let mut errors = Vec::new();
+        for (index, executor) in slots.iter().enumerate() {
+            if slots[..index]
+                .iter()
+                .any(|seen| Arc::ptr_eq(seen, executor))
+            {
+                continue;
+            }
+            if let Err(error) = executor.shutdown().await {
+                errors.push(error.message);
+            }
+        }
+        errors
+    }
+
     /// Which executor a beam's declared kind dispatches to.
     ///
     /// Only ever called with a built-in kind: a plugin beam's executor is
@@ -281,6 +302,12 @@ impl Targets {
 /// [`RunSummary::exit_code`] turns that into the process exit code.
 /// `RunFinished` is emitted last, and only on the `Ok` path — an `Err` has
 /// no summary to report.
+///
+/// Once every beam task is awaited, the run shuts the executors down
+/// ([`Executors::shutdown`]) and records any error in
+/// [`RunSummary::cleanup_errors`] before `RunFinished`. On an `Err` path it
+/// shuts them down too and drops the result: the [`EngineError`] is what
+/// gets reported.
 pub async fn run(
     project: &Project,
     targets: &Targets,
@@ -289,8 +316,41 @@ pub async fn run(
     events: UnboundedSender<RunEvent>,
     cancel: CancellationToken,
 ) -> Result<RunSummary, EngineError> {
+    run_once(project, targets, options, executors, events, cancel, true).await
+}
+
+/// [`run`] for a watch session: identical, except it never shuts the
+/// executors down, so what they hold survives from one run to the next.
+pub(crate) async fn run_in_session(
+    project: &Project,
+    targets: &Targets,
+    options: RunOptions,
+    executors: Executors,
+    events: UnboundedSender<RunEvent>,
+    cancel: CancellationToken,
+) -> Result<RunSummary, EngineError> {
+    run_once(project, targets, options, executors, events, cancel, false).await
+}
+
+async fn run_once(
+    project: &Project,
+    targets: &Targets,
+    options: RunOptions,
+    executors: Executors,
+    events: UnboundedSender<RunEvent>,
+    cancel: CancellationToken,
+    shut_down: bool,
+) -> Result<RunSummary, EngineError> {
     let started_at = Instant::now();
-    let (beams, plugins) = plan(project, &targets.beams, &options.params)?;
+    let (beams, plugins) = match plan(project, &targets.beams, &options.params) {
+        Ok(planned) => planned,
+        Err(error) => {
+            if shut_down {
+                executors.shutdown().await;
+            }
+            return Err(error);
+        }
+    };
 
     let _ = events.send(RunEvent::RunStarted {
         targets: targets.beams.clone(),
@@ -390,9 +450,15 @@ pub async fn run(
         }
     }
     if let Some(error) = failure {
+        if shut_down {
+            executors.shutdown().await;
+        }
         return Err(error);
     }
 
+    if shut_down {
+        summary.cleanup_errors = executors.shutdown().await;
+    }
     summary.duration = started_at.elapsed();
     let _ = events.send(RunEvent::RunFinished {
         summary: summary.clone(),

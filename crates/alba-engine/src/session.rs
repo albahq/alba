@@ -68,7 +68,7 @@ use tokio_util::sync::CancellationToken;
 use crate::EngineError;
 use crate::affected::{Selection, select};
 use crate::event::RunEvent;
-use crate::scheduler::{Executors, RunOptions, run};
+use crate::scheduler::{Executors, RunOptions, run_in_session};
 use crate::watch::set::{Relevance, WatchSet};
 use crate::watch::{SessionError, WatchBatch, WatchExit, Watcher, beamfile_dir, display_paths};
 
@@ -240,7 +240,7 @@ pub async fn session(
         // run next, which is why the wait phase gets skipped when it is set.
         let mut commanded: Option<(BeamId, bool)> = None;
         let result = {
-            let run_future = run(
+            let run_future = run_in_session(
                 &project,
                 &targets,
                 run_options,
