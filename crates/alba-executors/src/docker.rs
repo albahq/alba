@@ -117,6 +117,14 @@ impl Executor for DockerExecutor {
         };
         let name = container_name(&beam.beam);
         let mapping = PathMapping::new(&self.project_root, config.workdir.clone());
+        let config = DockerConfig {
+            volumes: config
+                .volumes
+                .iter()
+                .map(|volume| mapping.container_volume(volume, &beam.dir))
+                .collect(),
+            ..config
+        };
 
         let args = run_args(&config, &image, &self.project_root, &name, &beam.beam);
         let mut child = Command::new("docker")
@@ -514,18 +522,40 @@ impl PathMapping {
     }
 
     fn container_cwd(&self, cwd: &Path) -> String {
-        if let Some(workdir) = &self.workdir {
-            return workdir.clone();
+        match &self.workdir {
+            Some(workdir) => workdir.clone(),
+            None => self.container_path(cwd),
         }
+    }
 
+    /// Rewrites a declared volume whose container part is relative to the
+    /// beam's directory (`deps:./node_modules`) into the absolute container
+    /// path docker needs: `beam_dir` as the container sees it, joined with
+    /// that relative part. Any other volume is returned as declared. The
+    /// loader has already checked the entry's shape, so only its last
+    /// colon splits (a windows host path keeps its drive colon).
+    fn container_volume(&self, volume: &str, beam_dir: &Path) -> String {
+        match volume.rsplit_once(":./") {
+            Some((source, relative)) => {
+                let base = self.container_path(beam_dir);
+                let target = format!("{}/{relative}", base.trim_end_matches('/'));
+                format!("{source}:{}", target.trim_end_matches('/'))
+            }
+            None => volume.to_string(),
+        }
+    }
+
+    /// Where a host path under the project root is found inside the
+    /// container, regardless of any declared `workdir`.
+    fn container_path(&self, host: &Path) -> String {
         #[cfg(unix)]
         {
-            cwd.to_string_lossy().into_owned()
+            host.to_string_lossy().into_owned()
         }
 
         #[cfg(windows)]
         {
-            match cwd.strip_prefix(&self.project_root) {
+            match host.strip_prefix(&self.project_root) {
                 Ok(relative) if relative.as_os_str().is_empty() => "/workspace".to_string(),
                 Ok(relative) => {
                     let joined = relative
@@ -723,6 +753,33 @@ mod tests {
                 "/workspace/api"
             );
         }
+    }
+
+    #[test]
+    fn a_relative_volume_resolves_under_the_beams_directory_in_the_container() {
+        // A declared `workdir` moves where commands run, not where the
+        // beam's directory is mounted: it must not move the volume.
+        #[cfg(unix)]
+        let (mapping, beam_dir, expected) = (
+            PathMapping::new(Path::new("/proj"), Some("/inside".to_string())),
+            Path::new("/proj/api"),
+            "deps:/proj/api/node_modules",
+        );
+        #[cfg(windows)]
+        let (mapping, beam_dir, expected) = (
+            PathMapping::new(Path::new(r"C:\proj"), Some("/inside".to_string())),
+            Path::new(r"C:\proj\api"),
+            "deps:/workspace/api/node_modules",
+        );
+
+        assert_eq!(
+            mapping.container_volume("deps:./node_modules", beam_dir),
+            expected
+        );
+        assert_eq!(
+            mapping.container_volume("/host/cache:/cache", beam_dir),
+            "/host/cache:/cache"
+        );
     }
 
     #[test]

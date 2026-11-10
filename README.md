@@ -853,12 +853,32 @@ with the working directory rewritten to the matching path under
 `volumes` are bind-mounted the same way, in addition to the project
 directory, but each entry is validated when the Beamfile loads, before
 any container exists: it must split on its last colon into a non-empty
-host part and a container part starting with `/` (a windows host path
-such as `C:\cache:/cache` keeps its own drive colon and still splits
+host part and a container part starting with `/` or `./` (a windows host
+path such as `C:\cache:/cache` keeps its own drive colon and still splits
 correctly, since only the last colon counts). A docker-style suffix
 appended after the container path, such as `:ro` for a read-only mount,
 does not fit that shape and is rejected at load time rather than reaching
 `docker` at all.
+
+A container part starting with `./` is relative to the declaring
+Beamfile's directory, wherever the project happens to be mounted, and may
+not climb out of it with `..`. That is what lets a named volume shadow a
+directory of the project, so that dependencies built for the container's
+system never mix with the host's:
+
+```
+beam install {
+  executor docker {
+    image "node:24"
+    volumes ["my-app-node-modules:./node_modules"]
+  }
+  run "npm ci"
+}
+```
+
+Docker creates a named volume owned by root when the image has no
+directory at that path, so a beam that also declares a non-root `user`
+cannot write into it.
 
 `build` takes the place of `image` when the project carries its own
 `Dockerfile`: it names a build context, a directory relative to the
