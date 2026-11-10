@@ -71,6 +71,11 @@ struct DockerConfig {
     // declared.
     #[serde(default)]
     build: Option<String>,
+    // The file `build` is built from, relative to that context, when it is
+    // not the context's own `Dockerfile`. Meaningless without `build`,
+    // which the loader enforces.
+    #[serde(default)]
+    dockerfile: Option<String>,
     // The engine's rendered JSON (`executor_options` in `alba-engine`)
     // always sends `volumes` as an array, possibly empty, never absent and
     // never `null` — the DSL's `volumes ["h:/c"]` being optional only
@@ -106,7 +111,13 @@ impl Executor for DockerExecutor {
             })?;
         let image = match (&config.build, &config.image) {
             (Some(context), tag) => {
-                build_image(&beam.dir.join(context), context, tag.as_deref(), &beam).await?
+                let build = ImageBuild {
+                    context: beam.dir.join(context),
+                    declared: context,
+                    dockerfile: config.dockerfile.as_deref(),
+                    tag: tag.as_deref(),
+                };
+                build_image(&build, &beam).await?
             }
             (None, Some(image)) => image.clone(),
             (None, None) => {
@@ -360,25 +371,20 @@ impl ExecSession for DockerSession {
 /// that knows whether the context changed. `--quiet` keeps that repeat
 /// silent — on success docker prints the image id alone, on failure it
 /// still prints the whole build log — so one line on the beam's output
-/// says what is happening while a first, slow build runs. `declared` is
-/// the context as the Beamfile spells it, for that line and for the error.
+/// says what is happening while a first, slow build runs.
 ///
 /// The container is started from the returned id, never from `tag`: the
 /// tag only names the image for whoever wants to reuse it outside Alba,
 /// and the id cannot be repointed between the build and the run.
-async fn build_image(
-    context: &Path,
-    declared: &str,
-    tag: Option<&str>,
-    beam: &BeamContext,
-) -> Result<String, ExecError> {
+async fn build_image(build: &ImageBuild<'_>, beam: &BeamContext) -> Result<String, ExecError> {
+    let declared = build.declared;
     let _ = beam.output.send(crate::OutputLine {
         stream: Stream::Stderr,
         text: format!("building the image from `{declared}`"),
     });
 
     let mut child = Command::new("docker")
-        .args(build_args(context, tag))
+        .args(build_args(build))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -431,14 +437,35 @@ async fn build_image(
     Ok(image.trim().to_string())
 }
 
+/// What one `docker build` needs: see [`build_image`].
+struct ImageBuild<'a> {
+    /// The build context, as a host path.
+    context: PathBuf,
+    /// The same context as the Beamfile spells it, for messages.
+    declared: &'a str,
+    /// The file to build from, relative to `context`, when it is not the
+    /// context's own `Dockerfile`.
+    dockerfile: Option<&'a str>,
+    /// The name the built image is tagged with, if any.
+    tag: Option<&'a str>,
+}
+
 /// Builds the argument vector for `docker build`: see [`build_image`].
-fn build_args(context: &Path, tag: Option<&str>) -> Vec<String> {
+///
+/// `docker build --file` resolves a relative path against the directory
+/// `docker` runs in, not against the context; the declared `dockerfile` is
+/// relative to the context, so it is joined to it here.
+fn build_args(build: &ImageBuild<'_>) -> Vec<String> {
     let mut args = vec!["build".to_string(), "--quiet".to_string()];
-    if let Some(tag) = tag {
+    if let Some(tag) = build.tag {
         args.push("--tag".to_string());
         args.push(tag.to_string());
     }
-    args.push(context.display().to_string());
+    if let Some(dockerfile) = build.dockerfile {
+        args.push("--file".to_string());
+        args.push(build.context.join(dockerfile).display().to_string());
+    }
+    args.push(build.context.display().to_string());
     args
 }
 
@@ -684,6 +711,7 @@ mod tests {
             DockerConfig {
                 image: Some("alpine:3".into()),
                 build: None,
+                dockerfile: None,
                 volumes: vec![],
                 workdir: None,
                 user: None,
@@ -696,6 +724,7 @@ mod tests {
         let config = DockerConfig {
             image: Some("alpine:3".into()),
             build: None,
+            dockerfile: None,
             volumes: vec!["h:/c".into()],
             workdir: None,
             user: None,
@@ -779,6 +808,29 @@ mod tests {
         assert_eq!(
             mapping.container_volume("/host/cache:/cache", beam_dir),
             "/host/cache:/cache"
+        );
+    }
+
+    #[test]
+    fn build_args_find_the_declared_dockerfile_inside_the_context() {
+        let build = ImageBuild {
+            context: PathBuf::from("ctx"),
+            declared: "ctx",
+            dockerfile: Some("dev.Dockerfile"),
+            tag: Some("app"),
+        };
+        let dockerfile = Path::new("ctx").join("dev.Dockerfile");
+        assert_eq!(
+            build_args(&build),
+            vec![
+                "build",
+                "--quiet",
+                "--tag",
+                "app",
+                "--file",
+                &dockerfile.display().to_string(),
+                "ctx",
+            ]
         );
     }
 

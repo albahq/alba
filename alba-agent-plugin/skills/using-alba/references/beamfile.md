@@ -104,19 +104,23 @@ literal.
 ## Executors
 
 - **`system_shell`**: `sh` on Unix, PowerShell on Windows. No static check.
-- **`docker { image "..." [build "..."] [volumes [...]] [workdir "..."]
-  [user "..."] }`**: one container per beam, kept alive across the beam's
-  commands, removed when the beam ends. The project directory is
-  bind-mounted. `volumes` entries are `host:container` with no `:ro`
-  suffix; a container part starting with `./` is relative to the declaring
-  Beamfile's directory (`"deps:./node_modules"`). `build "docker/php"` builds the image from that context
-  (relative to the declaring Beamfile's directory) before the beam runs,
-  instead of naming one; `image` is then optional and tags the result.
-  List the `Dockerfile` in `inputs`: the cache does not look inside the
-  build context.
-  `user "host"` runs the commands as whoever runs Alba, so files written
-  into the project are not owned by root; any other value goes to `docker
-  run --user` as declared.
+- **`docker { image "..." [build "..."] [dockerfile "..."] [volumes [...]]
+  [workdir "..."] [user "..."] }`**: one container per beam, kept alive
+  across the beam's commands, removed when the beam ends. The project
+  directory is bind-mounted.
+  - `volumes` entries are `host:container` with no `:ro` suffix; a
+    container part starting with `./` is relative to the declaring
+    Beamfile's directory (`"deps:./node_modules"`).
+  - `build "docker/php"` builds the image from that context (relative to
+    the declaring Beamfile's directory) before the beam runs, instead of
+    naming one; `image` is then optional and tags the result. List the
+    `Dockerfile` in `inputs`: the cache does not look inside the build
+    context.
+  - `dockerfile "Dockerfile.ci"` picks a file other than `Dockerfile`,
+    relative to the build context; it requires `build`.
+  - `user "host"` runs the commands as whoever runs Alba, so files
+    written into the project are not owned by root; any other value goes
+    to `docker run --user` as declared.
 - **`<name> { option value ... }`**: an external `alba-executor-<name>`
   binary on the `PATH`. Resolution happens at plan time; a missing plugin
   fails the whole run before any beam starts.
