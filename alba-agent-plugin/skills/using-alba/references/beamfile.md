@@ -108,7 +108,8 @@ literal.
   [user "..."] }`**: one container per beam, kept alive across the beam's
   commands, removed when the beam ends. The project directory is
   bind-mounted. `volumes` entries are `host:container` with no `:ro`
-  suffix. `build "docker/php"` builds the image from that context
+  suffix; a container part starting with `./` is relative to the declaring
+  Beamfile's directory (`"deps:./node_modules"`). `build "docker/php"` builds the image from that context
   (relative to the declaring Beamfile's directory) before the beam runs,
   instead of naming one; `image` is then optional and tags the result.
   List the `Dockerfile` in `inputs`: the cache does not look inside the
