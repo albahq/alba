@@ -143,6 +143,7 @@ fn executor_label(kind: &ExecutorKind) -> String {
         ExecutorKind::Docker {
             image,
             build,
+            dockerfile,
             volumes,
             workdir,
             user,
@@ -150,6 +151,7 @@ fn executor_label(kind: &ExecutorKind) -> String {
             let mut label = String::from("docker");
             push_field(&mut label, image.as_deref().unwrap_or(""));
             push_field(&mut label, build.as_deref().unwrap_or(""));
+            push_field(&mut label, dockerfile.as_deref().unwrap_or(""));
             push_field(&mut label, &volumes.len().to_string());
             for volume in volumes {
                 push_field(&mut label, volume);
@@ -218,12 +220,14 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
         ExecutorKind::Docker {
             image,
             build,
+            dockerfile,
             volumes,
             workdir,
             user,
         } => serde_json::json!({
             "image": image,
             "build": build,
+            "dockerfile": dockerfile,
             "volumes": volumes,
             "workdir": workdir,
             "user": user,
@@ -1192,6 +1196,7 @@ mod tests {
         let base = ExecutorKind::Docker {
             image: Some("alpine:3".into()),
             build: None,
+            dockerfile: None,
             volumes: vec![],
             workdir: None,
             user: None,
@@ -1199,6 +1204,7 @@ mod tests {
         let other_image = ExecutorKind::Docker {
             image: Some("alpine:4".into()),
             build: None,
+            dockerfile: None,
             volumes: vec![],
             workdir: None,
             user: None,
@@ -1206,6 +1212,7 @@ mod tests {
         let with_volume = ExecutorKind::Docker {
             image: Some("alpine:3".into()),
             build: None,
+            dockerfile: None,
             volumes: vec!["h:/c".into()],
             workdir: None,
             user: None,
@@ -1213,6 +1220,7 @@ mod tests {
         let with_workdir = ExecutorKind::Docker {
             image: Some("alpine:3".into()),
             build: None,
+            dockerfile: None,
             volumes: vec![],
             workdir: Some("/w".into()),
             user: None,
@@ -1220,6 +1228,7 @@ mod tests {
         let with_user = ExecutorKind::Docker {
             image: Some("alpine:3".into()),
             build: None,
+            dockerfile: None,
             volumes: vec![],
             workdir: None,
             user: Some("host".into()),
@@ -1227,6 +1236,15 @@ mod tests {
         let with_build = ExecutorKind::Docker {
             image: Some("alpine:3".into()),
             build: Some("docker".into()),
+            dockerfile: None,
+            volumes: vec![],
+            workdir: None,
+            user: None,
+        };
+        let with_dockerfile = ExecutorKind::Docker {
+            image: Some("alpine:3".into()),
+            build: Some("docker".into()),
+            dockerfile: Some("Dockerfile.dev".into()),
             volumes: vec![],
             workdir: None,
             user: None,
@@ -1238,6 +1256,7 @@ mod tests {
             &with_workdir,
             &with_user,
             &with_build,
+            &with_dockerfile,
         ]
         .iter()
         .map(|kind| executor_label(kind))
@@ -1245,7 +1264,7 @@ mod tests {
         let unique: std::collections::HashSet<&String> = labels.iter().collect();
         assert_eq!(
             unique.len(),
-            6,
+            7,
             "every configuration must label distinctly: {labels:?}"
         );
     }
@@ -1271,6 +1290,7 @@ mod tests {
         let injected_volume = ExecutorKind::Docker {
             image: Some("img".into()),
             build: None,
+            dockerfile: None,
             volumes: vec!["a;workdir=X".into()],
             workdir: None,
             user: None,
@@ -1278,6 +1298,7 @@ mod tests {
         let real_workdir = ExecutorKind::Docker {
             image: Some("img".into()),
             build: None,
+            dockerfile: None,
             volumes: vec!["a".into()],
             workdir: Some("X;workdir=".into()),
             user: None,
@@ -1295,6 +1316,7 @@ mod tests {
         let one_volume = ExecutorKind::Docker {
             image: Some("img".into()),
             build: None,
+            dockerfile: None,
             volumes: vec!["a,b".into()],
             workdir: None,
             user: None,
@@ -1302,6 +1324,7 @@ mod tests {
         let two_volumes = ExecutorKind::Docker {
             image: Some("img".into()),
             build: None,
+            dockerfile: None,
             volumes: vec!["a".into(), "b".into()],
             workdir: None,
             user: None,

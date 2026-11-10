@@ -893,6 +893,18 @@ beam test {
 }
 ```
 
+The image is built from the context's own `Dockerfile` unless
+`dockerfile` names another file, relative to the build context. That
+covers a context holding several of them (`dockerfile "Dockerfile.ci"`)
+and a context wider than the directory the file lives in, which an image
+that copies the project's code needs:
+
+```
+executor docker { build "." dockerfile "docker/php.Dockerfile" }
+```
+
+`dockerfile` is only accepted alongside `build`.
+
 Alba runs `docker build` before the beam's commands, every time the beam
 actually runs: docker's own layer cache makes the repeat cheap, and a
 build that fails fails the beam with docker's build log on its output.

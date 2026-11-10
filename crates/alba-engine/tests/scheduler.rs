@@ -758,6 +758,7 @@ beam ship {
                 options: serde_json::json!({
                     "image": "alpine:3",
                     "build": null,
+                    "dockerfile": null,
                     "volumes": [],
                     "workdir": "/w",
                     "user": "host",

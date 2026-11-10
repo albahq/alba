@@ -601,3 +601,42 @@ async fn a_relative_volume_is_mounted_under_the_beams_directory() {
         "the file must live in the volume, not in the project directory"
     );
 }
+
+/// A declared `dockerfile` is the file the image is built from, found
+/// inside the build context: a context with no file named `Dockerfile` at
+/// all still builds.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn the_image_is_built_from_the_declared_dockerfile() {
+    let beam = beam_name("dockerfile");
+    let _guard = ContainerGuard::new(&beam);
+    let _images = ImageGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    build_context(project_root.path(), &beam);
+    let context = project_root.path().join("docker");
+    std::fs::create_dir(context.join("images")).unwrap();
+    std::fs::rename(
+        context.join("Dockerfile"),
+        context.join("images/dev.Dockerfile"),
+    )
+    .unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"build": "docker", "dockerfile": "images/dev.Dockerfile"}),
+    );
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec("cat /baked.txt", project_root.path()), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(drain_text(&mut rx).await, ["baked"]);
+
+    session.close().await.unwrap();
+}

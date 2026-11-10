@@ -44,7 +44,9 @@ pub enum ExecutorKind {
     /// container started from `image`, or from the image built out of the
     /// `build` context (a directory relative to the declaring Beamfile's)
     /// when one is declared; with both, the built image is tagged `image`.
-    /// At least one of the two is always set. `volumes` are bind-mounted
+    /// At least one of the two is always set. `dockerfile`, only ever set
+    /// alongside `build`, names the file to build from, relative to that
+    /// context, when it is not the context's own `Dockerfile`. `volumes` are bind-mounted
     /// (`host:container` each), `workdir` is the container's working
     /// directory when set, and `user` is who the commands run as when set
     /// (anything `docker run --user` accepts, or `host` for whoever runs
@@ -52,6 +54,7 @@ pub enum ExecutorKind {
     Docker {
         image: Option<String>,
         build: Option<String>,
+        dockerfile: Option<String>,
         volumes: Vec<String>,
         workdir: Option<String>,
         user: Option<String>,
