@@ -1264,8 +1264,9 @@ fn no_options(
 }
 
 /// Builds `ExecutorKind::Docker` from its already-rendered options:
-/// `image` (required), `volumes` (a list of `host:container` entries), and
-/// `workdir` (an absolute container path).
+/// `image` (required), `volumes` (a list of `host:container` entries),
+/// `workdir` (an absolute container path), and `user` (who the commands run
+/// as).
 fn build_docker(
     decl: &ExecutorDecl,
     options: Vec<(String, Span, OptionValue)>,
@@ -1273,6 +1274,7 @@ fn build_docker(
     let mut image = None;
     let mut volumes = Vec::new();
     let mut workdir = None;
+    let mut user = None;
     for (key, span, value) in options {
         match (key.as_str(), value) {
             ("image", OptionValue::Str(v)) => image = Some(v),
@@ -1311,17 +1313,23 @@ fn build_docker(
                     span,
                 ));
             }
+            ("user", OptionValue::Str(v)) if !v.is_empty() => user = Some(v),
+            ("user", _) => {
+                return Err(CoreError::new(
+                    "executor `docker` option `user` must be a non-empty string".to_string(),
+                    span,
+                ));
+            }
             (other, _) => {
                 let err = CoreError::new(
                     format!("executor `docker` does not take an option `{other}`"),
                     span,
                 );
-                return Err(
-                    match suggest(other, ["image", "volumes", "workdir"].into_iter()) {
-                        Some(c) => err.with_help(format!("did you mean `{c}`?")),
-                        None => err,
-                    },
-                );
+                let known = ["image", "volumes", "workdir", "user"];
+                return Err(match suggest(other, known.into_iter()) {
+                    Some(c) => err.with_help(format!("did you mean `{c}`?")),
+                    None => err,
+                });
             }
         }
     }
@@ -1335,6 +1343,7 @@ fn build_docker(
         image,
         volumes,
         workdir,
+        user,
     })
 }
 
@@ -1793,6 +1802,7 @@ beam b { run "x" }
                 image: "registry/app:latest".to_string(),
                 volumes: Vec::new(),
                 workdir: None,
+                user: None,
             }
         );
     }
@@ -1809,8 +1819,41 @@ beam b { run "x" }
                 image: "x".into(),
                 volumes: vec!["h:/c".into()],
                 workdir: Some("/w".into()),
+                user: None,
             }
         );
+    }
+
+    #[test]
+    fn executor_docker_carries_a_user() {
+        let project =
+            load_str(r#"beam d { executor docker { image "x" user "1000:1000" } run "x" }"#)
+                .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Docker {
+                image: "x".into(),
+                volumes: Vec::new(),
+                workdir: None,
+                user: Some("1000:1000".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn docker_user_must_be_a_non_empty_string() {
+        for source in [
+            r#"beam d { executor docker { image "x" user "" } run "x" }"#,
+            r#"beam d { executor docker { image "x" user ["1000"] } run "x" }"#,
+        ] {
+            let err = load_str(source).unwrap_err();
+            assert!(
+                err.message
+                    .contains("executor `docker` option `user` must be a non-empty string"),
+                "unexpected message for {source}: {}",
+                err.message
+            );
+        }
     }
 
     #[test]

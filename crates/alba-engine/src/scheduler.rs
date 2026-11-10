@@ -144,6 +144,7 @@ fn executor_label(kind: &ExecutorKind) -> String {
             image,
             volumes,
             workdir,
+            user,
         } => {
             let mut label = String::from("docker");
             push_field(&mut label, image);
@@ -152,6 +153,7 @@ fn executor_label(kind: &ExecutorKind) -> String {
                 push_field(&mut label, volume);
             }
             push_field(&mut label, workdir.as_deref().unwrap_or(""));
+            push_field(&mut label, user.as_deref().unwrap_or(""));
             label
         }
         ExecutorKind::Plugin { name, options } => {
@@ -215,10 +217,12 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
             image,
             volumes,
             workdir,
+            user,
         } => serde_json::json!({
             "image": image,
             "volumes": volumes,
             "workdir": workdir,
+            "user": user,
         }),
         ExecutorKind::Plugin { options, .. } => serde_json::Value::Object(
             options
@@ -1185,30 +1189,40 @@ mod tests {
             image: "alpine:3".into(),
             volumes: vec![],
             workdir: None,
+            user: None,
         };
         let other_image = ExecutorKind::Docker {
             image: "alpine:4".into(),
             volumes: vec![],
             workdir: None,
+            user: None,
         };
         let with_volume = ExecutorKind::Docker {
             image: "alpine:3".into(),
             volumes: vec!["h:/c".into()],
             workdir: None,
+            user: None,
         };
         let with_workdir = ExecutorKind::Docker {
             image: "alpine:3".into(),
             volumes: vec![],
             workdir: Some("/w".into()),
+            user: None,
         };
-        let labels: Vec<String> = [&base, &other_image, &with_volume, &with_workdir]
+        let with_user = ExecutorKind::Docker {
+            image: "alpine:3".into(),
+            volumes: vec![],
+            workdir: None,
+            user: Some("host".into()),
+        };
+        let labels: Vec<String> = [&base, &other_image, &with_volume, &with_workdir, &with_user]
             .iter()
             .map(|kind| executor_label(kind))
             .collect();
         let unique: std::collections::HashSet<&String> = labels.iter().collect();
         assert_eq!(
             unique.len(),
-            4,
+            5,
             "every configuration must label distinctly: {labels:?}"
         );
     }
@@ -1235,11 +1249,13 @@ mod tests {
             image: "img".into(),
             volumes: vec!["a;workdir=X".into()],
             workdir: None,
+            user: None,
         };
         let real_workdir = ExecutorKind::Docker {
             image: "img".into(),
             volumes: vec!["a".into()],
             workdir: Some("X;workdir=".into()),
+            user: None,
         };
         assert_ne!(
             executor_label(&injected_volume),
@@ -1255,11 +1271,13 @@ mod tests {
             image: "img".into(),
             volumes: vec!["a,b".into()],
             workdir: None,
+            user: None,
         };
         let two_volumes = ExecutorKind::Docker {
             image: "img".into(),
             volumes: vec!["a".into(), "b".into()],
             workdir: None,
+            user: None,
         };
         assert_ne!(executor_label(&one_volume), executor_label(&two_volumes));
     }
