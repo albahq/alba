@@ -151,8 +151,9 @@ pub struct RunSummary {
 impl RunSummary {
     /// The process exit code this run should produce: 0 unless a beam
     /// failed outright or an executor could not release what it held. An
-    /// allowed failure and a cancellation are both deliberately 0 here; Alba's own errors (a Beamfile that does not
-    /// load, an unschedulable run) exit 2 and never reach a summary.
+    /// allowed failure and a cancellation are both deliberately 0 here;
+    /// Alba's own errors (a Beamfile that does not load, an unschedulable
+    /// run) exit 2 and never reach a summary.
     pub fn exit_code(&self) -> i32 {
         if self.failed.is_empty() && self.cleanup_errors.is_empty() {
             0

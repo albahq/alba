@@ -338,8 +338,6 @@ mod tests {
         );
     }
 
-    /// `affected_by` only changes the empty case: a run that did affect
-    /// something reports its counts as usual.
     /// `print_summary` is the one place both text renderers write their
     /// stderr summary, so the cleanup failure line is asserted here, on a
     /// buffer, rather than through two renderers owning a real stderr.
@@ -371,6 +369,8 @@ mod tests {
         assert!(!written.contains("cleanup failed"), "got {written:?}");
     }
 
+    /// `affected_by` only changes the empty case: a run that did affect
+    /// something reports its counts as usual.
     #[test]
     fn an_affected_run_with_targets_reports_its_counts_as_usual() {
         let summary = RunSummary {

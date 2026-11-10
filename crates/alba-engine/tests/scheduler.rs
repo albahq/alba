@@ -1421,7 +1421,7 @@ beam build { run "slow" }
     let shut_down = events
         .iter()
         .position(|event| *event == FakeEvent::ShutDown)
-        .unwrap();
+        .expect("the executors must be shut down");
     assert!(closed < shut_down, "got {events:?}");
 }
 
