@@ -541,3 +541,63 @@ async fn a_context_that_does_not_build_fails_the_session_with_dockers_reason() {
         "docker's own build error must reach the beam's output: {lines}"
     );
 }
+
+/// Unconditional cleanup for the named volume one test creates.
+struct VolumeGuard {
+    name: String,
+}
+
+impl Drop for VolumeGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker")
+            .args(["volume", "rm", "-f", &self.name])
+            .output();
+    }
+}
+
+/// A volume whose container path starts with `./` is mounted under the
+/// beam's own directory inside the container: what a command writes there
+/// lands in the volume, which outlives the container, and never in the
+/// project directory on the host.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_relative_volume_is_mounted_under_the_beams_directory() {
+    let beam = beam_name("relative-volume");
+    let _guard = ContainerGuard::new(&beam);
+    let _volume = VolumeGuard { name: beam.clone() };
+
+    let project_root = tempfile::tempdir().unwrap();
+    let beam_dir = project_root.path().join("app");
+    std::fs::create_dir(&beam_dir).unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+    let options = serde_json::json!({
+        "image": "alpine:3",
+        "volumes": [format!("{beam}:./deps")],
+    });
+
+    let (beam_ctx, _output_rx) = beam_context(&beam, &beam_dir, options.clone());
+    let mut session = executor.open(beam_ctx).await.unwrap();
+    let (ctx, _rx) = exec_context();
+    let result = session
+        .execute(spec("echo kept > deps/marker", &beam_dir), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    session.close().await.unwrap();
+
+    let (beam_ctx, _output_rx) = beam_context(&beam, &beam_dir, options);
+    let mut session = executor.open(beam_ctx).await.unwrap();
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec("cat deps/marker", &beam_dir), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(drain_text(&mut rx).await, ["kept"]);
+    session.close().await.unwrap();
+
+    assert!(
+        !beam_dir.join("deps/marker").exists(),
+        "the file must live in the volume, not in the project directory"
+    );
+}

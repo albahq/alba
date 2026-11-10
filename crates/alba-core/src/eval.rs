@@ -1263,6 +1263,17 @@ fn no_options(
     }
 }
 
+/// Whether `path` is a container path a docker volume may be mounted at:
+/// an absolute one, or one relative to the declaring Beamfile's directory.
+/// A relative path says so with a leading `./` (a bare `cache` would read
+/// as a mistyped absolute path) and never climbs back out with `..`.
+fn is_container_path(path: &str) -> bool {
+    match path.strip_prefix("./") {
+        Some(relative) => relative.split('/').all(|component| component != ".."),
+        None => path.starts_with('/'),
+    }
+}
+
 /// Builds `ExecutorKind::Docker` from its already-rendered options:
 /// `image` and `build` (at least one of the two), `volumes` (a list of
 /// `host:container` entries), `workdir` (an absolute container path), and
@@ -1297,7 +1308,7 @@ fn build_docker(
                     // `rsplit_once` so a windows host path (`C:\cache`)
                     // keeps its drive colon; only the last `:` splits.
                     let valid = matches!(entry.rsplit_once(':'), Some((host, path))
-                        if !host.is_empty() && path.starts_with('/'));
+                        if !host.is_empty() && is_container_path(path));
                     if !valid {
                         return Err(CoreError::new(
                             format!("invalid volume `{entry}`: expected `host:container`"),
@@ -1948,6 +1959,45 @@ beam b { run "x" }
             err.message
                 .contains("invalid volume `nocolon`: expected `host:container`")
         );
+    }
+
+    #[test]
+    fn a_docker_volume_may_name_a_container_path_relative_to_the_beam() {
+        let project = load_str(
+            r#"beam d { executor docker { image "x" volumes ["deps:./node_modules"] } run "x" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Docker {
+                image: Some("x".into()),
+                build: None,
+                volumes: vec!["deps:./node_modules".into()],
+                workdir: None,
+                user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_relative_docker_volume_path_must_stay_under_the_beams_directory() {
+        for entry in [
+            "deps:../node_modules",
+            "deps:./a/../../b",
+            "deps:node_modules",
+        ] {
+            let err = load_str(&format!(
+                r#"beam d {{ executor docker {{ image "x" volumes ["{entry}"] }} run "x" }}"#
+            ))
+            .unwrap_err();
+            assert!(
+                err.message.contains(&format!(
+                    "invalid volume `{entry}`: expected `host:container`"
+                )),
+                "unexpected message for {entry}: {}",
+                err.message
+            );
+        }
     }
 
     #[test]
