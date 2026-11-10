@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/albahq/alba/compare/v0.3.0...v0.4.0) - 2026-11-10
+
+### Added
+
+- *(executors)* name a docker beam's Dockerfile
+- *(executors)* mount a volume relative to the beam
+- *(executors)* build a docker beam's image
+- *(executors)* let a docker beam choose its user
+
 ## [0.3.0](https://github.com/albahq/alba/compare/v0.2.1...v0.3.0) - 2026-11-06
 
 ### Added
