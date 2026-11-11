@@ -5,9 +5,16 @@
 //! what this actually guards is an accidental re-execution, a quadratic
 //! walk, or hashing becoming per-dependent rather than per-beam.
 //!
-//! Median of 15 samples rather than a single run, for the same reason
-//! `alba-core`'s guard does it: one sample on a loaded CI machine is
-//! noise, a median is a measurement.
+//! The fastest of 15 samples rather than a single run, or their median: on
+//! a shared CI machine, noise only ever adds time, so the fastest sample is
+//! the closest to the run's own cost, while a regression slows every sample,
+//! the fastest included. The median still carried that noise: a CI runner
+//! under load put it at 12ms for a run that takes 3ms on a laptop.
+//!
+//! The cost is linear in the number of input files, about 15µs each in the
+//! dev profile `cargo test` builds, nearly all of it hashing and reading;
+//! blake3 is optimized even there (see the workspace `Cargo.toml`), as it is
+//! in the binary users run.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -78,12 +85,11 @@ async fn a_fully_cached_run_stays_imperceptible() {
         samples.push(started.elapsed());
         assert_eq!(summary.cached.len(), 1, "every measured run must be a hit");
     }
-    samples.sort();
-    let median = samples[samples.len() / 2];
+    let fastest = samples.into_iter().min().expect("there are samples");
 
     assert!(
-        median < Duration::from_millis(10),
-        "a fully cached 100-file run took a median of {median:?}, budget 10ms"
+        fastest < Duration::from_millis(10),
+        "a fully cached 100-file run took {fastest:?} at best over 15 runs, budget 10ms"
     );
 }
 
