@@ -646,3 +646,28 @@ async fn cancelling_the_open_leaves_no_container() {
     assert_eq!(error.message, "compose session start cancelled");
     assert!(labelled_containers(&project.beam(), true).is_empty());
 }
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn cancelling_the_open_during_a_build_stops_it_promptly() {
+    let project = built_tool("cancel-build", "");
+    // The project name keeps the build cache from answering at once.
+    std::fs::write(
+        project.path().join("Dockerfile"),
+        format!("FROM alpine:3\nRUN echo {} && sleep 20\n", project.name),
+    )
+    .unwrap();
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let cancelled_at = cancel_after(beam_ctx.cancel.clone(), Duration::from_secs(2));
+
+    let error = executor.open(beam_ctx).await.err().unwrap();
+    let elapsed = tokio::time::Instant::now() - cancelled_at.await.unwrap();
+
+    assert_eq!(error.message, "compose session start cancelled");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "open() took {elapsed:?} to return after cancellation"
+    );
+    assert!(labelled_containers(&project.beam(), true).is_empty());
+}

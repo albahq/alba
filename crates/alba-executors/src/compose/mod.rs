@@ -23,6 +23,7 @@ mod service;
 
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
@@ -42,6 +43,11 @@ use service::ServiceDescription;
 /// failed `docker` spawn.
 const COMPOSE_REQUIREMENT: &str =
     "the compose executor requires Docker with the Compose plugin on the PATH";
+
+/// How long a killed `docker compose run` leaves the daemon to finish a
+/// container creation it had already asked for, before the second removal
+/// that catches it: see `ComposeSession::abandon`.
+const CREATION_SETTLE: Duration = Duration::from_secs(1);
 
 /// Runs beam commands inside a container of a Compose service. See the module
 /// doc comment for the container lifecycle.
@@ -128,9 +134,14 @@ impl Executor for ComposeExecutor {
         if !config.status.success() {
             return Err(step_failed("config", config.status, service));
         }
-        let description = ServiceDescription::parse(&config.stdout, service)?;
+        let stdout = config.stdout.map_err(|cause| ExecError {
+            message: format!("could not read the output of `docker compose config`: {cause}"),
+        })?;
+        let description = ServiceDescription::parse(&stdout, service)?;
 
         if description.has_build {
+            // Quiet, a successful build prints nothing worth keeping: its
+            // stdout, or a failure to read it, does not decide the outcome.
             let build = run_step(project.command(&["build", service]), &beam).await?;
             if !build.status.success() {
                 return Err(step_failed("build", build.status, service));
@@ -149,7 +160,8 @@ impl Executor for ComposeExecutor {
 /// What one `docker compose` step of a session start left behind.
 struct StepOutcome {
     status: ExitStatus,
-    stdout: String,
+    /// The step's whole stdout, or why it could not be read in full.
+    stdout: Result<String, String>,
 }
 
 /// Runs one `docker compose` step of a session start to completion, its
@@ -174,8 +186,10 @@ async fn run_step(mut command: Command, beam: &BeamContext) -> Result<StepOutcom
         .expect("child spawned with piped stderr");
     let mut stdout_task = tokio::spawn(async move {
         let mut buf = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut buf).await;
-        buf
+        tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut buf)
+            .await
+            .map(|_| buf)
+            .map_err(|error| error.to_string())
     });
     let mut stderr_task = tokio::spawn(stream_lines(stderr, Stream::Stderr, beam.output.clone()));
 
@@ -203,14 +217,17 @@ async fn run_step(mut command: Command, beam: &BeamContext) -> Result<StepOutcom
     // `docker exec`.
     let drained = async {
         let (stdout, _) = tokio::join!(&mut stdout_task, &mut stderr_task);
-        stdout.unwrap_or_default()
+        stdout.unwrap_or_else(|error| Err(format!("the reader stopped: {error}")))
     };
     let stdout = match tokio::time::timeout(DRAIN_PERIOD, drained).await {
         Ok(stdout) => stdout,
         Err(_) => {
             stdout_task.abort();
             stderr_task.abort();
-            String::new()
+            Err(format!(
+                "it was still open {} s after the command exited",
+                DRAIN_PERIOD.as_secs()
+            ))
         }
     };
     Ok(StepOutcome { status, stdout })
@@ -313,17 +330,20 @@ async fn wait_until_ready(
             if ready {
                 return Ok(());
             }
-            match tokio::time::timeout(STOP_GRACE, run.wait()).await {
-                Ok(Ok(status)) => Err(step_failed("run", status, &service)),
-                Ok(Err(error)) => Err(ExecError {
-                    message: format!("failed to wait for `docker compose run`: {error}"),
-                }),
-                Err(_) => Err(ExecError {
-                    message: format!(
-                        "the container of service `{service}` closed its output without \
-                         becoming ready"
-                    ),
-                }),
+            tokio::select! {
+                exited = tokio::time::timeout(STOP_GRACE, run.wait()) => match exited {
+                    Ok(Ok(status)) => Err(step_failed("run", status, &service)),
+                    Ok(Err(error)) => Err(ExecError {
+                        message: format!("failed to wait for `docker compose run`: {error}"),
+                    }),
+                    Err(_) => Err(ExecError {
+                        message: format!(
+                            "the container of service `{service}` closed its output without \
+                             becoming ready"
+                        ),
+                    }),
+                },
+                _ = beam.cancel.cancelled() => Err(start_cancelled()),
             }
         }
         status = run.wait() => match status {
@@ -393,13 +413,30 @@ struct ComposeSession {
 
 impl ComposeSession {
     /// Gives up on a session that never became ready: kills the `run`
-    /// process and removes the container, bounded by `STOP_GRACE`, since the
-    /// daemon may still be creating it.
+    /// process unless it already exited, and removes the container, the
+    /// removal bounded by `STOP_GRACE`.
+    ///
+    /// A killed `run` may have asked the daemon to create the container
+    /// moments before: a creation the daemon already accepted can land after
+    /// a first removal and leave a `created` container behind. So a killed
+    /// `run` gets a second removal once [`CREATION_SETTLE`] has passed. A
+    /// `run` that exited on its own has nothing left in flight.
     async fn abandon(mut self) {
         self.stdin = None;
-        let _ = self.run.start_kill();
-        let _ = self.run.wait().await;
-        let _ = tokio::time::timeout(STOP_GRACE, run_quiet(&["rm", "-f", &self.name])).await;
+        let exited = matches!(self.run.try_wait(), Ok(Some(_)));
+        if !exited {
+            let _ = self.run.start_kill();
+            let _ = self.run.wait().await;
+        }
+        let name = self.name.clone();
+        let removal = async move {
+            run_quiet(&["rm", "-f", &name]).await;
+            if !exited {
+                tokio::time::sleep(CREATION_SETTLE).await;
+                run_quiet(&["rm", "-f", &name]).await;
+            }
+        };
+        let _ = tokio::time::timeout(STOP_GRACE, removal).await;
         self.drain_relays().await;
     }
 
