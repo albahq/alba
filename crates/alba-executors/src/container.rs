@@ -20,12 +20,13 @@ use crate::{CommandSpec, ExecContext, ExecError, ExecResult, Stream};
 pub(crate) const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// How long `docker stop` lets a cancelled container's main process exit on
-/// `SIGTERM` before the daemon kills it. A main process that ignores
-/// `SIGTERM` (a `sh` running as PID 1, as the executors start) always takes
-/// this long, so it is shorter than [`STOP_GRACE`]: the removal and the
-/// reaping that follow the stop must still fit inside that bound, or the
-/// container would outlive the cancelled command.
-pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+/// `SIGTERM` before the daemon kills it. The signal reaches only that main
+/// process (the `sh` the executors start as PID 1, which ignores it), never
+/// the command `docker exec` runs beside it, so this wait cannot end the
+/// cancelled command any sooner: it is dead time, kept short so that the
+/// removal and the reaping that follow fit inside [`STOP_GRACE`] with room to
+/// spare on a slow daemon.
+pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long to wait for the stdout/stderr reader tasks to observe EOF
 /// after a `docker exec` child has exited, before giving up on further
