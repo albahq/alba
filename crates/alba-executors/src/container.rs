@@ -219,7 +219,7 @@ pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), Exe
 pub(crate) async fn force_remove(container: &str) {
     // The same removal as [`remove`]: `docker rm -f` reaches everything
     // running inside the container, so no process outlives it. It is
-    // fire-and-forget because a caller that kills instead of closing has
+    // fire-and-forget because a caller tearing down without waiting has
     // no use for the diagnostic `remove` returns on failure.
     let _ = Command::new("docker")
         .args(["rm", "-f", container])
