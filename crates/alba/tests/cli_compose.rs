@@ -12,7 +12,6 @@
 //! token, so the `alba.beam` label of their containers identifies them.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 fn alba() -> assert_cmd::Command {
     assert_cmd::Command::cargo_bin("alba").unwrap()
@@ -155,7 +154,10 @@ fn a_module_two_directories_down_runs_in_the_root_service() {
 }
 
 /// Beams on one service do not wait for one another: each gets a container
-/// of its own.
+/// of its own. Each beam marks its arrival in the shared project directory
+/// and waits for the other's mark, so the run succeeds only if both are
+/// running at once. A wall-clock bound would not show it: on a cold host,
+/// pulling the image and starting the containers dwarf the beams.
 #[test]
 #[ignore = "requires a running docker daemon"]
 fn beams_on_one_service_run_in_parallel() {
@@ -168,23 +170,29 @@ fn beams_on_one_service_run_in_parallel() {
     project.write(
         "Beamfile",
         &format!(
-            "beam {first} {{ executor compose {{ service \"php\" }} run \"sleep 2\" }}\n\
-             beam {second} {{ executor compose {{ service \"php\" }} run \"sleep 2\" }}\n\
-             beam {all} {{ needs [{first}, {second}] run \"echo done\" }}\n"
+            "beam {first} {{ executor compose {{ service \"php\" }} run \"{}\" }}\n\
+             beam {second} {{ executor compose {{ service \"php\" }} run \"{}\" }}\n\
+             beam {all} {{ needs [{first}, {second}] run \"echo done\" }}\n",
+            rendezvous("first", "second"),
+            rendezvous("second", "first"),
         ),
     );
 
-    let started = Instant::now();
     alba()
         .current_dir(project.path())
         .args(["run", &all])
         .assert()
         .success();
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(4),
-        "two 2 s beams on one service took {elapsed:?}, they did not run in parallel"
-    );
+}
+
+/// A shell command that marks `own` as arrived, then waits up to 60 s for
+/// `other` to arrive, failing if it never does. 60 s leaves room for a cold
+/// image pull before the other beam's container starts.
+fn rendezvous(own: &str, other: &str) -> String {
+    format!(
+        "touch {own}.arrived; for i in $(seq 600); do test -f {other}.arrived && exit 0; \
+         sleep 0.1; done; echo {other} never arrived >&2; exit 1"
+    )
 }
 
 const WITH_DATABASE: &str = "services:\n  php:\n    image: alpine:3\n    volumes:\n      - .:/app\n    depends_on:\n      - db\n  db:\n    image: alpine:3\n    command: sleep 300\n";
