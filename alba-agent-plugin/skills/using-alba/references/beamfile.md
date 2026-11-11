@@ -127,7 +127,8 @@ literal.
   (image, build, mounts, user, environment) stays in the Compose file.
   `service` is required; `file` is the Compose file's path relative to
   the declaring Beamfile's directory, and without it Compose's own lookup
-  applies (the beam's directory, then each parent).
+  applies (the beam's directory, then each parent). Needs alba 0.5.0 or
+  later and `docker compose` on the `PATH`.
   - A command's host working directory maps to the container through
     the service's bind mounts (longest matching host path); if none
     covers it the command fails naming the `cwd` and the mounts.
@@ -137,6 +138,8 @@ literal.
     conditions, left alone when running, and put back in their previous
     state when the command ends. List `compose.yaml` and the Dockerfiles
     in `inputs`: the cache only sees the block's text.
+  - A `kill -9` of Alba, or a second Ctrl-C, skips that restore: the
+    dependencies Alba started stay up.
 - **`<name> { option value ... }`**: an external `alba-executor-<name>`
   binary on the `PATH`. Resolution happens at plan time; a missing plugin
   fails the whole run before any beam starts.

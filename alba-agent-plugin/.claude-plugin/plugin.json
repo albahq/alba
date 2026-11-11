@@ -1,6 +1,6 @@
 {
   "name": "alba",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Teaches AI coding agents how Alba works: read and write Beamfiles, run the alba CLI, and validate a Beamfile after every edit.",
   "author": {
     "name": "JDevelop",
