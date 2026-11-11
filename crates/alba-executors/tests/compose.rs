@@ -1012,6 +1012,50 @@ volumes:
 
 #[tokio::test]
 #[ignore = "requires a running docker daemon"]
+async fn a_one_shot_that_already_ran_is_run_again_and_left_exited() {
+    let project = ComposeProject::new(
+        "dep-one-shot-ran",
+        "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 1 && echo run >> /data/runs\"]
+    volumes: [\"data:/data\"]
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\", \"data:/data\"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  data:
+",
+    );
+    assert!(project.compose(&["up", "-d", "migrate"]).status.success());
+    assert!(project.compose(&["wait", "migrate"]).status.success());
+    let migrate = project.container_id("migrate").unwrap();
+    let executor = ComposeExecutor::new();
+
+    // Run again by `up`, as `docker compose run` would, and awaited.
+    let (exit_code, output) = first_command(&project, &executor, "wc -l < /data/runs").await;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, vec!["2"]);
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("migrate"), Some(migrate.clone()));
+    let state = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Status}} {{.State.ExitCode}}",
+            &migrate,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&state.stdout).trim(), "exited 0");
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
 async fn a_one_shot_dependency_that_fails_fails_the_beam() {
     let project = ComposeProject::new(
         "dep-one-shot-fails",
