@@ -220,7 +220,7 @@ before reading anything else. An ordinary run emits six kinds:
 | `beam_cached` | `beam`, for a beam the cache answered instead of running. |
 | `beam_output` | `beam`, `stream` (`stdout` or `stderr`), `text`, `replayed` (`true` for a line replayed from the cache rather than produced now). |
 | `beam_finished` | `beam`, `status`, `exit_code` (`null` unless the beam ran and exited non-zero), `duration_ms`. |
-| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned, and `cleanup_errors`, the errors met while releasing what executors held for the run (a non-empty list makes the exit code `1`). |
+| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned, and `cleanup_errors`, the errors met while releasing what executors held for the run (a non-empty list makes the exit code `1`). Always empty within a `--watch` session, whose executors are shut down only when the session ends: those errors are reported on stderr then, as `cleanup failed: <message>` lines. |
 
 A watch session's stream carries three more kinds; see
 [Watch mode](#watch-mode). No run summary is printed to stderr in this
