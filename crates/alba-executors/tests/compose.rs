@@ -507,6 +507,29 @@ async fn a_failing_build_puts_its_log_on_the_beams_output() {
     );
 }
 
+/// Options that evaluation would have refused can still reach `open` from a
+/// caller that builds its own `BeamContext`: a `service` that reads as a flag
+/// is refused before any `docker` command line is built, so this runs
+/// without a daemon.
+#[tokio::test]
+async fn a_service_that_reads_as_a_flag_is_refused_at_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, mut output_rx) = beam_context("flag-service", dir.path(), options("--help"));
+    let error = executor.open(beam_ctx).await.err().unwrap();
+
+    assert!(
+        error.message.contains("invalid compose options")
+            && error.message.contains("must not start with `-`"),
+        "unexpected message: {}",
+        error.message
+    );
+    assert!(
+        drain_text(&mut output_rx).await.is_empty(),
+        "no docker command may have run"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires a running docker daemon"]
 async fn an_unknown_service_fails_with_composes_message() {

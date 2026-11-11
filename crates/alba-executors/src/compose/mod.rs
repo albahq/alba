@@ -118,6 +118,12 @@ impl ComposeOptions {
         if options.service.is_empty() {
             return Err(invalid("`service` is empty".to_string()));
         }
+        // Evaluation refuses it too, but `open` is the last stop before the
+        // value lands on a `docker` command line, where it would read as a
+        // flag.
+        if options.service.starts_with('-') {
+            return Err(invalid("`service` must not start with `-`".to_string()));
+        }
         Ok(options)
     }
 }
