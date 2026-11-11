@@ -26,6 +26,7 @@
 
 use std::path::PathBuf;
 
+mod container;
 mod docker;
 mod embedded;
 mod plugin;
