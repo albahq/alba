@@ -1239,6 +1239,7 @@ fn build_executor(
             no_options("system_shell", &options, decl).map(|()| ExecutorKind::SystemShell)
         }
         "docker" => build_docker(decl, options),
+        "compose" => build_compose(decl, options),
         other => Ok(ExecutorKind::Plugin {
             name: other.to_string(),
             options: options.into_iter().map(|(k, _, v)| (k, v)).collect(),
@@ -1385,6 +1386,60 @@ fn build_docker(
         workdir,
         user,
     })
+}
+
+/// Builds `ExecutorKind::Compose` from its already-rendered options:
+/// `service` (required, never a flag lookalike, so it can not be mistaken for
+/// an option by the `docker` command line) and `file`.
+fn build_compose(
+    decl: &ExecutorDecl,
+    options: Vec<(String, Span, OptionValue)>,
+) -> Result<ExecutorKind, CoreError> {
+    let mut service = None;
+    let mut file = None;
+    for (key, span, value) in options {
+        match (key.as_str(), value) {
+            ("service", OptionValue::Str(v)) if !v.is_empty() => {
+                if v.starts_with('-') {
+                    return Err(CoreError::new(
+                        "executor `compose` option `service` must not start with `-`".to_string(),
+                        span,
+                    ));
+                }
+                service = Some(v);
+            }
+            ("service", _) => {
+                return Err(CoreError::new(
+                    "executor `compose` option `service` must be a non-empty string".to_string(),
+                    span,
+                ));
+            }
+            ("file", OptionValue::Str(v)) if !v.is_empty() => file = Some(v),
+            ("file", _) => {
+                return Err(CoreError::new(
+                    "executor `compose` option `file` must be a non-empty string".to_string(),
+                    span,
+                ));
+            }
+            (other, _) => {
+                let err = CoreError::new(
+                    format!("executor `compose` does not take an option `{other}`"),
+                    span,
+                );
+                return Err(match suggest(other, ["service", "file"].into_iter()) {
+                    Some(c) => err.with_help(format!("did you mean `{c}`?")),
+                    None => err,
+                });
+            }
+        }
+    }
+    let Some(service) = service else {
+        return Err(CoreError::new(
+            "executor `compose` requires a `service` option".to_string(),
+            decl.name.span,
+        ));
+    };
+    Ok(ExecutorKind::Compose { service, file })
 }
 
 #[cfg(test)]
@@ -2095,6 +2150,123 @@ beam b { run "x" }
                 .contains("executor `docker` does not take an option `volume`")
         );
         assert_eq!(err.help.as_deref(), Some("did you mean `volumes`?"));
+    }
+
+    #[test]
+    fn executor_compose_carries_its_service() {
+        let project = load_str(r#"beam t { executor compose { service "php" } run "x" }"#).unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Compose {
+                service: "php".into(),
+                file: None,
+            }
+        );
+    }
+
+    #[test]
+    fn executor_compose_carries_its_file() {
+        let project = load_str(
+            r#"beam t { executor compose { service "php" file "../../compose.yaml" } run "x" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Compose {
+                service: "php".into(),
+                file: Some("../../compose.yaml".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn compose_options_interpolate() {
+        let project = load_str(
+            r#"let svc = "php"
+beam t { executor compose { service "{svc}" } run "x" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project.beams[0].executor,
+            ExecutorKind::Compose {
+                service: "php".into(),
+                file: None,
+            }
+        );
+    }
+
+    #[test]
+    fn compose_requires_a_service() {
+        for source in [
+            r#"beam t { executor compose { } run "x" }"#,
+            r#"beam t { executor compose { file "c.yaml" } run "x" }"#,
+        ] {
+            let err = load_str(source).unwrap_err();
+            assert!(
+                err.message
+                    .contains("executor `compose` requires a `service` option"),
+                "{source}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn compose_service_must_be_a_non_empty_string() {
+        for source in [
+            r#"beam t { executor compose { service "" } run "x" }"#,
+            r#"beam t { executor compose { service ["php"] } run "x" }"#,
+        ] {
+            let err = load_str(source).unwrap_err();
+            assert!(
+                err.message
+                    .contains("executor `compose` option `service` must be a non-empty string"),
+                "{source}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn compose_service_must_not_look_like_a_flag() {
+        let err =
+            load_str(r#"beam t { executor compose { service "--help" } run "x" }"#).unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `compose` option `service` must not start with `-`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn compose_file_must_be_a_non_empty_string() {
+        let err = load_str(r#"beam t { executor compose { service "php" file "" } run "x" }"#)
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `compose` option `file` must be a non-empty string"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn compose_rejects_an_unknown_option_and_suggests_the_nearest() {
+        let err = load_str(r#"beam t { executor compose { servce "php" } run "x" }"#).unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `compose` does not take an option `servce`")
+        );
+        assert_eq!(err.help.as_deref(), Some("did you mean `service`?"));
+
+        let err = load_str(r#"beam t { executor compose { service "php" user "1000" } run "x" }"#)
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("executor `compose` does not take an option `user`")
+        );
+        assert_eq!(err.help, None);
     }
 
     #[test]

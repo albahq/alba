@@ -46,7 +46,7 @@ use alba_engine::{
     CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection, SessionEnd,
     SessionError, WatchExit,
 };
-use alba_executors::{DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
+use alba_executors::{ComposeExecutor, DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
@@ -119,6 +119,7 @@ fn executors(beamfile: &Path) -> Executors {
         embedded: Arc::new(EmbeddedShellExecutor),
         system: Arc::new(SystemShellExecutor),
         docker: Arc::new(DockerExecutor::new(alba_engine::beamfile_dir(beamfile))),
+        compose: Arc::new(ComposeExecutor::new()),
     }
 }
 

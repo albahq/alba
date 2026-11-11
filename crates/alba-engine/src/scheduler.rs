@@ -98,25 +98,28 @@ pub struct Executors {
     pub system: Arc<dyn Executor>,
     /// `ExecutorKind::Docker`: a beam that opted into a container.
     pub docker: Arc<dyn Executor>,
+    /// `ExecutorKind::Compose`: a beam that runs in a Compose service.
+    pub compose: Arc<dyn Executor>,
 }
 
 impl Executors {
-    /// All three slots on the same executor: what tests and `alba check`
+    /// Every slot on the same executor: what tests and `alba check`
     /// want.
     pub fn uniform(executor: Arc<dyn Executor>) -> Self {
         Self {
             embedded: Arc::clone(&executor),
             system: Arc::clone(&executor),
-            docker: executor,
+            docker: Arc::clone(&executor),
+            compose: executor,
         }
     }
 
     /// Shuts down every distinct executor among the slots, once each
-    /// (`Arc::ptr_eq`: [`Executors::uniform`] fills all three with one),
+    /// (`Arc::ptr_eq`: [`Executors::uniform`] fills every slot with one),
     /// attempting every slot even after one failed. Returns the error
     /// messages in slot order.
     pub async fn shutdown(&self) -> Vec<String> {
-        let slots = [&self.embedded, &self.system, &self.docker];
+        let slots = [&self.embedded, &self.system, &self.docker, &self.compose];
         let mut errors = Vec::new();
         for (index, executor) in slots.iter().enumerate() {
             if slots[..index]
@@ -143,6 +146,7 @@ impl Executors {
             ExecutorKind::Shell => Arc::clone(&self.embedded),
             ExecutorKind::SystemShell => Arc::clone(&self.system),
             ExecutorKind::Docker { .. } => Arc::clone(&self.docker),
+            ExecutorKind::Compose { .. } => Arc::clone(&self.compose),
             ExecutorKind::Plugin { .. } => {
                 unreachable!("plugin beams are dispatched in `run`, never through `for_beam`")
             }
@@ -179,6 +183,12 @@ fn executor_label(kind: &ExecutorKind) -> String {
             }
             push_field(&mut label, workdir.as_deref().unwrap_or(""));
             push_field(&mut label, user.as_deref().unwrap_or(""));
+            label
+        }
+        ExecutorKind::Compose { service, file } => {
+            let mut label = String::from("compose");
+            push_field(&mut label, service);
+            push_field(&mut label, file.as_deref().unwrap_or(""));
             label
         }
         ExecutorKind::Plugin { name, options } => {
@@ -252,6 +262,10 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
             "volumes": volumes,
             "workdir": workdir,
             "user": user,
+        }),
+        ExecutorKind::Compose { service, file } => serde_json::json!({
+            "service": service,
+            "file": file,
         }),
         ExecutorKind::Plugin { options, .. } => serde_json::Value::Object(
             options
@@ -530,9 +544,10 @@ fn resolve_plugins(
                      executor nor `{binary}` on the PATH",
                     beam.id.0,
                 );
-                if let Some(candidate) =
-                    alba_core::suggest(name, ["shell", "system_shell", "docker"].into_iter())
-                {
+                if let Some(candidate) = alba_core::suggest(
+                    name,
+                    ["shell", "system_shell", "docker", "compose"].into_iter(),
+                ) {
                     message.push_str(&format!(" — did you mean `{candidate}`?"));
                 }
                 return Err(EngineError::Unschedulable(message));
@@ -1255,6 +1270,33 @@ mod tests {
     fn shell_labels_are_unchanged() {
         assert_eq!(executor_label(&ExecutorKind::Shell), "embedded");
         assert_eq!(executor_label(&ExecutorKind::SystemShell), "system");
+    }
+
+    #[test]
+    fn a_compose_label_changes_with_its_service_and_its_file() {
+        let compose = |service: &str, file: Option<&str>| ExecutorKind::Compose {
+            service: service.into(),
+            file: file.map(Into::into),
+        };
+        let docker = ExecutorKind::Docker {
+            image: Some("php".into()),
+            build: None,
+            dockerfile: None,
+            volumes: vec![],
+            workdir: None,
+            user: None,
+        };
+        let labels: Vec<String> = [
+            compose("php", None),
+            compose("node", None),
+            compose("php", Some("c.yaml")),
+            docker,
+        ]
+        .iter()
+        .map(executor_label)
+        .collect();
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "labels collided: {labels:?}");
     }
 
     #[test]

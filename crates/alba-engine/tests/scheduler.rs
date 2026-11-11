@@ -744,6 +744,7 @@ beam ship {
             embedded: fake_a.clone(),
             system: fake_a.clone(),
             docker: fake_b.clone(),
+            compose: fake_a.clone(),
         },
         CancellationToken::new(),
     )
@@ -776,6 +777,57 @@ beam ship {
     assert!(
         fake_a.events() == [FakeEvent::ShutDown],
         "neither the embedded nor the system slot must see this beam, only the shutdown"
+    );
+}
+
+/// A compose beam dispatches to the `compose` executor slot, never to
+/// `embedded`, `system` or `docker`, and its service and file reach the
+/// session as `BeamContext.options`.
+#[tokio::test]
+async fn a_compose_beam_dispatches_to_the_compose_slot_with_its_options() {
+    const SOURCE: &str = r#"
+beam test {
+  executor compose { service "php" }
+  run "phpunit"
+}
+"#;
+
+    let others = Arc::new(FakeExecutor::new());
+    let compose = Arc::new(FakeExecutor::new());
+    let outcome = run_target_with_executors(
+        SOURCE,
+        "test",
+        options(2, false),
+        Executors {
+            embedded: others.clone(),
+            system: others.clone(),
+            docker: others.clone(),
+            compose: compose.clone(),
+        },
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(ids(&outcome.summary().succeeded), ["test"]);
+    assert_eq!(
+        compose.events(),
+        vec![
+            FakeEvent::Opened {
+                beam: "test".to_string(),
+                options: serde_json::json!({"service": "php", "file": null}),
+            },
+            FakeEvent::Executed {
+                command: "phpunit".to_string(),
+            },
+            FakeEvent::Closed {
+                beam: "test".to_string(),
+            },
+            FakeEvent::ShutDown,
+        ]
+    );
+    assert!(
+        others.events() == [FakeEvent::ShutDown],
+        "no other slot must see this beam, only the shutdown"
     );
 }
 
@@ -860,6 +912,7 @@ beam all { needs [a, b] run "step all" }
         embedded: embedded.clone(),
         system: system.clone(),
         docker: Arc::new(FakeExecutor::new()),
+        compose: Arc::new(FakeExecutor::new()),
     };
 
     let outcome = run_target_with_executors(

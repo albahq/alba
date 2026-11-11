@@ -59,8 +59,16 @@ pub enum ExecutorKind {
         workdir: Option<String>,
         user: Option<String>,
     },
+    /// `executor compose { service "..." file "..." }`: the engine runs this
+    /// beam's commands in a one-off container of a Docker Compose `service`.
+    /// `file` is the Compose file, relative to the declaring Beamfile's
+    /// directory, when it is not the one Compose finds on its own.
+    Compose {
+        service: String,
+        file: Option<String>,
+    },
     /// `executor <name> { ... }` for any name that is not `shell`,
-    /// `system_shell`, or `docker`. Not an error: `name` is resolved at
+    /// `system_shell`, `docker`, or `compose`. Not an error: `name` is resolved at
     /// plan time to an external `alba-executor-<name>` binary on the
     /// `PATH`, and `options` is handed to it verbatim.
     Plugin {
