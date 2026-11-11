@@ -20,10 +20,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 /// A throwaway Compose project in a temp directory. Its project name,
 /// `alba-it-<suffix>-<pid>`, is also the name of the beam a test opens on it
-/// (see [`ComposeProject::beam`]). Dropping it runs
+/// (see [`ComposeProject::beam`]). Dropping it removes every container
+/// labelled for one of its beams, then runs
 /// `docker compose --profile "*" down -v --rmi local` on that project, which
-/// also removes the images Compose built for it, and removes every container
-/// labelled for one of its beams.
+/// also removes the images Compose built for it.
 struct ComposeProject {
     dir: tempfile::TempDir,
     name: String,
@@ -88,7 +88,16 @@ impl ComposeProject {
 
 impl Drop for ComposeProject {
     fn drop(&mut self) {
+        self.remove_labelled_containers();
+        // Last: `down` leaves the one-off containers of `docker compose run`,
+        // and the project's network stays behind while one is attached.
         let _ = self.compose(&["--profile", "*", "down", "-v", "--rmi", "local"]);
+    }
+}
+
+impl ComposeProject {
+    /// Removes every container labelled for one of this project's beams.
+    fn remove_labelled_containers(&self) {
         let Ok(output) = std::process::Command::new("docker")
             .args([
                 "ps",
