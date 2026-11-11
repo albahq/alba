@@ -18,7 +18,8 @@ pub(super) enum Before {
     Stopped,
 }
 
-/// What `docker compose ps -a --format json` printed, as service -> is it running.
+/// What `docker compose ps -a --format json` printed, as service -> is it
+/// running.
 ///
 /// Only a container `created`, `exited` or `dead` counts as not running: any
 /// other state (`running`, `restarting`, `paused`, ...) means the container
@@ -49,7 +50,8 @@ struct PsLine {
     state: String,
 }
 
-/// The state to restore for each dependency that is not running. Running ones are absent from the result.
+/// The state to restore for each dependency that is not running. Running
+/// ones are absent from the result.
 pub(super) fn to_restore(
     dependencies: &[String],
     states: &HashMap<String, bool>,
@@ -64,7 +66,8 @@ pub(super) fn to_restore(
         .collect()
 }
 
-/// The dependencies Alba started in one Compose project, and how to address that project again.
+/// The dependencies Alba started in one Compose project, and how to address
+/// that project again.
 #[derive(Debug)]
 pub(super) struct ProjectRecord {
     pub dir: PathBuf,
@@ -77,7 +80,8 @@ pub(super) struct ProjectRecord {
 }
 
 impl ProjectRecord {
-    /// Adds dependencies not yet recorded. One already recorded keeps its first state.
+    /// Adds dependencies not yet recorded. One already recorded keeps its
+    /// first state.
     pub fn record(&mut self, restore: Vec<(String, Before)>) {
         for (service, before) in restore {
             self.started.entry(service).or_insert(before);

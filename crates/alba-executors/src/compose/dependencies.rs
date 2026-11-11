@@ -55,9 +55,11 @@ impl Dependencies {
     /// warning line on the beam's output instead of failing the start; a
     /// one-shot that an optional dependency and another dependency both
     /// reach runs once per `up`. An optional dependency that is not a direct
-    /// one follows Compose's own `up`, which fails when it cannot start. `up` honours the conditions of the transitive
-    /// dependencies itself; the direct ones are then checked, since `up`
-    /// names them rather than depending on them:
+    /// one follows Compose's own `up`, which fails when it cannot start.
+    ///
+    /// `up` honours the conditions of the transitive dependencies itself;
+    /// the direct ones are then checked, since `up` names them rather than
+    /// depending on them:
     ///
     /// - `service_started` needs nothing more;
     /// - `service_healthy` is awaited with `up --wait --no-deps`, which waits
