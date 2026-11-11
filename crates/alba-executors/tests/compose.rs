@@ -1231,6 +1231,43 @@ fn volume_exists(name: &str) -> bool {
         .any(|line| line == name)
 }
 
+/// A dependency whose healthcheck passes only after 30 s, keeping the
+/// session start of `tool` waiting.
+const TOOL_WITH_SLOW_DB: &str = "services:
+  db:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 30 && touch /tmp/ready && sleep 3600\"]
+    stop_grace_period: 1s
+    healthcheck:
+      test: [\"CMD\", \"test\", \"-f\", \"/tmp/ready\"]
+      interval: 500ms
+      retries: 100
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      db:
+        condition: service_healthy
+";
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn dropping_the_open_while_a_dependency_starts_puts_it_back() {
+    let project = ComposeProject::new("dep-drop-start", TOOL_WITH_SLOW_DB);
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+
+    let dropped = tokio::time::timeout(Duration::from_secs(3), executor.open(beam_ctx)).await;
+    assert!(dropped.is_err(), "the open should still be waiting for db");
+    assert!(
+        project.container_id("db").is_some(),
+        "db should have been created"
+    );
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+}
+
 #[tokio::test]
 #[ignore = "requires a running docker daemon"]
 async fn shutdown_never_removes_a_volume() {

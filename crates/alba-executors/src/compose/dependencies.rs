@@ -118,6 +118,13 @@ impl Dependencies {
 
     /// Puts every dependency recorded back in the state it had: see
     /// `ComposeExecutor::shutdown`.
+    ///
+    /// A project whose start was interrupted is released a second time once
+    /// `CREATION_SETTLE` has passed, for a creation or a start its `up` had
+    /// sent the daemon before being killed. Accepted limit: that second pass
+    /// is time-based, so an operation the daemon completes later than that
+    /// still leaves its container behind (labelled with the project, and
+    /// removed by the next `docker compose down`).
     pub async fn release(&self) -> Result<(), ExecError> {
         let mut records: Vec<_> = self
             .records
@@ -182,8 +189,10 @@ impl Dependencies {
 /// that does not exist) makes `up` exit while the daemon is still creating a
 /// sibling, whose container then appears after the `up`, too late for a
 /// removal at shutdown to see it. An `up` that did not run to its end (it
-/// was cancelled) may still have had one such operation in flight: the
-/// record says so, for `shutdown` to look again.
+/// was cancelled, or the future of the session start was dropped, which
+/// kills it) may still have had one such operation in flight: the record
+/// is marked before the spawn and the mark kept, for `shutdown` to look
+/// again.
 async fn start_up(
     project: &Project,
     beam: &BeamContext,
@@ -199,13 +208,9 @@ async fn start_up(
     args.extend_from_slice(extra);
     args.extend(services.iter().map(String::as_str));
     // A successful `up` has nothing worth keeping on stdout.
-    let up = match run_step(project.command(&args), beam).await {
-        Ok(up) => up,
-        Err(error) => {
-            record.interrupted = true;
-            return Err(error);
-        }
-    };
+    let previously = record.up_started();
+    let up = run_step(project.command(&args), beam).await?;
+    record.up_finished(previously);
     if !up.status.success() {
         let code = up.status.code().unwrap_or(-1);
         return Err(ExecError {

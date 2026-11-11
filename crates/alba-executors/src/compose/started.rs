@@ -71,7 +71,8 @@ pub(super) struct ProjectRecord {
     pub file: Option<PathBuf>,
     pub started: BTreeMap<String, Before>,
     /// Whether an `up` of this project's dependencies was cut short since
-    /// the last shutdown, and may have left an operation in flight.
+    /// the last shutdown (cancelled, or its future dropped), and may have
+    /// left an operation in flight.
     pub interrupted: bool,
 }
 
@@ -81,6 +82,20 @@ impl ProjectRecord {
         for (service, before) in restore {
             self.started.entry(service).or_insert(before);
         }
+    }
+
+    /// Marks an `up` of this project's dependencies as in flight, before it
+    /// is spawned, and returns the mark it had: an `up` whose future is
+    /// dropped or cancelled never reaches [`Self::up_finished`], so the
+    /// record stays interrupted.
+    pub fn up_started(&mut self) -> bool {
+        std::mem::replace(&mut self.interrupted, true)
+    }
+
+    /// The `up` that [`Self::up_started`] marked ran to its end: the record
+    /// gets back the mark it had before.
+    pub fn up_finished(&mut self, previously: bool) {
+        self.interrupted = previously;
     }
 
     /// The services to `rm -s -f` and the services to `stop`, each sorted.
@@ -180,6 +195,29 @@ mod tests {
         record.record(vec![("db".to_string(), Before::Stopped)]);
 
         assert_eq!(record.release_plan(), (names(&["db"]), vec![]));
+    }
+
+    #[test]
+    fn an_up_that_never_finishes_leaves_the_record_interrupted() {
+        let mut record = record();
+
+        // The future running the `up` is dropped: `up_finished` never runs.
+        let _ = record.up_started();
+
+        assert!(record.interrupted);
+    }
+
+    #[test]
+    fn an_up_that_finishes_keeps_an_earlier_interruption() {
+        let mut record = record();
+        let previously = record.up_started();
+        record.up_finished(previously);
+        assert!(!record.interrupted);
+
+        let _ = record.up_started();
+        let previously = record.up_started();
+        record.up_finished(previously);
+        assert!(record.interrupted);
     }
 
     #[test]
