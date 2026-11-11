@@ -1097,8 +1097,8 @@ to clean up.
 
 - A dependency that had no container before the run: remove it with
   `docker compose rm -s -f <service>`. Stopping it instead leaves a
-  stopped container that the next run records as stopped, and puts back
-  stopped rather than removing.
+  stopped container that the next run records as stopped, so the next
+  normal exit stops it instead of removing it.
 - A dependency that was stopped before the run: stop it again with
   `docker compose stop <service>`.
 
