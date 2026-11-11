@@ -26,6 +26,7 @@
 
 use std::path::PathBuf;
 
+mod compose;
 mod container;
 mod docker;
 mod embedded;
@@ -37,6 +38,7 @@ mod fake;
 
 pub mod protocol;
 
+pub use compose::ComposeExecutor;
 pub use docker::DockerExecutor;
 pub use embedded::EmbeddedShellExecutor;
 pub use plugin::PluginExecutor;
