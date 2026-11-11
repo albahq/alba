@@ -1091,9 +1091,16 @@ docker rm -f $(docker ps -aq --filter label=alba.beam)
 ```
 
 A dependency that Alba itself started stays up after a `kill -9` or a
-second Ctrl-C. Stop it with `docker compose stop <service>`, and only if
+second Ctrl-C. Put it back the way a normal exit would have, and only if
 you know Alba started it: a service you started yourself is not Alba's
 to clean up.
+
+- A dependency that had no container before the run: remove it with
+  `docker compose rm -s -f <service>`. Stopping it instead leaves a
+  stopped container that the next run records as stopped, and puts back
+  stopped rather than removing.
+- A dependency that was stopped before the run: stop it again with
+  `docker compose stop <service>`.
 
 ## Plugins
 
