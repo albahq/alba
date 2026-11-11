@@ -186,6 +186,9 @@ pub(crate) async fn exec(
 /// Removes `container` with `docker rm -f`. A container that is already gone
 /// is not an error. `requirement` is handed to [`spawn_error`].
 pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), ExecError> {
+    // Piped (not null) stderr: a genuine failure here reaches the user
+    // (the engine downgrades it to a notice, but does not discard it), so
+    // its diagnosis should not be reduced to a bare exit code.
     let output = Command::new("docker")
         .args(["rm", "-f", container])
         .stdin(Stdio::null())
@@ -199,10 +202,10 @@ pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), Exe
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("No such container") {
-        // A cancelled `execute` already stopped and removed this
-        // container (see its teardown sequence); `close` still runs
-        // unconditionally afterwards, so this is the expected,
-        // truthful outcome, not a failure the user needs to see.
+        // A cancelled `exec` already stopped and removed this container
+        // (see its cancellation teardown), and callers still remove it
+        // unconditionally afterwards, so this is the expected, truthful
+        // outcome, not a failure the user needs to see.
         return Ok(());
     }
     let code = output.status.code().unwrap_or(-1);
@@ -214,11 +217,10 @@ pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), Exe
 /// The fire-and-forget form of [`remove`], for callers with no use for its
 /// diagnostic.
 pub(crate) async fn force_remove(container: &str) {
-    // The same removal `close` performs — `docker rm -f` reaches
-    // everything running inside the container, which is the whole
-    // process group concern `kill`'s contract cares about — but
-    // fire-and-forget: a caller reaching for `kill` instead of `close`
-    // has no use for the diagnostic `close` returns on failure.
+    // The same removal as [`remove`]: `docker rm -f` reaches everything
+    // running inside the container, so no process outlives it. It is
+    // fire-and-forget because a caller that kills instead of closing has
+    // no use for the diagnostic `remove` returns on failure.
     let _ = Command::new("docker")
         .args(["rm", "-f", container])
         .stdin(Stdio::null())
