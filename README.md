@@ -1059,7 +1059,8 @@ Accepted limits:
   brings it back.
 - Two Alba processes running at once on the same Compose project do not
   share their records: one may stop a dependency the other still uses.
-- After a `kill -9` of Alba, started dependencies stay up.
+- After a `kill -9` of Alba, or a second Ctrl-C that abandons the orderly
+  stop, started dependencies stay up.
 - `docker compose run` creates the project's default network when it does
   not exist, and leaves it.
 - When a start is interrupted (a cancelled run), Alba makes a second
@@ -1089,9 +1090,10 @@ remove it as for the docker executor:
 docker rm -f $(docker ps -aq --filter label=alba.beam)
 ```
 
-A dependency that Alba itself started stays up after a `kill -9`. Stop
-it with `docker compose stop <service>`, and only if you know Alba
-started it: a service you started yourself is not Alba's to clean up.
+A dependency that Alba itself started stays up after a `kill -9` or a
+second Ctrl-C. Stop it with `docker compose stop <service>`, and only if
+you know Alba started it: a service you started yourself is not Alba's
+to clean up.
 
 ## Plugins
 

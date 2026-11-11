@@ -807,7 +807,9 @@ async fn consume(
 /// [`run_exit_code`]. Because stopping is bounded but not instant, a
 /// second signal gives up on the orderly path and leaves immediately with
 /// the same code. Commands still alive at that point are left running,
-/// which is the user's explicit second-Ctrl-C request to stop waiting.
+/// which is the user's explicit second-Ctrl-C request to stop waiting, and
+/// so are the dependencies an executor started for the run, since nothing
+/// gets to shut the executors down: the line it prints says so.
 async fn watch_interrupts(cancel: CancellationToken) {
     // An `Err` means no signal handler could be installed at all; there is
     // nothing to fall back to, so the watcher simply stands down.
@@ -819,7 +821,7 @@ async fn watch_interrupts(cancel: CancellationToken) {
     if tokio::signal::ctrl_c().await.is_err() {
         return;
     }
-    LineSink::stderr().line("aborting");
+    LineSink::stderr().line("aborting; dependencies Alba started may be left running");
     std::process::exit(EXIT_INTERRUPTED);
 }
 
