@@ -457,13 +457,12 @@ async fn tui_execute(
     // Everything below writes to a terminal the guard restored when
     // `alba_tui::run` returned, so the alternate screen is gone and stderr
     // reaches the shell the user is left looking at.
-    if let Some(failure) = &failure {
-        err.line(&failure.report);
-    }
-
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
+            if let Some(failure) = &failure {
+                err.line(&failure.report);
+            }
             err.line(&format!("the interface failed: {error}"));
             return EXIT_ALBA_ERROR;
         }
@@ -477,7 +476,7 @@ async fn tui_execute(
         Selection::Affected { reference, .. } => Some(reference.as_str()),
         Selection::Beam(_) => None,
     };
-    replay(&mut err, &outcome, affected_by, colour);
+    leave(&mut err, &outcome, affected_by, colour, failure.as_ref());
 
     match failure {
         // A session that did not end on its own terms reports the code the
@@ -626,6 +625,21 @@ fn replay<W: std::io::Write>(
         for line in lines {
             err.line(if colour { &line.raw } else { &line.text });
         }
+    }
+}
+
+/// What stderr is left with once the interface is gone: the [`replay`],
+/// then the session's own report when it did not end on its own terms.
+fn leave<W: std::io::Write>(
+    err: &mut LineSink<W>,
+    outcome: &alba_tui::TuiOutcome,
+    affected_by: Option<&str>,
+    colour: bool,
+    failure: Option<&SessionFailure>,
+) {
+    replay(err, outcome, affected_by, colour);
+    if let Some(failure) = failure {
+        err.line(&failure.report);
     }
 }
 
@@ -1154,6 +1168,43 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// The session's own report comes after the replay of the failed
+    /// beams, so it is the last thing on the screen, where the headless
+    /// watch puts it too.
+    #[test]
+    fn the_session_report_follows_the_replay() {
+        let summary = RunSummary {
+            failed: vec![BeamId("bad".to_string())],
+            ..RunSummary::default()
+        };
+        let logs = vec![("bad".to_string(), plain_lines(vec!["red".to_string()]))];
+        let failure = session_failure(Ok(ended(WatchExit::Interrupted, &["db would not stop"])));
+
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut sink = LineSink::new(&mut buffer);
+            leave(
+                &mut sink,
+                &outcome(Some(summary), logs),
+                None,
+                false,
+                failure.as_ref(),
+            );
+        }
+        let lines: Vec<String> = String::from_utf8(buffer)
+            .expect("the report is UTF-8")
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("cleanup failed: db would not stop"),
+            "got: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l == "red"), "got: {lines:?}");
     }
 
     /// Wraps plain strings into escape-free `ReplayLine`s (`raw` and `text`
