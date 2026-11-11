@@ -999,8 +999,8 @@ is replaced by the beam's commands and its ports are not published.
 Alba passes none of `--user`, `-e`, `-v`, `-w`, or `--service-ports` to
 `docker compose run` (the beam's `env` goes to each command, as with the
 docker executor): the container runs as the service's own user, so who
-owns the files it writes is whatever `compose.yaml` arranged. A service behind a profile
-can be targeted without activating the profile by hand.
+owns the files it writes is whatever `compose.yaml` arranged. A service
+behind a profile can be targeted without activating the profile by hand.
 
 When the service declares a `build`, Alba runs `docker compose build
 <service>` before the beam's commands, every time the beam actually runs:
@@ -1086,16 +1086,17 @@ remove it as for the docker executor:
 docker rm -f $(docker ps -aq --filter label=alba.beam)
 ```
 
-A dependency Alba started and could not put back stays up after a
-`kill -9`; stop it with `docker compose stop <service>`.
+A dependency that Alba itself started stays up after a `kill -9`. Stop
+it with `docker compose stop <service>`, and only if you know Alba
+started it: a service you started yourself is not Alba's to clean up.
 
 ## Plugins
 
 `executor <name> { ... }` for any `name` that is not `shell`,
-`system_shell`, `docker`, or `compose` refers to an external plugin: a separate
-`alba-executor-<name>` binary on the `PATH` that Alba spawns and speaks
-a line-oriented JSON protocol to, one process per beam, kept alive for
-every command in that beam the same way the docker executor keeps its
+`system_shell`, `docker`, or `compose` refers to an external plugin: a
+separate `alba-executor-<name>` binary on the `PATH` that Alba spawns and
+speaks a line-oriented JSON protocol to, one process per beam, kept alive
+for every command in that beam the same way the docker executor keeps its
 container alive.
 
 Alba resolves every plugin a run needs before any beam starts: a beam
