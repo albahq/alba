@@ -49,14 +49,33 @@ const COMPOSE_REQUIREMENT: &str =
 /// that catches it: see `ComposeSession::abandon`.
 const CREATION_SETTLE: Duration = Duration::from_secs(1);
 
+/// How long a session start waits for its container to accept commands before
+/// one line on the beam's output names the prerequisites a container stuck
+/// there usually misses. The wait itself goes on: an image pull inside
+/// `docker compose run` can legitimately take minutes.
+const READY_NOTICE_AFTER: Duration = Duration::from_secs(30);
+
 /// Runs beam commands inside a container of a Compose service. See the module
 /// doc comment for the container lifecycle.
-#[derive(Debug, Default)]
-pub struct ComposeExecutor;
+#[derive(Debug)]
+pub struct ComposeExecutor {
+    /// How long a session start waits for its container to accept commands
+    /// before telling the beam what it may be missing: [`READY_NOTICE_AFTER`]
+    /// outside tests.
+    ready_notice_after: Duration,
+}
 
 impl ComposeExecutor {
     pub fn new() -> Self {
-        Self
+        Self {
+            ready_notice_after: READY_NOTICE_AFTER,
+        }
+    }
+}
+
+impl Default for ComposeExecutor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -152,7 +171,8 @@ impl Executor for ComposeExecutor {
         // container: `run` is given `--no-deps` so that it never starts or
         // recreates them itself.
 
-        let session = start_container(&project, description, &beam).await?;
+        let session =
+            start_container(&project, description, &beam, self.ready_notice_after).await?;
         Ok(Box::new(session))
     }
 }
@@ -239,6 +259,7 @@ async fn start_container(
     project: &Project,
     description: ServiceDescription,
     beam: &BeamContext,
+    notice_after: Duration,
 ) -> Result<ComposeSession, ExecError> {
     let name = container_name(&beam.beam);
     let label = format!("alba.beam={}", beam.beam);
@@ -285,7 +306,7 @@ async fn start_container(
         stdin: Some(stdin),
         relays: vec![stdout_task, stderr_task],
     };
-    match wait_until_ready(&mut session, &token, ready_rx, beam).await {
+    match wait_until_ready(&mut session, &token, ready_rx, beam, notice_after).await {
         Ok(()) => Ok(session),
         Err(error) => {
             session.abandon().await;
@@ -297,12 +318,15 @@ async fn start_container(
 /// Waits until the container accepts commands: the `sh` it runs is asked to
 /// echo `token`, which it can only do once the container is up and reading
 /// the pipe. Fails as soon as the `run` process exits, and when the beam is
-/// cancelled.
+/// cancelled. Past `notice_after`, one line on the beam's output names the
+/// prerequisites a container that never answers usually misses; the wait
+/// goes on.
 async fn wait_until_ready(
     session: &mut ComposeSession,
     token: &str,
     ready: tokio::sync::oneshot::Receiver<()>,
     beam: &BeamContext,
+    notice_after: Duration,
 ) -> Result<(), ExecError> {
     let stdin = session
         .stdin
@@ -325,34 +349,54 @@ async fn wait_until_ready(
 
     let service = session.description.service.clone();
     let run = &mut session.run;
-    tokio::select! {
-        ready = asked => {
-            if ready {
-                return Ok(());
+    let notice = tokio::time::sleep(notice_after);
+    tokio::pin!(asked, notice);
+    let mut noticed = false;
+    loop {
+        tokio::select! {
+            ready = &mut asked => {
+                if ready {
+                    return Ok(());
+                }
+                return tokio::select! {
+                    exited = tokio::time::timeout(STOP_GRACE, run.wait()) => match exited {
+                        Ok(Ok(status)) => Err(step_failed("run", status, &service)),
+                        Ok(Err(error)) => Err(run_wait_failed(error)),
+                        Err(_) => Err(ExecError {
+                            message: format!(
+                                "the container of service `{service}` closed its output \
+                                 without becoming ready"
+                            ),
+                        }),
+                    },
+                    _ = beam.cancel.cancelled() => Err(start_cancelled()),
+                };
             }
-            tokio::select! {
-                exited = tokio::time::timeout(STOP_GRACE, run.wait()) => match exited {
-                    Ok(Ok(status)) => Err(step_failed("run", status, &service)),
-                    Ok(Err(error)) => Err(ExecError {
-                        message: format!("failed to wait for `docker compose run`: {error}"),
-                    }),
-                    Err(_) => Err(ExecError {
-                        message: format!(
-                            "the container of service `{service}` closed its output without \
-                             becoming ready"
-                        ),
-                    }),
-                },
-                _ = beam.cancel.cancelled() => Err(start_cancelled()),
+            status = run.wait() => {
+                return match status {
+                    Ok(status) => Err(step_failed("run", status, &service)),
+                    Err(error) => Err(run_wait_failed(error)),
+                };
+            }
+            _ = beam.cancel.cancelled() => return Err(start_cancelled()),
+            _ = &mut notice, if !noticed => {
+                noticed = true;
+                let _ = beam.output.send(OutputLine {
+                    stream: Stream::Stderr,
+                    text: format!(
+                        "still waiting for the container of service `{service}` to accept \
+                         commands: its image must provide `sh`, and its entrypoint, if it \
+                         has one, must execute the command it is given"
+                    ),
+                });
             }
         }
-        status = run.wait() => match status {
-            Ok(status) => Err(step_failed("run", status, &service)),
-            Err(error) => Err(ExecError {
-                message: format!("failed to wait for `docker compose run`: {error}"),
-            }),
-        },
-        _ = beam.cancel.cancelled() => Err(start_cancelled()),
+    }
+}
+
+fn run_wait_failed(error: std::io::Error) -> ExecError {
+    ExecError {
+        message: format!("failed to wait for `docker compose run`: {error}"),
     }
 }
 
@@ -487,5 +531,102 @@ impl ExecSession for ComposeSession {
 
     async fn kill(self: Box<Self>) {
         container::force_remove(&self.name).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Removes the throwaway project and every container labelled for its
+    /// beam, even when the test panics.
+    struct Teardown {
+        dir: PathBuf,
+        beam: String,
+    }
+
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .current_dir(&self.dir)
+                .args(["compose", "down", "-v"])
+                .output();
+            let Ok(output) = std::process::Command::new("docker")
+                .args([
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    &format!("label=alba.beam={}", self.beam),
+                ])
+                .output()
+            else {
+                return;
+            };
+            for id in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "-f", id])
+                    .output();
+            }
+        }
+    }
+
+    /// The notice delay is the seam: the real one is 30 s.
+    #[tokio::test]
+    #[ignore = "requires a running docker daemon"]
+    async fn a_container_slow_to_accept_commands_gets_a_notice_naming_the_prerequisite() {
+        let dir = tempfile::tempdir().unwrap();
+        let beam = format!("alba-it-slow-ready-{}", std::process::id());
+        // The entrypoint ignores the `sh` it is given: nothing reads the pipe.
+        std::fs::write(
+            dir.path().join("compose.yaml"),
+            format!(
+                "name: {beam}\nservices:\n  tool:\n    image: alpine:3\n    \
+                 entrypoint: [\"sh\", \"-c\", \"sleep 3600\"]\n    volumes: [\".:/app\"]\n"
+            ),
+        )
+        .unwrap();
+        let _teardown = Teardown {
+            dir: dir.path().to_path_buf(),
+            beam: beam.clone(),
+        };
+
+        let executor = ComposeExecutor {
+            ready_notice_after: Duration::from_millis(500),
+        };
+        let (output, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let context = BeamContext {
+            beam: beam.clone(),
+            dir: dir.path().to_path_buf(),
+            options: serde_json::json!({"service": "tool", "file": null}),
+            output,
+            cancel: cancel.clone(),
+        };
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            cancel.cancel();
+        });
+
+        let error = executor.open(context).await.err().unwrap();
+        canceller.await.unwrap();
+        assert_eq!(error.message, "compose session start cancelled");
+
+        let mut lines = Vec::new();
+        while let Ok(line) = output_rx.try_recv() {
+            lines.push(line.text);
+        }
+        let notices: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("still waiting"))
+            .collect();
+        assert_eq!(
+            notices,
+            vec![
+                "still waiting for the container of service `tool` to accept commands: its \
+                 image must provide `sh`, and its entrypoint, if it has one, must execute \
+                 the command it is given"
+            ],
+            "unexpected output: {lines:?}"
+        );
     }
 }
