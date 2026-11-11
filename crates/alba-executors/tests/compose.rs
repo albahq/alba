@@ -855,18 +855,19 @@ async fn a_healthcheck_is_waited_for() {
     let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
     let mut session = executor.open(beam_ctx).await.unwrap();
 
+    // Before the session's first command.
     let db = project.container_id("db").unwrap();
+    let health = std::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Health.Status}}", &db])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&health.stdout).trim(), "healthy");
     let (ctx, _rx) = exec_context();
     let result = session
         .execute(spec("true", project.path()), ctx)
         .await
         .unwrap();
     assert_eq!(result.exit_code, 0);
-    let health = std::process::Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Health.Status}}", &db])
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&health.stdout).trim(), "healthy");
     session.close().await.unwrap();
     executor.shutdown().await.unwrap();
 }
@@ -1074,6 +1075,64 @@ async fn cancelling_the_open_while_a_dependency_starts_puts_it_back() {
 
     executor.shutdown().await.unwrap();
     assert_eq!(project.container_id("db"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_dependency_in_the_short_syntax_that_exits_at_once_lets_the_beam_open() {
+    let project = ComposeProject::new(
+        "dep-started-exits",
+        "services:
+  init:
+    image: alpine:3
+    command: \"true\"
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on: [init]
+",
+    );
+    let executor = ComposeExecutor::new();
+
+    let (exit_code, _) = first_command(&project, &executor, "true").await;
+
+    assert_eq!(exit_code, 0);
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("init"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_started_dependency_is_not_waited_for_its_health() {
+    // `web` never becomes healthy: only `service_healthy` would wait for it.
+    let project = ComposeProject::new(
+        "dep-started-unhealthy",
+        "services:
+  web:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+    healthcheck:
+      test: [\"CMD\", \"false\"]
+      interval: 500ms
+      retries: 2
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      web:
+        condition: service_started
+",
+    );
+    let executor = ComposeExecutor::new();
+
+    let (exit_code, _) = first_command(&project, &executor, "true").await;
+
+    assert_eq!(exit_code, 0);
+    let web = project.container_id("web").unwrap();
+    assert!(is_running(&web));
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("web"), None);
 }
 
 #[tokio::test]

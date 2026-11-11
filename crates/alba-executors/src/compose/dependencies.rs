@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::container::spawn_error;
 use crate::{BeamContext, ExecError};
 
-use super::service::ServiceDescription;
+use super::service::{Condition, ServiceDescription};
 use super::started::{ProjectRecord, running_by_service, to_restore};
 use super::{
     COMPOSE_REQUIREMENT, CREATION_SETTLE, Project, run_step, start_cancelled, step_failed,
@@ -47,6 +47,21 @@ impl Dependencies {
     /// Brings up the dependencies of the beam's service, recording first,
     /// under the project's lock, those that were absent or stopped: a start
     /// that fails or is cancelled halfway is still put back at shutdown.
+    ///
+    /// One `up` starts every direct dependency, so that a one-shot several
+    /// of them reach runs once: `up` runs an exited one-shot again each time
+    /// it reaches it. `up` honours the conditions of the transitive
+    /// dependencies itself; the direct ones are then checked, since `up`
+    /// names them rather than depending on them:
+    ///
+    /// - `service_started` needs nothing more;
+    /// - `service_healthy` is awaited with `up --wait --no-deps`, which waits
+    ///   for the named services only and reaches none of their dependencies;
+    /// - `service_completed_successfully` is awaited with
+    ///   `docker compose wait`, one service at a time (its exit code is not
+    ///   reliable for several). `up --wait` cannot serve: it fails on a
+    ///   one-shot that already exited, even with 0, and returns while a
+    ///   slower one still runs.
     pub async fn start(
         &self,
         project: &Project,
@@ -67,27 +82,25 @@ impl Dependencies {
         let states = running_by_service(&step_stdout(ps, "ps")?)?;
         record.record(to_restore(&description.dependencies, &states));
 
-        // See `DependencyStart` for why the one-shots are started apart.
-        let start = &description.start;
+        let named = |wanted: Option<Condition>| -> Vec<String> {
+            description
+                .direct_dependencies
+                .iter()
+                .filter(|dependency| wanted.is_none_or(|wanted| dependency.condition == wanted))
+                .map(|dependency| dependency.service.clone())
+                .collect()
+        };
+        start_up(project, beam, &mut record, &[], &named(None), service).await?;
         start_up(
             project,
             beam,
             &mut record,
-            &["--wait"],
-            &start.waited,
+            &["--wait", "--no-deps"],
+            &named(Some(Condition::Healthy)),
             service,
         )
         .await?;
-        start_up(
-            project,
-            beam,
-            &mut record,
-            &[],
-            &start.one_shots_to_start,
-            service,
-        )
-        .await?;
-        for one_shot in &start.one_shots {
+        for one_shot in &named(Some(Condition::CompletedSuccessfully)) {
             // Its stdout only repeats the exit code.
             let wait = run_step(project.command(&["wait", one_shot]), beam).await?;
             if !wait.status.success() {

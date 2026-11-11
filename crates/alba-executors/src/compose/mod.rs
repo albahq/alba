@@ -23,12 +23,12 @@
 //! would recreate one whose definition changed under a developer's running
 //! stack: `run` gets `--no-deps`, and the session start brings them up itself
 //! with `docker compose up -d --no-recreate`, honouring their `depends_on`
-//! conditions (see [`service::DependencyStart`]). The executor records the
-//! ones it started and the state each was in before, absent or stopped, and
-//! puts them back in that state at [`Executor::shutdown`]: a dependency that
-//! was already running is never recorded, so never stopped. The containers it
-//! started outlive the session that started them, for the next session of the
-//! run to reuse.
+//! conditions (see [`dependencies`]). The executor records the ones it
+//! started and the state each was in before, absent or stopped, and puts them
+//! back in that state at [`Executor::shutdown`]: a dependency that was
+//! already running is never recorded, so never stopped. The containers it
+//! started outlive the session that started them, for the next session of
+//! the run to reuse.
 
 mod dependencies;
 mod service;

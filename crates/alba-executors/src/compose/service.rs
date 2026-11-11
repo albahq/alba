@@ -1,8 +1,9 @@
 //! What the compose executor needs to know about one Compose service, read
 //! from `docker compose config --format json <service>`: the project it
 //! belongs to, its bind mounts, whether it declares a build, the services
-//! it depends on, and how its direct dependencies must be started. Also where a host directory is found inside the
-//! service's container, derived from those bind mounts.
+//! it depends on, and the condition each direct dependency must meet. Also
+//! where a host directory is found inside the service's container, derived
+//! from those bind mounts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -29,43 +30,41 @@ pub(super) struct ServiceDescription {
     pub binds: Vec<Bind>,
     /// Whether the service declares a `build`.
     pub has_build: bool,
-    /// How the services named in the service's own `depends_on` are
-    /// started, according to their condition.
-    pub start: DependencyStart,
+    /// The services named in the service's own `depends_on`, sorted by
+    /// name.
+    pub direct_dependencies: Vec<Dependency>,
     /// Every service the service depends on, directly or not, sorted, the
     /// service itself excluded.
     pub dependencies: Vec<String>,
 }
 
-/// How the direct dependencies of a service are started so that their
-/// `depends_on` conditions hold before its container starts.
-///
-/// `docker compose up --wait` waits for a service it is named to be running,
-/// or healthy when it has a healthcheck, never for it to complete: it fails
-/// on a one-shot that already exited, even with 0, and returns while a
-/// slower one still runs. So a dependency whose condition is
-/// `service_completed_successfully` is started without `--wait` and awaited
-/// with `docker compose wait`. A transitive dependency needs nothing of the
-/// kind: `up` honours the conditions of the services it starts.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct DependencyStart {
-    /// The direct dependencies to start with `up --wait`: every one whose
-    /// condition is not `service_completed_successfully`. Sorted.
-    pub waited: Vec<String>,
-    /// The direct dependencies whose condition is
-    /// `service_completed_successfully`, each to be awaited until it exits,
-    /// with 0. Sorted.
-    pub one_shots: Vec<String>,
-    /// The one-shots to start with their own `up`: those none of `waited`
-    /// depends on, directly or not. `up` runs an exited one-shot again each
-    /// time it reaches it, so one reached through `waited` is started by
-    /// that `up` and must not be started a second time. Sorted.
-    pub one_shots_to_start: Vec<String>,
+/// What a dependency must have reached before the service's container
+/// starts: its `depends_on` condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Condition {
+    /// `service_started`, also what the short syntax means.
+    Started,
+    /// `service_healthy`: its healthcheck passes.
+    Healthy,
+    /// `service_completed_successfully`: it ran to its end, exiting 0.
+    CompletedSuccessfully,
 }
 
-/// The `depends_on` condition of a dependency that must have run to
-/// completion, exiting 0.
-const COMPLETED_SUCCESSFULLY: &str = "service_completed_successfully";
+/// One service named in another's `depends_on`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Dependency {
+    pub service: String,
+    pub condition: Condition,
+}
+
+impl Dependency {
+    pub fn new(service: &str, condition: Condition) -> Self {
+        Self {
+            service: service.to_string(),
+            condition,
+        }
+    }
+}
 
 /// The part of `docker compose config --format json` this module reads.
 #[derive(serde::Deserialize)]
@@ -138,7 +137,7 @@ impl ServiceDescription {
             service: service.to_string(),
             binds,
             has_build: entry.build.is_some(),
-            start: dependency_start(&config.services, entry),
+            direct_dependencies: direct_dependencies(entry).map_err(unreadable)?,
             dependencies: dependency_closure(&config.services, service),
         })
     }
@@ -213,32 +212,26 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// How the direct dependencies of `entry` are started: see
-/// [`DependencyStart`].
-fn dependency_start(services: &BTreeMap<String, Service>, entry: &Service) -> DependencyStart {
-    let mut one_shots = Vec::new();
-    let mut waited = Vec::new();
-    for (name, depends_on) in &entry.depends_on {
-        if depends_on.condition.as_deref() == Some(COMPLETED_SUCCESSFULLY) {
-            one_shots.push(name.clone());
-        } else {
-            waited.push(name.clone());
-        }
-    }
-    let started_by_waited: BTreeSet<String> = waited
+/// The dependencies `entry` names in its `depends_on`, sorted by name. A
+/// condition Compose does not define is refused rather than guessed.
+fn direct_dependencies(entry: &Service) -> Result<Vec<Dependency>, String> {
+    entry
+        .depends_on
         .iter()
-        .flat_map(|dependency| dependency_closure(services, dependency))
-        .collect();
-    let one_shots_to_start = one_shots
-        .iter()
-        .filter(|one_shot| !started_by_waited.contains(*one_shot))
-        .cloned()
-        .collect();
-    DependencyStart {
-        waited,
-        one_shots,
-        one_shots_to_start,
-    }
+        .map(|(service, depends_on)| {
+            let condition = match depends_on.condition.as_deref() {
+                None | Some("service_started") => Condition::Started,
+                Some("service_healthy") => Condition::Healthy,
+                Some("service_completed_successfully") => Condition::CompletedSuccessfully,
+                Some(other) => {
+                    return Err(format!(
+                        "the dependency `{service}` has the unknown condition `{other}`"
+                    ));
+                }
+            };
+            Ok(Dependency::new(service, condition))
+        })
+        .collect()
 }
 
 /// Every service `service` depends on, directly or through another
@@ -338,13 +331,17 @@ mod tests {
     #[test]
     fn parse_separates_direct_dependencies_from_their_closure() {
         let description = parse(&fixture(), "tool");
-        assert_eq!(description.start.waited, vec!["db"]);
+        assert_eq!(
+            description.direct_dependencies,
+            vec![Dependency::new("db", Condition::Started)]
+        );
         assert_eq!(description.dependencies, vec!["cache", "db"]);
     }
 
     #[test]
-    fn parse_reads_how_each_direct_dependency_is_started() {
-        let condition = |condition: &str| serde_json::json!({"condition": condition});
+    fn parse_classifies_each_direct_dependency_by_its_condition() {
+        let condition =
+            |condition: &str| serde_json::json!({"condition": condition, "required": true});
         let config = serde_json::json!({
             "name": "albaspike",
             "services": {
@@ -352,21 +349,41 @@ mod tests {
                     "db": condition("service_started"),
                     "cache": condition("service_healthy"),
                     "migrate": condition("service_completed_successfully"),
-                    "seed": condition("service_completed_successfully")
+                    // What `config` prints for a dependency without a condition.
+                    "queue": {"required": true}
                 }},
-                // `db`'s own start runs `seed`: a second start would run it again.
-                "db": {"depends_on": {"seed": condition("service_completed_successfully")}},
-                "cache": {},
-                "migrate": {},
-                "seed": {}
+                "db": {}, "cache": {}, "migrate": {}, "queue": {}
             }
         });
 
-        let start = parse(&config, "tool").start;
+        let description = parse(&config, "tool");
 
-        assert_eq!(start.waited, vec!["cache", "db"]);
-        assert_eq!(start.one_shots, vec!["migrate", "seed"]);
-        assert_eq!(start.one_shots_to_start, vec!["migrate"]);
+        assert_eq!(
+            description.direct_dependencies,
+            vec![
+                Dependency::new("cache", Condition::Healthy),
+                Dependency::new("db", Condition::Started),
+                Dependency::new("migrate", Condition::CompletedSuccessfully),
+                Dependency::new("queue", Condition::Started),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_unknown_condition() {
+        let mut config = fixture();
+        config["services"]["tool"]["depends_on"]["db"]["condition"] =
+            serde_json::json!("service_ready");
+
+        let error = ServiceDescription::parse(&config.to_string(), "tool").unwrap_err();
+
+        assert!(
+            error
+                .message
+                .ends_with("the dependency `db` has the unknown condition `service_ready`"),
+            "unexpected message: {}",
+            error.message
+        );
     }
 
     #[test]
@@ -382,7 +399,13 @@ mod tests {
             }
         });
         let description = parse(&config, "tool");
-        assert_eq!(description.start.waited, vec!["a", "b"]);
+        assert_eq!(
+            description.direct_dependencies,
+            vec![
+                Dependency::new("a", Condition::Started),
+                Dependency::new("b", Condition::Started),
+            ]
+        );
         assert_eq!(description.dependencies, vec!["a", "b", "c"]);
     }
 
