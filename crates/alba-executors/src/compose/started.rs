@@ -26,6 +26,12 @@ pub(super) enum Before {
 /// is up in some form the developer chose, so it is left alone and never
 /// Alba's to stop. A service with several containers is running when one of
 /// them is.
+///
+/// `ps -a` also lists the one-off containers `docker compose run` created
+/// for a service (a beam of this executor, or the developer's own): those
+/// are left out. `up` does not count them as the service's container and
+/// starts one beside them, and `rm -s -f` and `stop` of the service leave
+/// them alone, so a service whose only container is a one-off is absent.
 pub(super) fn running_by_service(ps_output: &str) -> Result<HashMap<String, bool>, ExecError> {
     let mut states = HashMap::new();
     for line in ps_output.lines().filter(|line| !line.trim().is_empty()) {
@@ -35,6 +41,9 @@ pub(super) fn running_by_service(ps_output: &str) -> Result<HashMap<String, bool
                  {error} in `{line}`"
             ),
         })?;
+        if container.is_one_off() {
+            continue;
+        }
         let running = !matches!(container.state.as_str(), "created" | "exited" | "dead");
         *states.entry(container.service).or_insert(false) |= running;
     }
@@ -48,6 +57,21 @@ struct PsLine {
     service: String,
     #[serde(rename = "State")]
     state: String,
+    /// The container's labels, as Compose prints them: `key=value` pairs
+    /// joined with commas.
+    #[serde(rename = "Labels", default)]
+    labels: String,
+}
+
+impl PsLine {
+    /// Whether `docker compose run` created this container. A value holding
+    /// a comma (a list of Compose files) splits into several items, none of
+    /// which is this exact pair.
+    fn is_one_off(&self) -> bool {
+        self.labels
+            .split(',')
+            .any(|label| label == "com.docker.compose.oneoff=True")
+    }
 }
 
 /// The state to restore for each dependency that is not running. Running
@@ -170,6 +194,23 @@ mod tests {
                 ("worker".to_string(), true),
             ])
         );
+    }
+
+    #[test]
+    fn a_one_off_container_is_not_the_service_s_own() {
+        // A `docker compose run` of `db`: `up` does not count it, and neither
+        // `rm -s -f` nor `stop` of `db` touches it, so it says nothing about
+        // whether `db` itself is running.
+        let output = "{\"Service\":\"db\",\"State\":\"running\",\
+                      \"Labels\":\"com.docker.compose.oneoff=True,com.docker.compose.service=db\"}\n\
+                      {\"Service\":\"cache\",\"State\":\"exited\",\
+                      \"Labels\":\"com.docker.compose.oneoff=False\"}\n\
+                      {\"Service\":\"cache\",\"State\":\"running\",\
+                      \"Labels\":\"com.docker.compose.oneoff=True\"}\n";
+
+        let states = running_by_service(output).unwrap();
+
+        assert_eq!(states, HashMap::from([("cache".to_string(), false)]));
     }
 
     #[test]

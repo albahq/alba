@@ -772,6 +772,62 @@ async fn a_running_dependency_is_left_alone() {
     assert!(is_running(&db), "db was not Alba's to stop");
 }
 
+/// The id of `service`'s own container, leaving out the one-off containers
+/// `docker compose run` created for it.
+fn service_container_id(project: &ComposeProject, service: &str) -> Option<String> {
+    let output = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label=com.docker.compose.project={}", project.name),
+            "--filter",
+            &format!("label=com.docker.compose.service={service}"),
+            "--filter",
+            "label=com.docker.compose.oneoff=False",
+        ])
+        .output()
+        .unwrap();
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_off_container_does_not_make_a_dependency_running() {
+    let project = ComposeProject::new("dep-one-off", TOOL_WITH_DB);
+    // A `docker compose run` of the dependency, labelled so that the
+    // project's teardown removes it.
+    let one_off = project.compose(&[
+        "run",
+        "-d",
+        "--no-deps",
+        "-l",
+        &format!("alba.beam={}", project.beam()),
+        "db",
+        "sleep",
+        "3600",
+    ]);
+    assert!(one_off.status.success());
+    let one_off = String::from_utf8_lossy(&one_off.stdout).trim().to_string();
+    assert_eq!(service_container_id(&project, "db"), None, "precondition");
+
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+    let db = service_container_id(&project, "db").expect("db should have been started");
+    assert!(is_running(&db));
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+
+    assert_eq!(
+        service_container_id(&project, "db"),
+        None,
+        "the db container Alba started should be removed"
+    );
+    assert!(is_running(&one_off), "the one-off was not Alba's to stop");
+}
+
 #[tokio::test]
 #[ignore = "requires a running docker daemon"]
 async fn a_running_dependency_whose_definition_changed_is_not_recreated() {
