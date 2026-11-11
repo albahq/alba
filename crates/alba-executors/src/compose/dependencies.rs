@@ -8,9 +8,9 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::container::spawn_error;
-use crate::{BeamContext, ExecError};
+use crate::{BeamContext, ExecError, OutputLine, Stream};
 
-use super::service::{Condition, ServiceDescription};
+use super::service::{Condition, Dependency, ServiceDescription};
 use super::started::{ProjectRecord, running_by_service, to_restore};
 use super::{
     COMPOSE_REQUIREMENT, CREATION_SETTLE, Project, run_step, start_cancelled, step_failed,
@@ -48,9 +48,14 @@ impl Dependencies {
     /// under the project's lock, those that were absent or stopped: a start
     /// that fails or is cancelled halfway is still put back at shutdown.
     ///
-    /// One `up` starts every direct dependency, so that a one-shot several
-    /// of them reach runs once: `up` runs an exited one-shot again each time
-    /// it reaches it. `up` honours the conditions of the transitive
+    /// One `up` starts every required direct dependency, so that a one-shot
+    /// several of them reach runs once: `up` runs an exited one-shot again
+    /// each time it reaches it. Each optional one (`required: false`) gets
+    /// its own `up`, and one that does not reach its condition writes one
+    /// warning line on the beam's output instead of failing the start; a
+    /// one-shot that an optional dependency and another dependency both
+    /// reach runs once per `up`. An optional dependency that is not a direct
+    /// one follows Compose's own `up`, which fails when it cannot start. `up` honours the conditions of the transitive
     /// dependencies itself; the direct ones are then checked, since `up`
     /// names them rather than depending on them:
     ///
@@ -82,35 +87,75 @@ impl Dependencies {
         let states = running_by_service(&step_stdout(ps, "ps")?)?;
         record.record(to_restore(&description.dependencies, &states));
 
-        let named = |wanted: Option<Condition>| -> Vec<String> {
-            description
-                .direct_dependencies
-                .iter()
-                .filter(|dependency| wanted.is_none_or(|wanted| dependency.condition == wanted))
-                .map(|dependency| dependency.service.clone())
-                .collect()
-        };
-        start_up(project, beam, &mut record, &[], &named(None), service).await?;
-        start_up(
+        let (required, optional): (Vec<&Dependency>, Vec<&Dependency>) = description
+            .direct_dependencies
+            .iter()
+            .partition(|dependency| dependency.required);
+
+        if let Some(code) = up(project, beam, &mut record, &[], &names(&required, None)).await? {
+            return Err(up_failed(code, service));
+        }
+        // Each optional dependency on its own `up`, so that one failing
+        // keeps none of the others from starting.
+        let mut optional_started = Vec::new();
+        for dependency in optional {
+            let name = [dependency.service.as_str()];
+            match up(project, beam, &mut record, &[], &name).await? {
+                None => optional_started.push(dependency),
+                Some(code) => warn_skipped(beam, dependency, service, "did not start", "up", code),
+            }
+        }
+
+        let healthy = Some(Condition::Healthy);
+        let waited = ["--wait", "--no-deps"];
+        if let Some(code) = up(
             project,
             beam,
             &mut record,
-            &["--wait", "--no-deps"],
-            &named(Some(Condition::Healthy)),
-            service,
+            &waited,
+            &names(&required, healthy),
         )
-        .await?;
-        for one_shot in &named(Some(Condition::CompletedSuccessfully)) {
-            // Its stdout only repeats the exit code.
-            let wait = run_step(project.command(&["wait", one_shot]), beam).await?;
-            if !wait.status.success() {
-                let code = wait.status.code().unwrap_or(-1);
+        .await?
+        {
+            return Err(up_failed(code, service));
+        }
+        for dependency in &optional_started {
+            let name = names(&[dependency], healthy);
+            if let Some(code) = up(project, beam, &mut record, &waited, &name).await? {
+                warn_skipped(
+                    beam,
+                    dependency,
+                    service,
+                    "did not become healthy",
+                    "up",
+                    code,
+                );
+            }
+        }
+
+        let completed = Some(Condition::CompletedSuccessfully);
+        for one_shot in names(&required, completed) {
+            if let Some(code) = wait(project, beam, one_shot).await? {
                 return Err(ExecError {
                     message: format!(
                         "docker compose wait exited with code {code} for the dependency \
                          `{one_shot}` of service `{service}`"
                     ),
                 });
+            }
+        }
+        for dependency in &optional_started {
+            for one_shot in names(&[dependency], completed) {
+                if let Some(code) = wait(project, beam, one_shot).await? {
+                    warn_skipped(
+                        beam,
+                        dependency,
+                        service,
+                        "did not complete successfully",
+                        "wait",
+                        code,
+                    );
+                }
             }
         }
         Ok(())
@@ -181,8 +226,8 @@ impl Dependencies {
     }
 }
 
-/// `docker compose up -d --no-recreate <extra> <services>` for the
-/// dependencies of `service`, skipped when `services` is empty.
+/// `docker compose up -d --no-recreate <extra> <services>`, skipped when
+/// `services` is empty: the exit code of the `up` when it is not 0.
 ///
 /// `--parallel 1` makes Compose wait for each operation it sent the daemon
 /// before sending the next: run in parallel, a creation that fails (an image
@@ -193,34 +238,80 @@ impl Dependencies {
 /// kills it) may still have had one such operation in flight: the record
 /// is marked before the spawn and the mark kept, for `shutdown` to look
 /// again.
-async fn start_up(
+async fn up(
     project: &Project,
     beam: &BeamContext,
     record: &mut ProjectRecord,
     extra: &[&str],
-    services: &[String],
-    service: &str,
-) -> Result<(), ExecError> {
+    services: &[&str],
+) -> Result<Option<i32>, ExecError> {
     if services.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let mut args = vec!["--parallel", "1", "up", "-d", "--no-recreate"];
     args.extend_from_slice(extra);
-    args.extend(services.iter().map(String::as_str));
+    args.extend_from_slice(services);
     // A successful `up` has nothing worth keeping on stdout.
     let previously = record.up_started();
     let up = run_step(project.command(&args), beam).await?;
     record.up_finished(previously);
-    if !up.status.success() {
-        let code = up.status.code().unwrap_or(-1);
-        return Err(ExecError {
-            message: format!(
-                "docker compose up exited with code {code} for the dependencies of \
-                 service `{service}`"
-            ),
-        });
+    Ok(exit_code_if_failed(up.status))
+}
+
+/// `docker compose wait <one_shot>`: the exit code of the one-shot's
+/// container when it is not 0.
+async fn wait(
+    project: &Project,
+    beam: &BeamContext,
+    one_shot: &str,
+) -> Result<Option<i32>, ExecError> {
+    // Its stdout only repeats the exit code.
+    let wait = run_step(project.command(&["wait", one_shot]), beam).await?;
+    Ok(exit_code_if_failed(wait.status))
+}
+
+fn exit_code_if_failed(status: std::process::ExitStatus) -> Option<i32> {
+    (!status.success()).then(|| status.code().unwrap_or(-1))
+}
+
+/// The services of `dependencies` whose condition is `wanted`, or all of
+/// them when `wanted` is `None`.
+fn names<'a>(dependencies: &[&'a Dependency], wanted: Option<Condition>) -> Vec<&'a str> {
+    dependencies
+        .iter()
+        .filter(|dependency| wanted.is_none_or(|wanted| dependency.condition == wanted))
+        .map(|dependency| dependency.service.as_str())
+        .collect()
+}
+
+fn up_failed(code: i32, service: &str) -> ExecError {
+    ExecError {
+        message: format!(
+            "docker compose up exited with code {code} for the dependencies of service \
+             `{service}`"
+        ),
     }
-    Ok(())
+}
+
+/// The one line on the beam's output saying that the optional `dependency`
+/// is left out: what went wrong, and which `docker compose` subcommand
+/// exited with which code. Compose's own message is already there.
+fn warn_skipped(
+    beam: &BeamContext,
+    dependency: &Dependency,
+    service: &str,
+    what: &str,
+    subcommand: &str,
+    code: i32,
+) {
+    let _ = beam.output.send(OutputLine {
+        stream: Stream::Stderr,
+        text: format!(
+            "optional dependency `{}` of service `{service}` {what} (docker compose \
+             {subcommand} exited with code {code}): continuing without it",
+            dependency.service
+        ),
+    });
 }
 
 /// Runs `docker compose <args> <services>` for `shutdown`, its stdout

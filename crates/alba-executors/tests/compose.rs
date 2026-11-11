@@ -1184,6 +1184,61 @@ async fn a_dependency_that_cannot_start_fails_the_beam_and_the_rest_is_put_back(
 
 #[tokio::test]
 #[ignore = "requires a running docker daemon"]
+async fn an_optional_dependency_that_cannot_start_is_skipped_with_a_warning() {
+    let project = ComposeProject::new(
+        "dep-optional",
+        "services:
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+  ghost:
+    image: alba-it-no-such-image:0
+    pull_policy: never
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      db:
+        condition: service_started
+      ghost:
+        condition: service_started
+        required: false
+",
+    );
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, mut output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let warnings: Vec<_> = drain_text(&mut output_rx)
+        .await
+        .into_iter()
+        .filter(|line| line.starts_with("optional dependency"))
+        .collect();
+    assert_eq!(
+        warnings,
+        vec![
+            "optional dependency `ghost` of service `tool` did not start (docker compose up \
+             exited with code 1): continuing without it"
+        ]
+    );
+    let db = project.container_id("db").unwrap();
+    assert!(is_running(&db));
+    let (ctx, _rx) = exec_context();
+    let result = session
+        .execute(spec("true", project.path()), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    session.close().await.unwrap();
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+    assert_eq!(project.container_id("ghost"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
 async fn cancelling_a_command_keeps_the_dependencies_until_shutdown() {
     let project = ComposeProject::new("dep-cancel", TOOL_WITH_DB);
     let executor = ComposeExecutor::new();

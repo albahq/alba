@@ -55,13 +55,18 @@ pub(super) enum Condition {
 pub(super) struct Dependency {
     pub service: String,
     pub condition: Condition,
+    /// `required: false` makes it optional: one that does not reach its
+    /// condition does not keep the service from starting.
+    pub required: bool,
 }
 
 impl Dependency {
+    /// A required dependency.
     pub fn new(service: &str, condition: Condition) -> Self {
         Self {
             service: service.to_string(),
             condition,
+            required: true,
         }
     }
 }
@@ -89,6 +94,13 @@ struct DependsOn {
     /// `service_started` when the short syntax was used.
     #[serde(default)]
     condition: Option<String>,
+    /// `true` unless declared otherwise.
+    #[serde(default = "required_by_default")]
+    required: bool,
+}
+
+fn required_by_default() -> bool {
+    true
 }
 
 #[derive(serde::Deserialize)]
@@ -229,7 +241,10 @@ fn direct_dependencies(entry: &Service) -> Result<Vec<Dependency>, String> {
                     ));
                 }
             };
-            Ok(Dependency::new(service, condition))
+            Ok(Dependency {
+                required: depends_on.required,
+                ..Dependency::new(service, condition)
+            })
         })
         .collect()
 }
@@ -367,6 +382,28 @@ mod tests {
                 Dependency::new("queue", Condition::Started),
             ]
         );
+    }
+
+    #[test]
+    fn parse_reads_whether_a_dependency_is_required() {
+        let mut config = fixture();
+        config["services"]["tool"]["depends_on"]["cache"] =
+            serde_json::json!({"condition": "service_healthy", "required": false});
+        config["services"]["cache"] = serde_json::json!({"image": "alpine:3"});
+
+        let description = parse(&config, "tool");
+
+        assert_eq!(
+            description.direct_dependencies,
+            vec![
+                Dependency {
+                    required: false,
+                    ..Dependency::new("cache", Condition::Healthy)
+                },
+                Dependency::new("db", Condition::Started),
+            ]
+        );
+        assert!(description.direct_dependencies[1].required);
     }
 
     #[test]
