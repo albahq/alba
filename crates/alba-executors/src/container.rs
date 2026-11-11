@@ -183,8 +183,9 @@ pub(crate) async fn exec(
     })
 }
 
-/// Removes `container` with `docker rm -f`. A container that is already gone
-/// is not an error. `requirement` is handed to [`spawn_error`].
+/// Removes `container` with `docker rm -f`. A container that is already gone,
+/// or that the daemon is already removing, is not an error. `requirement` is
+/// handed to [`spawn_error`].
 pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), ExecError> {
     // Piped (not null) stderr: a genuine failure here reaches the user
     // (the engine downgrades it to a notice, but does not discard it), so
@@ -206,6 +207,14 @@ pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), Exe
         // (see its cancellation teardown), and callers still remove it
         // unconditionally afterwards, so this is the expected, truthful
         // outcome, not a failure the user needs to see.
+        return Ok(());
+    }
+    if stderr.contains("is already in progress") {
+        // A container started with `--rm` is removed by the daemon itself
+        // once it stops (after a cancelled `exec` stopped it, or once its
+        // main process exited): the daemon answers "removal of container
+        // ... is already in progress", and the container is going away as
+        // asked.
         return Ok(());
     }
     let code = output.status.code().unwrap_or(-1);
