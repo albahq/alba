@@ -36,7 +36,7 @@ that declares one, in import order. Each `*` matches exactly one level
 | `run` | `"cmd"` or `["cmd1", "cmd2"]` | String templates. Commands run in order on the same executor. |
 | `env` | `{ NAME = "value", OTHER = param }` | Values are string templates or a bare `let` / parameter name. |
 | `cwd` | string template | Working directory for the commands. |
-| `executor` | `system_shell`, `docker { ... }`, or `<plugin> { ... }` | Omitted means the embedded shell. |
+| `executor` | `system_shell`, `docker { ... }`, `compose { ... }`, or `<plugin> { ... }` | Omitted means the embedded shell. |
 | `allow_failure` | `true` | The beam may fail without failing its dependents. |
 
 Example:
@@ -122,6 +122,21 @@ literal.
   - `user "host"` runs the commands as whoever runs Alba, so files
     written into the project are not owned by root; any other value goes
     to `docker run --user` as declared.
+- **`compose { service "..." [file "..."] }`**: runs the beam in a one-off
+  container of a service of the project's Compose file; everything else
+  (image, build, mounts, user, environment) stays in the Compose file.
+  `service` is required; `file` is the Compose file's path relative to
+  the declaring Beamfile's directory, and without it Compose's own lookup
+  applies (the beam's directory, then each parent).
+  - A command's host working directory maps to the container through
+    the service's bind mounts (longest matching host path); if none
+    covers it the command fails naming the `cwd` and the mounts.
+  - The service's command is replaced, its ports are not published, no
+    user is passed. The image needs `sh`.
+  - Dependencies (`depends_on`) are started when absent, honouring their
+    conditions, left alone when running, and put back in their previous
+    state when the command ends. List `compose.yaml` and the Dockerfiles
+    in `inputs`: the cache only sees the block's text.
 - **`<name> { option value ... }`**: an external `alba-executor-<name>`
   binary on the `PATH`. Resolution happens at plan time; a missing plugin
   fails the whole run before any beam starts.

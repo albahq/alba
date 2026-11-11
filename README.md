@@ -262,8 +262,10 @@ because stdout is not a terminal.
 A beam runs its command on Alba's embedded shell by default (see
 [Embedded shell](#embedded-shell) below); `executor system_shell` opts out
 to the host shell instead, and `executor docker { image "..." }` runs it
-inside a container (see [Docker executor](#docker-executor)). Any other
-name, `executor <name> { ... }`, refers to an external plugin (see
+inside a container (see [Docker executor](#docker-executor)).
+`executor compose { service "..." }` runs it inside a service of the
+project's Compose file (see [Compose executor](#compose-executor)). Any
+other name, `executor <name> { ... }`, refers to an external plugin (see
 [Plugins](#plugins)).
 
 ## Caching
@@ -941,10 +943,156 @@ left behind that way with:
 docker rm -f $(docker ps -aq --filter label=alba.beam)
 ```
 
+A project that already describes its containers in a Compose file can
+point Alba at that description instead of repeating it in every Beamfile:
+see [Compose executor](#compose-executor).
+
+## Compose executor
+
+`executor compose { service "..." }` runs a beam's commands inside a
+container of a service declared in the project's Compose file. Everything
+Compose already knows how to describe (image, build, mounts, user,
+environment, networks, profiles, dependencies) stays in `compose.yaml`;
+the block names the service and nothing else. With a `compose.yaml` at
+the root of a repository and a module Beamfile two directories down:
+
+```
+beam test {
+  executor compose { service "php" }
+  run "vendor/bin/phpunit"
+}
+
+beam build {
+  executor compose { service "help-center" file "../../compose.tools.yaml" }
+  run "pnpm build"
+}
+```
+
+`service` is required: the Compose service the beam's commands run in.
+`file` is optional: the path to the Compose file, relative to the
+directory of the Beamfile that declares the beam. Both accept
+interpolation, and any other option is an evaluation error listing the
+known ones. `alba check` validates the shape of the block and never runs
+`docker`, so a Beamfile validates on a machine without Docker; an unknown
+service name is a failure at run time.
+
+Without `file`, Compose's own lookup applies: the beam's directory, then
+each parent directory, and the `COMPOSE_FILE` variable. That is what lets
+the Beamfile of `modules/billing` find the `compose.yaml` at the
+repository root.
+
+Each command runs in the directory that matches its working directory on
+the host. Alba looks, among the service's bind mounts, for the one whose
+host path is the longest prefix of the command's `cwd`, and uses that
+mount's container path followed by the rest of the path: with the
+repository root mounted on `/app`, a beam in `modules/billing` runs in
+`/app/modules/billing`. Only bind mounts count. When none covers the
+`cwd`, the command fails with an error naming the `cwd`, the service, and
+the bind mounts the service does have; Alba does not fall back to the
+service's `working_dir`, because running a tool in the wrong directory
+silently is worse than failing.
+
+Alba starts one container per beam with `docker compose run`, keeps it
+alive for every command of that beam, and removes it when the beam ends,
+so two beams on the same service run in parallel. The service's command
+is replaced by the beam's commands and its ports are not published.
+Alba passes none of `--user`, `-e`, `-v`, `-w`, or `--service-ports` to
+`docker compose run` (the beam's `env` goes to each command, as with the
+docker executor): the container runs as the service's own user, so who
+owns the files it writes is whatever `compose.yaml` arranged. A service behind a profile
+can be targeted without activating the profile by hand.
+
+When the service declares a `build`, Alba runs `docker compose build
+<service>` before the beam's commands, every time the beam actually runs:
+Compose's own layer cache keeps the repeat cheap, and a build that fails
+fails the beam with its log on the beam's output. The cache fingerprint
+only holds the text of the block, not the content of the Compose file or
+of the Dockerfiles the build copies from, so a beam whose result depends
+on them lists them in `inputs`:
+
+```
+beam test {
+  inputs ["src/**", "../../compose.yaml", "../../docker/php/Dockerfile"]
+  executor compose { service "php" }
+  run "vendor/bin/phpunit"
+}
+```
+
+### Dependencies
+
+Alba never stops, restarts, recreates, or removes a service it did not
+start: a developer who has `docker compose up` running does not lose a
+container, a volume, or a database state because a beam ran. To keep
+that promise it does not let `docker compose run` start the service's
+`depends_on` itself (Compose would recreate a running dependency whose
+definition changed since it started); it manages them:
+
+- a dependency that is absent or stopped is started, as `docker compose
+  run` would start it: a `service_healthy` dependency is waited for until
+  it is healthy, a `service_started` one (or one in the short `depends_on:
+  [x]` syntax) only until it is started, and a
+  `service_completed_successfully` one-shot runs to completion and must
+  exit 0. A dependency with `required: false` that fails to start
+  produces a warning on the beam's output and the beam continues;
+- a dependency that is already running is left exactly as it is, even
+  when its definition has diverged from the Compose file;
+- when the command ends (the end of the run for `alba run`, the end of
+  the session for `--watch` and the TUI, never between two runs of a
+  session) every dependency Alba started goes back to its previous state:
+  removed with `docker compose rm -s -f` if it was absent, stopped with
+  `docker compose stop` if it was stopped. Volumes are never removed.
+
+Dependencies are started one at a time, which makes a first start with
+many images to pull slower.
+
+Accepted limits:
+
+- A dependency Alba started stays up until the command ends: for the
+  whole watch or TUI session.
+- Alba cannot tell that a dependency it started has since been adopted:
+  if the developer runs `docker compose up` while Alba holds it, Compose
+  reuses that container and Alba still removes it when the command ends.
+  No volume is removed, so no data is lost, and `docker compose up`
+  brings it back.
+- Two Alba processes running at once on the same Compose project do not
+  share their records: one may stop a dependency the other still uses.
+- After a `kill -9` of Alba, started dependencies stay up.
+- `docker compose run` creates the project's default network when it does
+  not exist, and leaves it.
+- When a start is interrupted (a cancelled run), Alba makes a second
+  release pass about one second later to catch a container the daemon
+  created after the client was killed. That pass is time-based, so a
+  container created later than that can remain.
+
+### Prerequisites
+
+Running a compose beam requires `docker` on the `PATH` with the Compose
+plugin (`docker compose`). The service's image must provide `sh`, and its
+`entrypoint`, if it has one, must end up executing the arguments it is
+given. Alba waits for the container to accept commands with no time
+limit, since an image pull can take minutes; after 30 seconds without an
+answer it writes a line on the beam's output naming the service and
+these two prerequisites. Cancelling a command stops and removes its
+container within the 5 second grace period.
+
+### Cleaning up after a crash
+
+Every container Alba starts carries the `alba.beam=<name>` label, and
+closing Alba's end of a container's input pipe is what ends it, so a
+crashed Alba leaves no container sleeping forever; if one remains,
+remove it as for the docker executor:
+
+```sh
+docker rm -f $(docker ps -aq --filter label=alba.beam)
+```
+
+A dependency Alba started and could not put back stays up after a
+`kill -9`; stop it with `docker compose stop <service>`.
+
 ## Plugins
 
 `executor <name> { ... }` for any `name` that is not `shell`,
-`system_shell`, or `docker` refers to an external plugin: a separate
+`system_shell`, `docker`, or `compose` refers to an external plugin: a separate
 `alba-executor-<name>` binary on the `PATH` that Alba spawns and speaks
 a line-oriented JSON protocol to, one process per beam, kept alive for
 every command in that beam the same way the docker executor keeps its

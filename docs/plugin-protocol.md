@@ -17,7 +17,7 @@ get the shape of a real one.
 ## Discovery
 
 `executor <name> { ... }` for any `name` that is not a built-in executor
-(`shell`, `system_shell`, `docker`) refers to a plugin. Alba resolves it to a
+(`shell`, `system_shell`, `docker`, `compose`) refers to a plugin. Alba resolves it to a
 binary called `alba-executor-<name>` on the `PATH`.
 
 Resolution happens once per run, at plan time, before any beam starts: a
