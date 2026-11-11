@@ -251,7 +251,8 @@ At open, for the transitive closure of the target service's `depends_on`:
 3. `depends_on` conditions (`service_healthy`, `service_completed_successfully`) must be honoured as
    `docker compose run` would honour them before the beam's container starts. Measured: `up --wait` handles
    `service_healthy` and `service_started`, not `service_completed_successfully`, which goes through
-   `docker compose wait`.
+   `docker wait` on the one-shot's containers (found by their Compose labels). `docker compose wait` cannot
+   serve: before Compose 5.6 it does not see a container that already exited.
 
 The `ComposeExecutor` keeps, per Compose project (keyed by the project name `config` reports, with the
 directory and `file` needed to address it again), the dependencies **Alba started** and the state each had
