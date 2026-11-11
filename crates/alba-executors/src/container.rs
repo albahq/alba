@@ -221,9 +221,9 @@ async fn wait_until_gone(container: &str) {
     }
 }
 
-/// Removes `container` with `docker rm -f`. A container that is already gone,
-/// or that the daemon is already removing, is not an error. `requirement` is
-/// handed to [`spawn_error`].
+/// Removes `container` with `docker rm -f`. A container that is already gone
+/// is not an error, nor is one the daemon is already removing, provided it is
+/// gone within [`STOP_GRACE`]. `requirement` is handed to [`spawn_error`].
 pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), ExecError> {
     // Piped (not null) stderr: a genuine failure here reaches the user
     // (the engine downgrades it to a notice, but does not discard it), so
@@ -251,9 +251,21 @@ pub(crate) async fn remove(container: &str, requirement: &str) -> Result<(), Exe
         // A container started with `--rm` is removed by the daemon itself
         // once it stops (after a cancelled `exec` stopped it, or once its
         // main process exited): the daemon answers "removal of container
-        // ... is already in progress", and the container is going away as
-        // asked.
-        return Ok(());
+        // ... is already in progress". That removal can still fail and
+        // leave the container behind, so its outcome is awaited.
+        if tokio::time::timeout(STOP_GRACE, wait_until_gone(container))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        return Err(ExecError {
+            message: format!(
+                "container `{container}` is still there {} s after the daemon started \
+                 removing it",
+                STOP_GRACE.as_secs()
+            ),
+        });
     }
     let code = output.status.code().unwrap_or(-1);
     Err(ExecError {
