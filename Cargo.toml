@@ -46,6 +46,13 @@ insta = "1"
 tempfile = "3"
 unicode-width = "0.2"
 
+# blake3 hashes every input of a cached beam. Unoptimized, it is several
+# times slower than in the binary users run, and that cost would dominate
+# debug builds and the cache's performance guard, which `cargo test` runs
+# in the dev profile.
+[profile.dev.package.blake3]
+opt-level = 3
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
