@@ -13,6 +13,12 @@
 /// unschedulable run.
 pub const EXIT_ALBA_ERROR: i32 = 2;
 
+/// A watch session ended in an orderly way, but an executor could not
+/// release what it held. The same `1` a single run earns for it through
+/// `alba_engine::RunSummary::exit_code()`: a session decides its own code,
+/// so it needs a name for it, and the two must agree.
+pub const EXIT_CLEANUP_FAILED: i32 = 1;
+
 /// The user interrupted the run. `128 + SIGINT`, the code a shell reports
 /// for an interrupted command — deliberately outside Alba's own 0/1/2
 /// vocabulary, which describes how a run *ended*, an answer an abandoned

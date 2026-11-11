@@ -239,10 +239,11 @@ would have restated there.
 `alba run --watch` reports differently, because a session outlives any single
 run inside it: every run already reported its own outcome as it happened, so
 there is nothing left to score at the process level once the session ends.
-An orderly Ctrl-C ends the session with `0`. `2` covers whatever keeps the
-session from being a session at all: a Beamfile that fails to load at
+An orderly Ctrl-C ends the session with `0`, or `1` when an executor could
+not release what it held once the session ended. `2` covers whatever keeps
+the session from being a session at all: a Beamfile that fails to load at
 startup, a file watcher that cannot start, or one that dies partway through
-and leaves nothing left to watch.
+and leaves nothing left to watch; it wins over `1` when both happen.
 
 On a terminal, where the interactive interface is the front end by default
 (see [Interactive interface](#interactive-interface)), `q` exits with the
@@ -255,7 +256,9 @@ Whatever keeps the interface from working at all, an unschedulable run or a
 file watcher that fails to start, one that dies partway through, or the
 session ending some other way than the user closing it, reports `2`, the
 same as a headless session's own startup failures; so does `--ui` refused
-because stdout is not a terminal.
+because stdout is not a terminal. An executor that could not release what
+it held once the session ended reports `1` in place of the last run's code,
+as it does headless.
 
 ### Executors
 
