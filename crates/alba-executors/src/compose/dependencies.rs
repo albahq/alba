@@ -82,7 +82,11 @@ impl Dependencies {
             _ = beam.cancel.cancelled() => return Err(start_cancelled()),
         };
 
-        let ps = run_step(project.command(&["ps", "-a", "--format", "json"]), beam).await?;
+        // Named, so that the read covers exactly the dependencies, whatever
+        // profiles they sit behind.
+        let mut ps_args = vec!["ps", "-a", "--format", "json"];
+        ps_args.extend(description.dependencies.iter().map(String::as_str));
+        let ps = run_step(project.command(&ps_args), beam).await?;
         if !ps.status.success() {
             return Err(step_failed("ps", ps.status, service));
         }

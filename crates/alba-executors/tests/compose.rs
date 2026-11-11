@@ -772,6 +772,43 @@ async fn a_running_dependency_is_left_alone() {
     assert!(is_running(&db), "db was not Alba's to stop");
 }
 
+/// `db` shares the profile of `tool`: Compose refuses to resolve a service
+/// whose dependency is behind a profile that is neither active nor its own.
+const TOOL_WITH_PROFILED_DB: &str = "services:
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+    profiles: [tools]
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on: [db]
+    profiles: [tools]
+";
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_running_dependency_behind_a_profile_is_left_alone() {
+    let project = ComposeProject::new("dep-profiled", TOOL_WITH_PROFILED_DB);
+    assert!(
+        project
+            .compose(&["--profile", "tools", "up", "-d", "db"])
+            .status
+            .success()
+    );
+    let db = project.container_id("db").unwrap();
+
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+
+    assert_eq!(project.container_id("db"), Some(db.clone()));
+    assert!(is_running(&db), "db was not Alba's to stop");
+}
+
 /// The id of `service`'s own container, leaving out the one-off containers
 /// `docker compose run` created for it.
 fn service_container_id(project: &ComposeProject, service: &str) -> Option<String> {
