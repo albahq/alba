@@ -18,11 +18,25 @@
 //! nothing that overrides them is passed. Its `command` is replaced by that
 //! `sh`, and its `ports` are not published, as `docker compose run` does by
 //! default.
+//!
+//! The service's dependencies are not left to `docker compose run`, which
+//! would recreate one whose definition changed under a developer's running
+//! stack: `run` gets `--no-deps`, and the session start brings them up itself
+//! with `docker compose up -d --no-recreate`, honouring their `depends_on`
+//! conditions (see [`service::DependencyStart`]). The executor records the
+//! ones it started and the state each was in before, absent or stopped, and
+//! puts them back in that state at [`Executor::shutdown`]: a dependency that
+//! was already running is never recorded, so never stopped. The containers it
+//! started outlive the session that started them, for the next session of the
+//! run to reuse.
 
 mod service;
+mod started;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -38,6 +52,7 @@ use crate::{
 };
 
 use service::ServiceDescription;
+use started::{ProjectRecord, running_by_service, to_restore};
 
 /// What the compose executor needs from the host, finishing the message of a
 /// failed `docker` spawn.
@@ -63,14 +78,140 @@ pub struct ComposeExecutor {
     /// before telling the beam what it may be missing: [`READY_NOTICE_AFTER`]
     /// outside tests.
     ready_notice_after: Duration,
+    /// The dependencies this executor started, per Compose project name.
+    /// Each project's record is behind its own lock, held from reading the
+    /// dependencies' states to the end of their `up`, so that two sessions
+    /// opening at once cannot both believe they started the same service.
+    started: Mutex<HashMap<String, Arc<tokio::sync::Mutex<ProjectRecord>>>>,
 }
 
 impl ComposeExecutor {
     pub fn new() -> Self {
         Self {
             ready_notice_after: READY_NOTICE_AFTER,
+            started: Mutex::new(HashMap::new()),
         }
     }
+
+    /// The record of the Compose project `name`, created empty, addressed
+    /// through `project`, the first time a session of it needs one.
+    fn record_of(&self, name: &str, project: &Project) -> Arc<tokio::sync::Mutex<ProjectRecord>> {
+        let mut records = self.started.lock().unwrap_or_else(PoisonError::into_inner);
+        records
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Mutex::new(ProjectRecord {
+                    dir: project.dir.clone(),
+                    file: project.file.clone(),
+                    started: Default::default(),
+                    interrupted: false,
+                }))
+            })
+            .clone()
+    }
+
+    /// Brings up the dependencies of the beam's service, recording first,
+    /// under the project's lock, those that were absent or stopped: a start
+    /// that fails or is cancelled halfway is still put back at shutdown.
+    async fn start_dependencies(
+        &self,
+        project: &Project,
+        description: &ServiceDescription,
+        beam: &BeamContext,
+    ) -> Result<(), ExecError> {
+        let service = description.service.as_str();
+        let record = self.record_of(&description.project, project);
+        let mut record = tokio::select! {
+            record = record.lock() => record,
+            _ = beam.cancel.cancelled() => return Err(start_cancelled()),
+        };
+
+        let ps = run_step(project.command(&["ps", "-a", "--format", "json"]), beam).await?;
+        if !ps.status.success() {
+            return Err(step_failed("ps", ps.status, service));
+        }
+        let states = running_by_service(&step_stdout(ps, "ps")?)?;
+        record.record(to_restore(&description.dependencies, &states));
+
+        // See `DependencyStart` for why the one-shots are started apart.
+        let start = &description.start;
+        start_up(
+            project,
+            beam,
+            &mut record,
+            &["--wait"],
+            &start.waited,
+            service,
+        )
+        .await?;
+        start_up(
+            project,
+            beam,
+            &mut record,
+            &[],
+            &start.one_shots_to_start,
+            service,
+        )
+        .await?;
+        for one_shot in &start.one_shots {
+            // Its stdout only repeats the exit code.
+            let wait = run_step(project.command(&["wait", one_shot]), beam).await?;
+            if !wait.status.success() {
+                let code = wait.status.code().unwrap_or(-1);
+                return Err(ExecError {
+                    message: format!(
+                        "docker compose wait exited with code {code} for the dependency \
+                         `{one_shot}` of service `{service}`"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `docker compose up -d --no-recreate <extra> <services>` for the
+/// dependencies of `service`, skipped when `services` is empty.
+///
+/// `--parallel 1` makes Compose wait for each operation it sent the daemon
+/// before sending the next: run in parallel, a creation that fails (an image
+/// that does not exist) makes `up` exit while the daemon is still creating a
+/// sibling, whose container then appears after the `up`, too late for a
+/// removal at shutdown to see it. An `up` that did not run to its end (it
+/// was cancelled) may still have had one such operation in flight: the
+/// record says so, for `shutdown` to look again.
+async fn start_up(
+    project: &Project,
+    beam: &BeamContext,
+    record: &mut ProjectRecord,
+    extra: &[&str],
+    services: &[String],
+    service: &str,
+) -> Result<(), ExecError> {
+    if services.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["--parallel", "1", "up", "-d", "--no-recreate"];
+    args.extend_from_slice(extra);
+    args.extend(services.iter().map(String::as_str));
+    // A successful `up` has nothing worth keeping on stdout.
+    let up = match run_step(project.command(&args), beam).await {
+        Ok(up) => up,
+        Err(error) => {
+            record.interrupted = true;
+            return Err(error);
+        }
+    };
+    if !up.status.success() {
+        let code = up.status.code().unwrap_or(-1);
+        return Err(ExecError {
+            message: format!(
+                "docker compose up exited with code {code} for the dependencies of \
+                 service `{service}`"
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl Default for ComposeExecutor {
@@ -153,10 +294,7 @@ impl Executor for ComposeExecutor {
         if !config.status.success() {
             return Err(step_failed("config", config.status, service));
         }
-        let stdout = config.stdout.map_err(|cause| ExecError {
-            message: format!("could not read the output of `docker compose config`: {cause}"),
-        })?;
-        let description = ServiceDescription::parse(&stdout, service)?;
+        let description = ServiceDescription::parse(&step_stdout(config, "config")?, service)?;
 
         if description.has_build {
             // Quiet, a successful build prints nothing worth keeping: its
@@ -167,13 +305,107 @@ impl Executor for ComposeExecutor {
             }
         }
 
-        // The service's dependencies are started here, before its own
-        // container: `run` is given `--no-deps` so that it never starts or
-        // recreates them itself.
+        // Before the service's own container: `run` is given `--no-deps` so
+        // that it never starts or recreates them itself.
+        if !description.dependencies.is_empty() {
+            self.start_dependencies(&project, &description, &beam)
+                .await?;
+        }
 
         let session =
             start_container(&project, description, &beam, self.ready_notice_after).await?;
         Ok(Box::new(session))
+    }
+
+    /// Puts every dependency this executor started back in the state it
+    /// had: removed (`rm -s -f`, never its volumes) when it had no
+    /// container, stopped when it was stopped. Every project is attempted
+    /// and its record emptied, whatever the outcome; the failures are
+    /// reported together.
+    ///
+    /// No time bound is added: Compose bounds each `rm -s -f` and `stop` by
+    /// the services' own `stop_grace_period`. A project whose start was
+    /// interrupted is released a second time once `CREATION_SETTLE` has
+    /// passed, for a creation or a start that `up` had in flight.
+    async fn shutdown(&self) -> Result<(), ExecError> {
+        let mut records: Vec<_> = self
+            .started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(name, record)| (name.clone(), Arc::clone(record)))
+            .collect();
+        records.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut failures = Vec::new();
+        for (name, record) in records {
+            let mut record = record.lock().await;
+            let (removals, stops) = record.release_plan();
+            record.started.clear();
+            let interrupted = std::mem::take(&mut record.interrupted);
+            let project = Project {
+                dir: record.dir.clone(),
+                file: record.file.clone(),
+            };
+            let passes = if interrupted { 2 } else { 1 };
+            for pass in 0..passes {
+                if pass > 0 {
+                    tokio::time::sleep(CREATION_SETTLE).await;
+                }
+                for (args, services) in [
+                    (&["rm", "-s", "-f"][..], &removals),
+                    (&["stop"][..], &stops),
+                ] {
+                    if services.is_empty() {
+                        continue;
+                    }
+                    if let Err(cause) = release(&project, args, services).await {
+                        let failure = format!(
+                            "could not release the dependencies of compose project \
+                             `{name}`: {cause}"
+                        );
+                        // The second pass of an interrupted start may fail
+                        // the same way as the first.
+                        if !failures.contains(&failure) {
+                            failures.push(failure);
+                        }
+                    }
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ExecError {
+                message: failures.join("; "),
+            })
+        }
+    }
+}
+
+/// Runs `docker compose <args> <services>` for `shutdown`, its stdout
+/// discarded. A failure is described by Compose's stderr, or by the exit
+/// code when that is empty.
+async fn release(project: &Project, args: &[&str], services: &[String]) -> Result<(), String> {
+    let output = project
+        .command(args)
+        .args(services)
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|error| spawn_error(error, COMPOSE_REQUIREMENT).message)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        let code = output.status.code().unwrap_or(-1);
+        Err(format!(
+            "docker compose {} exited with code {code}",
+            args[0]
+        ))
+    } else {
+        Err(stderr)
     }
 }
 
@@ -251,6 +483,13 @@ async fn run_step(mut command: Command, beam: &BeamContext) -> Result<StepOutcom
         }
     };
     Ok(StepOutcome { status, stdout })
+}
+
+/// The whole stdout of a step whose outcome depends on it.
+fn step_stdout(outcome: StepOutcome, subcommand: &str) -> Result<String, ExecError> {
+    outcome.stdout.map_err(|cause| ExecError {
+        message: format!("could not read the output of `docker compose {subcommand}`: {cause}"),
+    })
 }
 
 /// Starts the beam's container with `docker compose run` and waits until its
@@ -592,6 +831,7 @@ mod tests {
 
         let executor = ComposeExecutor {
             ready_notice_after: Duration::from_millis(500),
+            ..ComposeExecutor::new()
         };
         let (output, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = tokio_util::sync::CancellationToken::new();

@@ -671,3 +671,564 @@ async fn cancelling_the_open_during_a_build_stops_it_promptly() {
     );
     assert!(labelled_containers(&project.beam(), true).is_empty());
 }
+
+/// A service `tool` depending on `db`, a long-running `alpine:3` quick to
+/// stop.
+const TOOL_WITH_DB: &str = "services:
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on: [db]
+";
+
+/// Whether the container `id` is running.
+fn is_running(id: &str) -> bool {
+    let output = std::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", id])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn an_absent_dependency_is_started_kept_after_close_and_removed_at_shutdown() {
+    let project = ComposeProject::new("dep-absent", TOOL_WITH_DB);
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+
+    let db = project
+        .container_id("db")
+        .expect("db should have been started");
+    assert!(is_running(&db));
+    session.close().await.unwrap();
+    assert!(is_running(&db), "db should outlive the session");
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_stopped_dependency_is_started_then_stopped_again() {
+    let project = ComposeProject::new("dep-stopped", TOOL_WITH_DB);
+    assert!(project.compose(&["up", "-d", "db"]).status.success());
+    assert!(project.compose(&["stop", "db"]).status.success());
+    let db = project.container_id("db").unwrap();
+
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+    assert!(is_running(&db), "db should have been started");
+    session.close().await.unwrap();
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), Some(db.clone()));
+    assert!(!is_running(&db), "db should be stopped again");
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_running_dependency_is_left_alone() {
+    let project = ComposeProject::new("dep-running", TOOL_WITH_DB);
+    assert!(project.compose(&["up", "-d", "db"]).status.success());
+    let db = project.container_id("db").unwrap();
+
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+
+    assert_eq!(project.container_id("db"), Some(db.clone()));
+    assert!(is_running(&db), "db was not Alba's to stop");
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_running_dependency_whose_definition_changed_is_not_recreated() {
+    let project = ComposeProject::new("dep-diverged", TOOL_WITH_DB);
+    assert!(project.compose(&["up", "-d", "db"]).status.success());
+    let db = project.container_id("db").unwrap();
+    std::fs::write(
+        project.path().join("compose.yaml"),
+        format!(
+            "name: {}\n{}",
+            project.name,
+            TOOL_WITH_DB.replace(
+                "    command: sleep 3600\n",
+                "    command: sleep 3600\n    environment: [DIVERGED=1]\n"
+            )
+        ),
+    )
+    .unwrap();
+
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+
+    assert_eq!(project.container_id("db"), Some(db.clone()));
+    assert!(is_running(&db));
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_second_session_reuses_the_dependency_the_first_started() {
+    let project = ComposeProject::new("dep-reused", TOOL_WITH_DB);
+    let executor = ComposeExecutor::new();
+
+    let (first_ctx, _first_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let first = executor.open(first_ctx).await.unwrap();
+    let db = project.container_id("db").unwrap();
+    first.close().await.unwrap();
+
+    let (second_ctx, _second_rx) = beam_context(
+        &project.other_beam("second"),
+        project.path(),
+        options("tool"),
+    );
+    let second = executor.open(second_ctx).await.unwrap();
+    assert_eq!(project.container_id("db"), Some(db.clone()));
+    assert!(is_running(&db));
+    second.close().await.unwrap();
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn sessions_opening_together_start_a_dependency_once() {
+    let project = ComposeProject::new("dep-together", TOOL_WITH_DB);
+    let executor = ComposeExecutor::new();
+    let (first_ctx, _first_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let (second_ctx, _second_rx) = beam_context(
+        &project.other_beam("second"),
+        project.path(),
+        options("tool"),
+    );
+
+    let (first, second) = tokio::join!(executor.open(first_ctx), executor.open(second_ctx));
+    let (first, second) = (first.unwrap(), second.unwrap());
+
+    let containers = project.compose(&["ps", "-a", "-q", "db"]);
+    assert_eq!(
+        String::from_utf8_lossy(&containers.stdout).lines().count(),
+        1
+    );
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_healthcheck_is_waited_for() {
+    let project = ComposeProject::new(
+        "dep-healthy",
+        "services:
+  db:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 2 && touch /tmp/ready && sleep 3600\"]
+    stop_grace_period: 1s
+    healthcheck:
+      test: [\"CMD\", \"test\", \"-f\", \"/tmp/ready\"]
+      interval: 500ms
+      retries: 20
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      db:
+        condition: service_healthy
+",
+    );
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let db = project.container_id("db").unwrap();
+    let (ctx, _rx) = exec_context();
+    let result = session
+        .execute(spec("true", project.path()), ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    let health = std::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Health.Status}}", &db])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&health.stdout).trim(), "healthy");
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+}
+
+/// Opens a session of `tool` on `project` and returns what its first
+/// command, `command`, printed, with its exit code.
+async fn first_command(
+    project: &ComposeProject,
+    executor: &ComposeExecutor,
+    command: &str,
+) -> (i32, Vec<String>) {
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let mut session = executor.open(beam_ctx).await.unwrap();
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec(command, project.path()), ctx)
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+    (result.exit_code, drain_text(&mut rx).await)
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_shot_dependency_runs_to_completion() {
+    let project = ComposeProject::new(
+        "dep-one-shot",
+        "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 2 && touch /data/migrated\"]
+    volumes: [\"data:/data\"]
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\", \"data:/data\"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  data:
+",
+    );
+    let executor = ComposeExecutor::new();
+
+    let (exit_code, _) = first_command(&project, &executor, "test -f /data/migrated").await;
+    assert_eq!(
+        exit_code, 0,
+        "migrate should have completed before the command"
+    );
+    let migrate = project.container_id("migrate").unwrap();
+    let exited = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Status}} {{.State.ExitCode}}",
+            &migrate,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&exited.stdout).trim(), "exited 0");
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("migrate"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_shot_behind_another_dependency_runs_to_completion() {
+    let project = ComposeProject::new(
+        "dep-one-shot-transitive",
+        "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 2 && touch /data/migrated\"]
+    volumes: [\"data:/data\"]
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\", \"data:/data\"]
+    depends_on: [db]
+volumes:
+  data:
+",
+    );
+    let executor = ComposeExecutor::new();
+
+    let (exit_code, _) = first_command(&project, &executor, "test -f /data/migrated").await;
+    assert_eq!(
+        exit_code, 0,
+        "migrate should have completed before the command"
+    );
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+    assert_eq!(project.container_id("migrate"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_shot_reached_through_another_dependency_runs_once() {
+    // `tool` and `db` both wait for `migrate`: starting `db` runs it, and
+    // starting it again would run it a second time.
+    let project = ComposeProject::new(
+        "dep-one-shot-once",
+        "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"echo run >> /data/runs\"]
+    volumes: [\"data:/data\"]
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\", \"data:/data\"]
+    depends_on:
+      db:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  data:
+",
+    );
+    let executor = ComposeExecutor::new();
+
+    let (exit_code, output) = first_command(&project, &executor, "wc -l < /data/runs").await;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, vec!["1"]);
+    executor.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_shot_dependency_that_fails_fails_the_beam() {
+    let project = ComposeProject::new(
+        "dep-one-shot-fails",
+        "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"exit 3\"]
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+",
+    );
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let error = executor.open(beam_ctx).await.err().unwrap();
+
+    assert_eq!(
+        error.message,
+        "docker compose wait exited with code 3 for the dependency `migrate` of service `tool`"
+    );
+    assert!(labelled_containers(&project.beam(), true).is_empty());
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("migrate"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn cancelling_the_open_while_a_dependency_starts_puts_it_back() {
+    let project = ComposeProject::new(
+        "dep-cancel-start",
+        "services:
+  db:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 30 && touch /tmp/ready && sleep 3600\"]
+    stop_grace_period: 1s
+    healthcheck:
+      test: [\"CMD\", \"test\", \"-f\", \"/tmp/ready\"]
+      interval: 500ms
+      retries: 100
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      db:
+        condition: service_healthy
+",
+    );
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let _cancelled_at = cancel_after(beam_ctx.cancel.clone(), Duration::from_secs(3));
+
+    let error = executor.open(beam_ctx).await.err().unwrap();
+    assert_eq!(error.message, "compose session start cancelled");
+    assert!(
+        project.container_id("db").is_some(),
+        "db should have been created"
+    );
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_dependency_that_cannot_start_fails_the_beam_and_the_rest_is_put_back() {
+    let project = ComposeProject::new(
+        "dep-ghost",
+        "services:
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+  cache:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+  ghost:
+    image: alba-it-no-such-image:0
+    pull_policy: never
+    depends_on: [cache]
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on: [db, ghost]
+",
+    );
+    // `db` starts beside `ghost`; `cache` is surely started before `ghost`
+    // fails, being its dependency.
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, mut output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let error = executor.open(beam_ctx).await.err().unwrap();
+
+    assert_eq!(
+        error.message,
+        "docker compose up exited with code 1 for the dependencies of service `tool`"
+    );
+    let beam_output = drain_text(&mut output_rx).await;
+    assert!(
+        beam_output
+            .iter()
+            .any(|line| line.contains("alba-it-no-such-image")),
+        "expected Compose's message on the beam's output, found: {beam_output:?}"
+    );
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+    assert_eq!(project.container_id("cache"), None);
+    assert_eq!(project.container_id("ghost"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn cancelling_a_command_keeps_the_dependencies_until_shutdown() {
+    let project = ComposeProject::new("dep-cancel", TOOL_WITH_DB);
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let mut session = executor.open(beam_ctx).await.unwrap();
+    let db = project.container_id("db").unwrap();
+
+    let (output, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let ctx = ExecContext {
+        output,
+        cancel: cancel.clone(),
+    };
+    let _cancelled_at = cancel_after(cancel, Duration::from_millis(500));
+    session
+        .execute(spec("sleep 60", project.path()), ctx)
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+    assert!(is_running(&db), "db should outlive the cancelled session");
+
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("db"), None);
+}
+
+/// Removes a Docker volume when dropped: an anonymous volume outlives its
+/// container and no project teardown reaches it.
+struct VolumeCleanup(String);
+
+impl Drop for VolumeCleanup {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker")
+            .args(["volume", "rm", "-f", &self.0])
+            .output();
+    }
+}
+
+fn volume_exists(name: &str) -> bool {
+    let volumes = std::process::Command::new("docker")
+        .args(["volume", "ls", "-q"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&volumes.stdout)
+        .lines()
+        .any(|line| line == name)
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn shutdown_never_removes_a_volume() {
+    // A named volume, and an anonymous one as an image's `VOLUME` creates:
+    // `rm -v` would remove the anonymous one.
+    let project = ComposeProject::new(
+        "dep-volume",
+        "services:
+  db:
+    image: alpine:3
+    command: sleep 3600
+    stop_grace_period: 1s
+    volumes: [\"data:/data\", \"/scratch\"]
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on: [db]
+volumes:
+  data:
+",
+    );
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+    let db = project.container_id("db").unwrap();
+    let anonymous = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{range .Mounts}}{{if eq .Destination \"/scratch\"}}{{.Name}}{{end}}{{end}}",
+            &db,
+        ])
+        .output()
+        .unwrap();
+    let anonymous = VolumeCleanup(
+        String::from_utf8_lossy(&anonymous.stdout)
+            .trim()
+            .to_string(),
+    );
+    assert!(!anonymous.0.is_empty());
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+
+    assert_eq!(project.container_id("db"), None);
+    let named = format!("{}_data", project.name);
+    assert!(
+        volume_exists(&named),
+        "the volume `{named}` should still exist"
+    );
+    assert!(
+        volume_exists(&anonymous.0),
+        "the anonymous volume `{}` should still exist",
+        anonymous.0
+    );
+}
+
+#[tokio::test]
+async fn shutdown_with_nothing_started_succeeds() {
+    ComposeExecutor::new().shutdown().await.unwrap();
+}
