@@ -97,9 +97,12 @@ impl ProjectRecord {
     }
 
     /// The `up` that [`Self::up_started`] marked ran to its end: the record
-    /// gets back the mark it had before.
-    pub fn up_finished(&mut self, previously: bool) {
-        self.interrupted = previously;
+    /// gets back the mark it had before, unless the beam was `cancelled` by
+    /// then. A terminal Ctrl-C reaches the `up` as well as Alba, so it can
+    /// exit on the signal before the cancellation is seen, with an operation
+    /// still in flight: it counts as cut short.
+    pub fn up_finished(&mut self, previously: bool, cancelled: bool) {
+        self.interrupted = previously || cancelled;
     }
 
     /// The services to `rm -s -f` and the services to `stop`, each sorted.
@@ -215,12 +218,25 @@ mod tests {
     fn an_up_that_finishes_keeps_an_earlier_interruption() {
         let mut record = record();
         let previously = record.up_started();
-        record.up_finished(previously);
+        record.up_finished(previously, false);
         assert!(!record.interrupted);
 
         let _ = record.up_started();
         let previously = record.up_started();
-        record.up_finished(previously);
+        record.up_finished(previously, false);
+        assert!(record.interrupted);
+    }
+
+    #[test]
+    fn an_up_that_finishes_once_the_beam_is_cancelled_stays_interrupted() {
+        let mut record = record();
+
+        // A terminal Ctrl-C reaches the `up` too, which can exit on it
+        // before the cancellation is seen: it may have left an operation in
+        // flight all the same.
+        let previously = record.up_started();
+        record.up_finished(previously, true);
+
         assert!(record.interrupted);
     }
 

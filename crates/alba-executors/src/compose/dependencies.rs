@@ -239,7 +239,8 @@ impl Dependencies {
 /// was cancelled, or the future of the session start was dropped, which
 /// kills it) may still have had one such operation in flight: the record
 /// is marked before the spawn and the mark kept, for `shutdown` to look
-/// again.
+/// again. So is an `up` that ends once the beam is cancelled: a terminal
+/// Ctrl-C reaches it too, and it can exit on the signal first.
 async fn up(
     project: &Project,
     beam: &BeamContext,
@@ -256,7 +257,7 @@ async fn up(
     // A successful `up` has nothing worth keeping on stdout.
     let previously = record.up_started();
     let up = run_step(project.command(&args), beam).await?;
-    record.up_finished(previously);
+    record.up_finished(previously, beam.cancel.is_cancelled());
     Ok(exit_code_if_failed(up.status))
 }
 
