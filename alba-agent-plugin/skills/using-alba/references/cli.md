@@ -34,12 +34,16 @@ text renderers on a terminal.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. |
-| `1` | A beam failed and was not `allow_failure`. |
+| `1` | A beam failed and was not `allow_failure`, or an executor could not release what it held for the run. |
 | `2` | Alba itself failed: missing Beamfile, parse or validation error, bad invocation. |
 | `130` | Interrupted. |
 
 `alba check` and `alba affected` exit `0` when nothing is wrong, even with
-an empty affected list. A `--watch` session exits `0` on Ctrl-C.
+an empty affected list. A `--watch` session ended by Ctrl-C exits `0`, or
+`1` when an executor could not release what it held once the session
+ended; `2` when the Beamfile fails to load at startup or the file watcher
+cannot start or dies, and `2` wins over `1`. A second Ctrl-C leaves at
+once and skips that cleanup.
 
 ## JSON stream (`--log-format json`)
 
@@ -52,10 +56,12 @@ One object per line, dispatched on `event`:
 | `beam_cached` | `beam`. |
 | `beam_output` | `beam`, `stream` (`stdout`/`stderr`), `text`, `replayed`. |
 | `beam_finished` | `beam`, `status`, `exit_code`, `duration_ms`. |
-| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (beam id lists), `duration_ms`, `exit_code`. |
+| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (beam id lists), `duration_ms`, `exit_code`, `cleanup_errors` (a non-empty list makes the exit code `1`). |
 
 A watch session adds `project_broken` (`diagnostic`), `watch_waiting`
-(`files`), and `watch_triggered`.
+(`files`), and `watch_triggered`. Its `cleanup_errors` are always empty:
+executors are shut down when the session ends, and their errors go to
+stderr as `cleanup failed: <message>` lines.
 
 `alba affected <ref> --log-format json` prints `{"beams": [...]}`.
 
