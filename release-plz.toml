@@ -39,7 +39,9 @@ git_tag_enable = true
 git_tag_name = "v{{ version }}"
 
 [changelog]
-# Strip the gitmoji so the conventional part of the subject is parsed.
+# Strip the gitmoji so the conventional part of the subject is parsed,
+# variation selector included: emoji such as ♻️ and ⚡️ end with an
+# invisible U+FE0F that would otherwise be left before the type.
 commit_preprocessors = [
-  { pattern = ' *(:\w+:|[\p{Emoji_Presentation}\p{Extended_Pictographic}\u{200D}]) *', replace = "" },
+  { pattern = ' *(:\w+:|[\p{Emoji_Presentation}\p{Extended_Pictographic}\u{200D}\u{FE0F}]) *', replace = "" },
 ]
