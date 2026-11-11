@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/albahq/alba/compare/v0.4.0...v0.5.0) - 2026-11-11
+
+### Added
+
+- *(executors)* add the compose executor
+- *(engine)* shut executors down when a session ends
+- *(executors)* let an executor release state after a run
+- *(executors)* honour optional compose dependencies
+- *(executors)* manage a compose service's dependencies
+- *(executors)* explain a compose container slow to start
+- *(executors)* run a beam in a compose service
+
+### Fixed
+
+- *(cli)* warn that a second Ctrl-C skips cleanup
+- *(cli)* print the session report after the replay
+- *(cli)* exit 1 when a session cannot clean up
+- *(executors)* read an exited compose one-shot's code
+- *(executors)* name the dependencies in the compose state read
+- *(executors)* ignore one-off containers in compose state
+- *(executors)* mark a compose up ended by Ctrl-C as interrupted
+- *(executors)* refuse a compose service read as a flag
+- *(executors)* word the compose spawn error without a dash
+- *(executors)* mark a dropped compose start as interrupted
+- *(executors)* wait only for healthy compose dependencies
+- *(executors)* report a container removal that does not end
+- *(executors)* harden the start of a compose session
+- *(executors)* remove a cancelled container within the grace
+- *(executors)* accept a container removal already in progress
+
+### Other
+
+- *(cli)* prove compose beams overlap without a clock
+- *(executors)* clarify the compose crash cleanup wording
+- *(executors)* advise removing a compose dependency after a crash
+- *(cli)* say where a watch session reports cleanup errors
+- *(executors)* reflow the compose notes and scope the cleanup advice
+- *(executors)* document the compose executor
+- *(cli)* share the session report between watch front ends
+- *(engine)* tidy comments and an expectation message
+- *(core)* judge the project load by its fastest sample
+- *(engine)* cover the compose did-you-mean suggestion
+- *(engine)* judge the cached run by its fastest sample
+- *(engine)* end shutdown-command tests through the command alone
+- *(executors)* free a compose test network before down
+- *(executors)* wrap compose dependency docs to the file width
+- *(executors)* cover a compose one-shot that already ran
+- *(executors)* move compose dependencies to a module
+- *(executors)* cut the dead wait of a cancelled container stop
+- *(executors)* drop caller vocabulary from a container comment
+- *(executors)* word the container comments for every caller
+- *(executors)* share the container plumbing
+
 ## [0.4.0](https://github.com/albahq/alba/compare/v0.3.0...v0.4.0) - 2026-11-10
 
 ### Added
