@@ -1,6 +1,6 @@
 # Alba: Compose Executor
 
-Date: 2026-11-10 Status: draft
+Date: 2026-11-10 Status: approved
 
 ## Overview
 
@@ -249,8 +249,9 @@ At open, for the transitive closure of the target service's `depends_on`:
    diverged definition included; an absent or stopped one is started. The command is quiet when it succeeds
    and its output goes to the beam's output when it fails.
 3. `depends_on` conditions (`service_healthy`, `service_completed_successfully`) must be honoured as
-   `docker compose run` would honour them before the beam's container starts. `--wait` is the expected way;
-   the builder confirms its behaviour for each condition against a real daemon.
+   `docker compose run` would honour them before the beam's container starts. Measured: `up --wait` handles
+   `service_healthy` and `service_started`, not `service_completed_successfully`, which goes through
+   `docker compose wait`.
 
 The `ComposeExecutor` keeps, per Compose project (keyed by the project name `config` reports, with the
 directory and `file` needed to address it again), the dependencies **Alba started** and the state each had
@@ -336,7 +337,8 @@ The linux CI job that already runs the docker tests runs these.
 - `README.md`: a "Compose executor" section after "Docker executor": the block, the lookup of the Compose
   file, the working directory rule, the dependency lifecycle and its limits, the prerequisites, the manual
   cleanup. The docker section points to it for projects that already have a Compose file.
-- `CHANGELOG.md`: the new executor and the reserved name.
+- `CHANGELOG.md`: not edited by hand; the entry comes from the feature commit, whose body states the reserved
+  name.
 - `alba-agent-plugin/skills/using-alba/SKILL.md` and `references/beamfile.md`: the new executor.
 
 ## Success criteria
@@ -370,7 +372,7 @@ Measured with Docker Compose v5.6.1 on Docker Desktop 29.9.2 (macOS):
   `docker compose up -d --no-recreate` left it untouched and started an absent one; `run --no-deps` then
   touched nothing. `docker compose rm -s -f <service>` took about 3 s on a container ignoring `SIGTERM`.
 
-Not measured: `up --wait` against each `depends_on` condition, and anything on Linux or Windows.
+Not measured: anything on Linux or Windows.
 
 ## Deferred
 
