@@ -1514,6 +1514,15 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelt_compose_suggests_compose() {
+        let project =
+            alba_core::load_str(r#"beam d { executor compse { service "x" } run "x" }"#).unwrap();
+        let beams: Vec<&Beam> = project.beams.iter().collect();
+        let message = resolve_plugins(&beams, |_| None).unwrap_err().to_string();
+        assert!(message.contains("did you mean `compose`?"), "{message}");
+    }
+
+    #[test]
     fn resolution_collects_one_path_per_distinct_plugin_name() {
         let project = alba_core::load_str(
             r#"

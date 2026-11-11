@@ -68,9 +68,9 @@ pub enum ExecutorKind {
         file: Option<String>,
     },
     /// `executor <name> { ... }` for any name that is not `shell`,
-    /// `system_shell`, `docker`, or `compose`. Not an error: `name` is resolved at
-    /// plan time to an external `alba-executor-<name>` binary on the
-    /// `PATH`, and `options` is handed to it verbatim.
+    /// `system_shell`, `docker`, or `compose`. Not an error: `name` is
+    /// resolved at plan time to an external `alba-executor-<name>` binary
+    /// on the `PATH`, and `options` is handed to it verbatim.
     Plugin {
         name: String,
         options: Vec<(String, OptionValue)>,
