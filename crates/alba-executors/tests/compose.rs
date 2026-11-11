@@ -613,11 +613,8 @@ async fn cancelling_a_command_removes_the_container() {
         elapsed < Duration::from_secs(8),
         "execute() took {elapsed:?} to return after cancellation"
     );
-    // `sh`, the container's main process, ignores the `SIGTERM` of
-    // `docker stop`, so the daemon only kills it once the stop grace has
-    // run out, which is also when `execute` gives up waiting: the container
-    // goes away right after, without `close`.
-    assert_no_container_within(&project.beam(), Duration::from_secs(5)).await;
+    // Already gone when `execute` returns, before any `close`.
+    assert!(labelled_containers(&project.beam(), true).is_empty());
     session.close().await.unwrap();
 }
 

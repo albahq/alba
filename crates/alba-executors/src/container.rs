@@ -19,6 +19,14 @@ use crate::{CommandSpec, ExecContext, ExecError, ExecResult, Stream};
 /// cancelled beam past the grace period this advertises.
 pub(crate) const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// How long `docker stop` lets a cancelled container's main process exit on
+/// `SIGTERM` before the daemon kills it. A main process that ignores
+/// `SIGTERM` (a `sh` running as PID 1, as the executors start) always takes
+/// this long, so it is shorter than [`STOP_GRACE`]: the removal and the
+/// reaping that follow the stop must still fit inside that bound, or the
+/// container would outlive the cancelled command.
+pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long to wait for the stdout/stderr reader tasks to observe EOF
 /// after a `docker exec` child has exited, before giving up on further
 /// output and returning anyway. Mirrors `shell.rs`'s `DRAIN_PERIOD`: a
@@ -132,16 +140,18 @@ pub(crate) async fn exec(
             message: format!("failed to wait for `docker exec`: {error}"),
         }),
         _ = ctx.cancel.cancelled() => {
-            // Ask the daemon to stop the container, then make sure the
-            // local `docker exec` process is gone. The whole sequence
-            // — stop, rm, and reaping the child — is bounded by
-            // STOP_GRACE so a slow or unreachable daemon cannot hold
-            // the beam past the grace period it advertises; only the
-            // fallback kill is unbounded, and it targets our own local
-            // process, which cannot itself hang on the daemon.
+            // Ask the daemon to stop the container, remove it, wait until
+            // it is gone, then make sure the local `docker exec` process
+            // is gone too. The whole sequence (stop, removal, reaping the
+            // child) is bounded by STOP_GRACE so a slow or unreachable
+            // daemon cannot hold the beam past the grace period it
+            // advertises; only the fallback kill is unbounded, and it
+            // targets our own local process, which cannot itself hang on
+            // the daemon.
             let teardown = async {
-                run_quiet(&["stop", "--time", &STOP_GRACE.as_secs().to_string(), container]).await;
+                run_quiet(&["stop", "--time", &STOP_TIMEOUT.as_secs().to_string(), container]).await;
                 run_quiet(&["rm", "-f", container]).await;
+                wait_until_gone(container).await;
                 let _ = child.wait().await;
             };
             if tokio::time::timeout(STOP_GRACE, teardown).await.is_err() {
@@ -181,6 +191,33 @@ pub(crate) async fn exec(
     Ok(ExecResult {
         exit_code: status.code().unwrap_or(-1),
     })
+}
+
+/// How often [`wait_until_gone`] asks the daemon whether a container still
+/// exists.
+const GONE_POLL: Duration = Duration::from_millis(100);
+
+/// Waits until the daemon no longer knows `container`. `docker rm -f` returns
+/// early, with "removal ... is already in progress", when the daemon is
+/// already removing a `--rm` container that just stopped: the container is
+/// still listed until that removal ends. Unbounded on its own: callers bound
+/// it. A `docker` that cannot be spawned ends the wait, there being nothing
+/// left to ask.
+async fn wait_until_gone(container: &str) {
+    loop {
+        let exists = Command::new("docker")
+            .args(["container", "inspect", "--format", "{{.Id}}", container])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success());
+        if !exists {
+            return;
+        }
+        tokio::time::sleep(GONE_POLL).await;
+    }
 }
 
 /// Removes `container` with `docker rm -f`. A container that is already gone,
