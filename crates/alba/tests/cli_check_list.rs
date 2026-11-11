@@ -124,6 +124,26 @@ fn check_accepts_valid_embedded_commands() {
         .stdout(predicates::str::contains("\u{2713} Beamfile: 1 beam"));
 }
 
+/// `alba check` never runs `docker`: a Beamfile with a compose beam passes on
+/// a machine where `docker` is not on the `PATH`.
+#[test]
+fn check_accepts_a_compose_beam_without_docker() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam test { executor compose { service \"php\" } run \"phpunit\" }",
+    )
+    .unwrap();
+    alba()
+        .current_dir(&dir)
+        .env("PATH", empty_path.path())
+        .arg("check")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\u{2713} Beamfile: 1 beam"));
+}
+
 /// Beamfile with two described beams and no `default` declaration: a bare
 /// `alba` invocation must list both ids and both descriptions on stdout,
 /// sorted by id (`build` before `test`), and exit 0.

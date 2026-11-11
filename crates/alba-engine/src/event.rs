@@ -142,15 +142,24 @@ pub struct RunSummary {
     pub failed_allowed: Vec<BeamId>,
     pub cancelled: Vec<BeamId>,
     pub duration: Duration,
+    /// Errors met while releasing what executors held for the run
+    /// ([`alba_executors::Executor::shutdown`]), in executor slot order.
+    /// A run whose beams all passed still fails when this is not empty.
+    pub cleanup_errors: Vec<String>,
 }
 
 impl RunSummary {
     /// The process exit code this run should produce: 0 unless a beam
-    /// failed outright. An allowed failure and a cancellation are both
-    /// deliberately 0 here; Alba's own errors (a Beamfile that does not
-    /// load, an unschedulable run) exit 2 and never reach a summary.
+    /// failed outright or an executor could not release what it held. An
+    /// allowed failure and a cancellation are both deliberately 0 here;
+    /// Alba's own errors (a Beamfile that does not load, an unschedulable
+    /// run) exit 2 and never reach a summary.
     pub fn exit_code(&self) -> i32 {
-        if self.failed.is_empty() { 0 } else { 1 }
+        if self.failed.is_empty() && self.cleanup_errors.is_empty() {
+            0
+        } else {
+            1
+        }
     }
 
     /// Files `id` under `status`. The single place a status becomes a

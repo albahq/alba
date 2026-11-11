@@ -38,6 +38,7 @@ pub enum FakeEvent {
     Killed {
         beam: String,
     },
+    ShutDown,
 }
 
 /// The state shared between [`FakeExecutor`] and every [`FakeSession`] it
@@ -55,6 +56,8 @@ struct FakeState {
     /// `(beam_substring, message)`: `open` fails with `message` for any
     /// beam whose label contains `beam_substring`.
     open_failures: Mutex<Vec<(String, String)>>,
+    /// The message `shutdown` fails with, when set.
+    shutdown_failure: Mutex<Option<String>>,
     running: AtomicUsize,
     peak: AtomicUsize,
 }
@@ -91,6 +94,7 @@ impl FakeExecutor {
                 calls: Mutex::new(Vec::new()),
                 events: Mutex::new(Vec::new()),
                 open_failures: Mutex::new(Vec::new()),
+                shutdown_failure: Mutex::new(None),
                 running: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
             }),
@@ -118,6 +122,14 @@ impl FakeExecutor {
             .lock()
             .unwrap()
             .push((beam_substring.into(), message.into()));
+        self
+    }
+
+    /// Makes `shutdown` fail with `message` as the resulting [`ExecError`];
+    /// it still records [`FakeEvent::ShutDown`]. Consumes and returns
+    /// `self`, chainable like [`FakeExecutor::on`].
+    pub fn fail_shutdown(self, message: impl Into<String>) -> Self {
+        *self.state.shutdown_failure.lock().unwrap() = Some(message.into());
         self
     }
 
@@ -170,6 +182,14 @@ impl Executor for FakeExecutor {
             state: Arc::clone(&self.state),
             beam: beam.beam,
         }))
+    }
+
+    async fn shutdown(&self) -> Result<(), ExecError> {
+        self.state.events.lock().unwrap().push(FakeEvent::ShutDown);
+        match self.state.shutdown_failure.lock().unwrap().clone() {
+            Some(message) => Err(ExecError { message }),
+            None => Ok(()),
+        }
     }
 }
 

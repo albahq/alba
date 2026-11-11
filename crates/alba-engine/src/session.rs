@@ -68,9 +68,11 @@ use tokio_util::sync::CancellationToken;
 use crate::EngineError;
 use crate::affected::{Selection, select};
 use crate::event::RunEvent;
-use crate::scheduler::{Executors, RunOptions, run};
+use crate::scheduler::{Executors, RunOptions, run_in_session};
 use crate::watch::set::{Relevance, WatchSet};
-use crate::watch::{SessionError, WatchBatch, WatchExit, Watcher, beamfile_dir, display_paths};
+use crate::watch::{
+    SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, beamfile_dir, display_paths,
+};
 
 /// What a session can be told to do, by the TUI or any future driver.
 #[derive(Debug)]
@@ -93,6 +95,10 @@ pub enum SessionCommand {
 /// `watch_enabled`, for a [`SessionCommand`] from `commands` — until
 /// `cancel` fires, a `Shutdown` arrives, or the watcher dies.
 ///
+/// Whatever way the session ends, the executors are shut down exactly once,
+/// after the last run has wound down; what they could not release comes
+/// back in [`SessionEnd::cleanup_errors`].
+///
 /// `project` and `sources` are taken owned: the session outlives the
 /// caller's own copy, and both are cheap to clone.
 ///
@@ -108,6 +114,45 @@ pub enum SessionCommand {
 /// means the invocation was wrong rather than the edit unfinished.
 #[allow(clippy::too_many_arguments)]
 pub async fn session(
+    beamfile: &Path,
+    project: Project,
+    sources: SourceMap,
+    selection: Selection,
+    options: RunOptions,
+    executors: Executors,
+    events: UnboundedSender<RunEvent>,
+    commands: Option<UnboundedReceiver<SessionCommand>>,
+    watch_enabled: bool,
+    cancel: CancellationToken,
+    watcher: Box<dyn Watcher>,
+    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
+) -> SessionEnd {
+    // The loop lives in its own function so that no `return` inside it can
+    // skip the shutdown below.
+    let exit = drive(
+        beamfile,
+        project,
+        sources,
+        selection,
+        options,
+        executors.clone(),
+        events,
+        commands,
+        watch_enabled,
+        cancel,
+        watcher,
+        render_error,
+    )
+    .await;
+    SessionEnd {
+        exit,
+        cleanup_errors: executors.shutdown().await,
+    }
+}
+
+/// The session loop proper; see [`session`].
+#[allow(clippy::too_many_arguments)]
+async fn drive(
     beamfile: &Path,
     mut project: Project,
     mut sources: SourceMap,
@@ -240,7 +285,7 @@ pub async fn session(
         // run next, which is why the wait phase gets skipped when it is set.
         let mut commanded: Option<(BeamId, bool)> = None;
         let result = {
-            let run_future = run(
+            let run_future = run_in_session(
                 &project,
                 &targets,
                 run_options,

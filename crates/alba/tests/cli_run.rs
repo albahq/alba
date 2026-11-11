@@ -745,6 +745,10 @@ mod interrupts {
             "the second signal must say it gave up on the orderly path, got:\n{stderr}"
         );
         assert!(
+            stderr.contains("dependencies Alba started may be left running"),
+            "the second signal must warn that cleanup was skipped, got:\n{stderr}"
+        );
+        assert!(
             elapsed < ABORT_DEADLINE,
             "the second signal must not wait out the executor's grace period, took {elapsed:?}"
         );

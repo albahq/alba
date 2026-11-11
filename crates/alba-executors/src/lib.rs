@@ -26,6 +26,8 @@
 
 use std::path::PathBuf;
 
+mod compose;
+mod container;
 mod docker;
 mod embedded;
 mod plugin;
@@ -36,6 +38,7 @@ mod fake;
 
 pub mod protocol;
 
+pub use compose::ComposeExecutor;
 pub use docker::DockerExecutor;
 pub use embedded::EmbeddedShellExecutor;
 pub use plugin::PluginExecutor;
@@ -53,6 +56,15 @@ pub use fake::{FakeBehavior, FakeEvent, FakeExecutor};
 #[async_trait::async_trait]
 pub trait Executor: Send + Sync {
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError>;
+
+    /// Releases whatever this executor held for the whole run, once every
+    /// session it opened has been closed. The engine calls it exactly once
+    /// per distinct executor at the end of a run, in every case (success,
+    /// failure, or cancellation). The default holds nothing, so there is
+    /// nothing to release.
+    async fn shutdown(&self) -> Result<(), ExecError> {
+        Ok(())
+    }
 }
 
 /// The per-beam unit a session's commands run in: whatever state a beam

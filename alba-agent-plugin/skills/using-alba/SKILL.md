@@ -35,7 +35,9 @@ Alba is a task runner written in Rust, an alternative to `make`, `just`, and
   (`if`, `for`, `while`, `case`), functions, heredocs, and `$1`-style
   parameters are rejected at `alba check` time. A beam that needs them
   declares `executor system_shell`; `executor docker { image "..." }` runs
-  inside a container; any other executor name is an external plugin binary.
+  inside a container; `executor compose { service "..." }` runs in a
+  service of the project's Compose file; any other executor name is an
+  external plugin binary.
 - **`alba check`** validates the whole project without running anything.
   Run it after every Beamfile edit.
 

@@ -109,6 +109,9 @@ enum WireEvent<'a> {
         /// process ends up returning — a run the user interrupted exits
         /// `130` regardless of how far its beams got.
         exit_code: i32,
+        /// Errors met while releasing what executors held for the run;
+        /// always present, empty when nothing failed.
+        cleanup_errors: &'a [String],
     },
     WatchWaiting {
         files: usize,
@@ -187,6 +190,7 @@ impl<'a> WireEvent<'a> {
             cancelled: ids(&summary.cancelled),
             duration_ms: millis(&summary.duration),
             exit_code: summary.exit_code(),
+            cleanup_errors: &summary.cleanup_errors,
         }
     }
 }
@@ -323,6 +327,33 @@ mod tests {
         assert_eq!(value["succeeded"][0], "a");
         assert_eq!(value["failed"][0], "b");
         assert_eq!(value["exit_code"], 1);
+    }
+
+    #[test]
+    fn the_final_event_carries_the_cleanup_errors() {
+        let event = RunEvent::RunFinished {
+            summary: RunSummary {
+                cleanup_errors: vec!["db would not stop".to_string()],
+                ..RunSummary::default()
+            },
+        };
+
+        let value = json(&event);
+
+        assert_eq!(
+            value["cleanup_errors"],
+            serde_json::json!(["db would not stop"])
+        );
+        assert_eq!(value["exit_code"], 1);
+    }
+
+    #[test]
+    fn the_final_event_carries_an_empty_cleanup_errors_field_when_nothing_failed() {
+        let event = RunEvent::RunFinished {
+            summary: RunSummary::default(),
+        };
+
+        assert_eq!(json(&event)["cleanup_errors"], serde_json::json!([]));
     }
 
     /// `run_started` is part of the public JSON contract: a consumer needs

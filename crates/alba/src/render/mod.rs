@@ -218,6 +218,9 @@ pub fn print_summary<W: Write>(
     affected_by: Option<&str>,
 ) {
     sink.line(&summary_line(summary, affected_by));
+    for error in &summary.cleanup_errors {
+        sink.line(&format!("cleanup failed: {error}"));
+    }
 }
 
 /// The exact `--affected` empty-run line, verbatim wherever a reference
@@ -333,6 +336,37 @@ mod tests {
             summary_line(&RunSummary::default(), Some("HEAD")),
             "\u{2713} nothing affected by HEAD"
         );
+    }
+
+    /// `print_summary` is the one place both text renderers write their
+    /// stderr summary, so the cleanup failure line is asserted here, on a
+    /// buffer, rather than through two renderers owning a real stderr.
+    #[test]
+    fn each_cleanup_error_gets_its_own_line_after_the_summary() {
+        let summary = RunSummary {
+            succeeded: vec![BeamId("a".to_string())],
+            cleanup_errors: vec!["db would not stop".into(), "cache would not stop".into()],
+            ..RunSummary::default()
+        };
+        let mut sink = LineSink::new(Vec::new());
+
+        print_summary(&mut sink, &summary, None);
+
+        let written = String::from_utf8(sink.writer).unwrap();
+        let lines: Vec<_> = written.lines().collect();
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        assert_eq!(lines[1], "cleanup failed: db would not stop");
+        assert_eq!(lines[2], "cleanup failed: cache would not stop");
+    }
+
+    #[test]
+    fn a_clean_run_prints_no_cleanup_line() {
+        let mut sink = LineSink::new(Vec::new());
+
+        print_summary(&mut sink, &RunSummary::default(), None);
+
+        let written = String::from_utf8(sink.writer).unwrap();
+        assert!(!written.contains("cleanup failed"), "got {written:?}");
     }
 
     /// `affected_by` only changes the empty case: a run that did affect

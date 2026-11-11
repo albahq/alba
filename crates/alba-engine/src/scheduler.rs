@@ -98,17 +98,41 @@ pub struct Executors {
     pub system: Arc<dyn Executor>,
     /// `ExecutorKind::Docker`: a beam that opted into a container.
     pub docker: Arc<dyn Executor>,
+    /// `ExecutorKind::Compose`: a beam that runs in a Compose service.
+    pub compose: Arc<dyn Executor>,
 }
 
 impl Executors {
-    /// All three slots on the same executor: what tests and `alba check`
+    /// Every slot on the same executor: what tests and `alba check`
     /// want.
     pub fn uniform(executor: Arc<dyn Executor>) -> Self {
         Self {
             embedded: Arc::clone(&executor),
             system: Arc::clone(&executor),
-            docker: executor,
+            docker: Arc::clone(&executor),
+            compose: executor,
         }
+    }
+
+    /// Shuts down every distinct executor among the slots, once each
+    /// (`Arc::ptr_eq`: [`Executors::uniform`] fills every slot with one),
+    /// attempting every slot even after one failed. Returns the error
+    /// messages in slot order.
+    pub async fn shutdown(&self) -> Vec<String> {
+        let slots = [&self.embedded, &self.system, &self.docker, &self.compose];
+        let mut errors = Vec::new();
+        for (index, executor) in slots.iter().enumerate() {
+            if slots[..index]
+                .iter()
+                .any(|seen| Arc::ptr_eq(seen, executor))
+            {
+                continue;
+            }
+            if let Err(error) = executor.shutdown().await {
+                errors.push(error.message);
+            }
+        }
+        errors
     }
 
     /// Which executor a beam's declared kind dispatches to.
@@ -122,6 +146,7 @@ impl Executors {
             ExecutorKind::Shell => Arc::clone(&self.embedded),
             ExecutorKind::SystemShell => Arc::clone(&self.system),
             ExecutorKind::Docker { .. } => Arc::clone(&self.docker),
+            ExecutorKind::Compose { .. } => Arc::clone(&self.compose),
             ExecutorKind::Plugin { .. } => {
                 unreachable!("plugin beams are dispatched in `run`, never through `for_beam`")
             }
@@ -158,6 +183,12 @@ fn executor_label(kind: &ExecutorKind) -> String {
             }
             push_field(&mut label, workdir.as_deref().unwrap_or(""));
             push_field(&mut label, user.as_deref().unwrap_or(""));
+            label
+        }
+        ExecutorKind::Compose { service, file } => {
+            let mut label = String::from("compose");
+            push_field(&mut label, service);
+            push_field(&mut label, file.as_deref().unwrap_or(""));
             label
         }
         ExecutorKind::Plugin { name, options } => {
@@ -232,6 +263,10 @@ fn executor_options(kind: &ExecutorKind) -> serde_json::Value {
             "workdir": workdir,
             "user": user,
         }),
+        ExecutorKind::Compose { service, file } => serde_json::json!({
+            "service": service,
+            "file": file,
+        }),
         ExecutorKind::Plugin { options, .. } => serde_json::Value::Object(
             options
                 .iter()
@@ -281,6 +316,12 @@ impl Targets {
 /// [`RunSummary::exit_code`] turns that into the process exit code.
 /// `RunFinished` is emitted last, and only on the `Ok` path — an `Err` has
 /// no summary to report.
+///
+/// Once every beam task is awaited, the run shuts the executors down
+/// ([`Executors::shutdown`]) and records any error in
+/// [`RunSummary::cleanup_errors`] before `RunFinished`. On an `Err` path it
+/// shuts them down too and drops the result: the [`EngineError`] is what
+/// gets reported.
 pub async fn run(
     project: &Project,
     targets: &Targets,
@@ -289,8 +330,41 @@ pub async fn run(
     events: UnboundedSender<RunEvent>,
     cancel: CancellationToken,
 ) -> Result<RunSummary, EngineError> {
+    run_once(project, targets, options, executors, events, cancel, true).await
+}
+
+/// [`run`] for a watch session: identical, except it never shuts the
+/// executors down, so what they hold survives from one run to the next.
+pub(crate) async fn run_in_session(
+    project: &Project,
+    targets: &Targets,
+    options: RunOptions,
+    executors: Executors,
+    events: UnboundedSender<RunEvent>,
+    cancel: CancellationToken,
+) -> Result<RunSummary, EngineError> {
+    run_once(project, targets, options, executors, events, cancel, false).await
+}
+
+async fn run_once(
+    project: &Project,
+    targets: &Targets,
+    options: RunOptions,
+    executors: Executors,
+    events: UnboundedSender<RunEvent>,
+    cancel: CancellationToken,
+    shut_down: bool,
+) -> Result<RunSummary, EngineError> {
     let started_at = Instant::now();
-    let (beams, plugins) = plan(project, &targets.beams, &options.params)?;
+    let (beams, plugins) = match plan(project, &targets.beams, &options.params) {
+        Ok(planned) => planned,
+        Err(error) => {
+            if shut_down {
+                executors.shutdown().await;
+            }
+            return Err(error);
+        }
+    };
 
     let _ = events.send(RunEvent::RunStarted {
         targets: targets.beams.clone(),
@@ -390,9 +464,15 @@ pub async fn run(
         }
     }
     if let Some(error) = failure {
+        if shut_down {
+            executors.shutdown().await;
+        }
         return Err(error);
     }
 
+    if shut_down {
+        summary.cleanup_errors = executors.shutdown().await;
+    }
     summary.duration = started_at.elapsed();
     let _ = events.send(RunEvent::RunFinished {
         summary: summary.clone(),
@@ -464,9 +544,10 @@ fn resolve_plugins(
                      executor nor `{binary}` on the PATH",
                     beam.id.0,
                 );
-                if let Some(candidate) =
-                    alba_core::suggest(name, ["shell", "system_shell", "docker"].into_iter())
-                {
+                if let Some(candidate) = alba_core::suggest(
+                    name,
+                    ["shell", "system_shell", "docker", "compose"].into_iter(),
+                ) {
                     message.push_str(&format!(" — did you mean `{candidate}`?"));
                 }
                 return Err(EngineError::Unschedulable(message));
@@ -1192,6 +1273,33 @@ mod tests {
     }
 
     #[test]
+    fn a_compose_label_changes_with_its_service_and_its_file() {
+        let compose = |service: &str, file: Option<&str>| ExecutorKind::Compose {
+            service: service.into(),
+            file: file.map(Into::into),
+        };
+        let docker = ExecutorKind::Docker {
+            image: Some("php".into()),
+            build: None,
+            dockerfile: None,
+            volumes: vec![],
+            workdir: None,
+            user: None,
+        };
+        let labels: Vec<String> = [
+            compose("php", None),
+            compose("node", None),
+            compose("php", Some("c.yaml")),
+            docker,
+        ]
+        .iter()
+        .map(executor_label)
+        .collect();
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "labels collided: {labels:?}");
+    }
+
+    #[test]
     fn a_docker_label_changes_with_every_piece_of_its_configuration() {
         let base = ExecutorKind::Docker {
             image: Some("alpine:3".into()),
@@ -1403,6 +1511,15 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("did you mean `docker`?"), "{message}");
+    }
+
+    #[test]
+    fn a_misspelt_compose_suggests_compose() {
+        let project =
+            alba_core::load_str(r#"beam d { executor compse { service "x" } run "x" }"#).unwrap();
+        let beams: Vec<&Beam> = project.beams.iter().collect();
+        let message = resolve_plugins(&beams, |_| None).unwrap_err().to_string();
+        assert!(message.contains("did you mean `compose`?"), "{message}");
     }
 
     #[test]
