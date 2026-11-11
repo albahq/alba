@@ -30,8 +30,8 @@ use crate::{
 };
 
 /// What the docker executor needs from the host, finishing the message of a
-/// failed `docker` spawn.
-const DOCKER_REQUIREMENT: &str = "the docker executor requires Docker on the PATH";
+/// failed `docker` spawn, separator included.
+const DOCKER_REQUIREMENT: &str = " \u{2014} the docker executor requires Docker on the PATH";
 
 /// Runs beam commands inside a per-session docker container. See the module
 /// doc comment for the container lifecycle.
@@ -505,6 +505,17 @@ fn container_user(declared: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host without `docker` gets a message naming the executor that
+    /// needs it, worded as it always has been.
+    #[test]
+    fn a_missing_docker_binary_names_the_docker_executor() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        assert_eq!(
+            spawn_error(error, DOCKER_REQUIREMENT).message,
+            "cannot run `docker`: not found \u{2014} the docker executor requires Docker on the PATH"
+        );
+    }
 
     #[test]
     fn config_deserializes_with_defaults() {

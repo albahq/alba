@@ -38,11 +38,11 @@ pub(crate) const DRAIN_PERIOD: Duration = Duration::from_secs(2);
 
 /// Maps a spawn failure of the `docker` binary itself (as opposed to a
 /// non-zero exit from a `docker` subcommand) to a hint that the executor
-/// needs `docker` on the `PATH`. `requirement` finishes the sentence and
-/// names the executor that needs it.
+/// needs `docker` on the `PATH`. `requirement` finishes the sentence,
+/// separator included, and names the executor that needs it.
 pub(crate) fn spawn_error(error: std::io::Error, requirement: &str) -> ExecError {
     ExecError {
-        message: format!("cannot run `docker`: {error} — {requirement}"),
+        message: format!("cannot run `docker`: {error}{requirement}"),
     }
 }
 

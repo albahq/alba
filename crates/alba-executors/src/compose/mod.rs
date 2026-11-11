@@ -54,9 +54,9 @@ use dependencies::Dependencies;
 use service::ServiceDescription;
 
 /// What the compose executor needs from the host, finishing the message of a
-/// failed `docker` spawn.
+/// failed `docker` spawn, separator included.
 const COMPOSE_REQUIREMENT: &str =
-    "the compose executor requires Docker with the Compose plugin on the PATH";
+    "; the compose executor requires Docker with the Compose plugin on the PATH";
 
 /// How long a killed `docker compose run` leaves the daemon to finish a
 /// container creation it had already asked for, before the second removal
@@ -577,6 +577,18 @@ impl ExecSession for ComposeSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host without `docker` gets a message naming the executor that
+    /// needs it and the Compose plugin.
+    #[test]
+    fn a_missing_docker_binary_names_the_compose_executor() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        assert_eq!(
+            spawn_error(error, COMPOSE_REQUIREMENT).message,
+            "cannot run `docker`: not found; the compose executor requires Docker with the \
+             Compose plugin on the PATH"
+        );
+    }
 
     /// Removes the throwaway project and every container labelled for its
     /// beam, even when the test panics.
