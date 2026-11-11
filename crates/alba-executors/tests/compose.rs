@@ -1156,8 +1156,12 @@ volumes:
 ",
     );
     assert!(project.compose(&["up", "-d", "migrate"]).status.success());
-    assert!(project.compose(&["wait", "migrate"]).status.success());
     let migrate = project.container_id("migrate").unwrap();
+    let ran = std::process::Command::new("docker")
+        .args(["wait", &migrate])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "0");
     let executor = ComposeExecutor::new();
 
     // Run again by `up`, as `docker compose run` would, and awaited.
@@ -1202,9 +1206,72 @@ async fn a_one_shot_dependency_that_fails_fails_the_beam() {
 
     assert_eq!(
         error.message,
-        "docker compose wait exited with code 3 for the dependency `migrate` of service `tool`"
+        "the dependency `migrate` of service `tool` exited with code 3"
     );
     assert!(labelled_containers(&project.beam(), true).is_empty());
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("migrate"), None);
+}
+
+/// A project whose one-shot `migrate` runs `migrate_command` beside a `db`
+/// that takes 2 s to become healthy: by the time the healthy wait ends, the
+/// one-shot has long exited, so its outcome is read from an exited
+/// container, which some Compose versions' `wait` no longer sees.
+fn one_shot_behind_a_slow_healthcheck(name: &str, migrate_command: &str) -> ComposeProject {
+    ComposeProject::new(
+        name,
+        &format!(
+            "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"{migrate_command}\"]
+  db:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 2 && touch /tmp/ready && sleep 3600\"]
+    stop_grace_period: 1s
+    healthcheck:
+      test: [\"CMD\", \"test\", \"-f\", \"/tmp/ready\"]
+      interval: 500ms
+      retries: 20
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+"
+        ),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_shot_that_exited_before_its_wait_lets_the_beam_open() {
+    let project = one_shot_behind_a_slow_healthcheck("dep-one-shot-exited-ok", "true");
+    let executor = ComposeExecutor::new();
+
+    let (exit_code, _) = first_command(&project, &executor, "true").await;
+
+    assert_eq!(exit_code, 0);
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("migrate"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_one_shot_that_failed_before_its_wait_fails_the_beam() {
+    let project = one_shot_behind_a_slow_healthcheck("dep-one-shot-exited-ko", "exit 3");
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, _output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+
+    let error = executor.open(beam_ctx).await.err().unwrap();
+
+    assert_eq!(
+        error.message,
+        "the dependency `migrate` of service `tool` exited with code 3"
+    );
     executor.shutdown().await.unwrap();
     assert_eq!(project.container_id("migrate"), None);
 }
@@ -1404,6 +1471,55 @@ async fn an_optional_dependency_that_cannot_start_is_skipped_with_a_warning() {
     executor.shutdown().await.unwrap();
     assert_eq!(project.container_id("db"), None);
     assert_eq!(project.container_id("ghost"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn an_optional_one_shot_that_fails_is_skipped_with_a_warning() {
+    let project = ComposeProject::new(
+        "dep-optional-one-shot",
+        "services:
+  migrate:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"exit 3\"]
+  db:
+    image: alpine:3
+    command: [\"sh\", \"-c\", \"sleep 2 && touch /tmp/ready && sleep 3600\"]
+    stop_grace_period: 1s
+    healthcheck:
+      test: [\"CMD\", \"test\", \"-f\", \"/tmp/ready\"]
+      interval: 500ms
+      retries: 20
+  tool:
+    image: alpine:3
+    volumes: [\".:/app\"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+        required: false
+",
+    );
+    let executor = ComposeExecutor::new();
+    let (beam_ctx, mut output_rx) = beam_context(&project.beam(), project.path(), options("tool"));
+    let session = executor.open(beam_ctx).await.unwrap();
+
+    let warnings: Vec<_> = drain_text(&mut output_rx)
+        .await
+        .into_iter()
+        .filter(|line| line.starts_with("optional dependency"))
+        .collect();
+    assert_eq!(
+        warnings,
+        vec![
+            "optional dependency `migrate` of service `tool` did not complete successfully \
+             (its container exited with code 3): continuing without it"
+        ]
+    );
+    session.close().await.unwrap();
+    executor.shutdown().await.unwrap();
+    assert_eq!(project.container_id("migrate"), None);
 }
 
 #[tokio::test]

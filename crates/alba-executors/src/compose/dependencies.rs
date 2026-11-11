@@ -7,14 +7,16 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use tokio::process::Command;
+
 use crate::container::spawn_error;
 use crate::{BeamContext, ExecError, OutputLine, Stream};
 
 use super::service::{Condition, Dependency, ServiceDescription};
 use super::started::{ProjectRecord, running_by_service, to_restore};
 use super::{
-    COMPOSE_REQUIREMENT, CREATION_SETTLE, Project, run_step, start_cancelled, step_failed,
-    step_stdout,
+    COMPOSE_REQUIREMENT, CREATION_SETTLE, Project, StepOutcome, run_step, start_cancelled,
+    step_failed, step_stdout,
 };
 
 /// The dependencies a compose executor started, per Compose project name.
@@ -64,11 +66,13 @@ impl Dependencies {
     /// - `service_started` needs nothing more;
     /// - `service_healthy` is awaited with `up --wait --no-deps`, which waits
     ///   for the named services only and reaches none of their dependencies;
-    /// - `service_completed_successfully` is awaited with
-    ///   `docker compose wait`, one service at a time (its exit code is not
-    ///   reliable for several). `up --wait` cannot serve: it fails on a
-    ///   one-shot that already exited, even with 0, and returns while a
-    ///   slower one still runs.
+    /// - `service_completed_successfully` is awaited with `docker wait` on
+    ///   the one-shot's containers, which reports an exit code whether the
+    ///   container is still running or already exited. `up --wait` cannot
+    ///   serve: it fails on a one-shot that already exited, even with 0, and
+    ///   returns while a slower one still runs. Nor can `docker compose
+    ///   wait`: before Compose 5.6 it only sees running containers, and
+    ///   fails on a one-shot that already exited.
     pub async fn start(
         &self,
         project: &Project,
@@ -108,7 +112,9 @@ impl Dependencies {
             let name = [dependency.service.as_str()];
             match up(project, beam, &mut record, &[], &name).await? {
                 None => optional_started.push(dependency),
-                Some(code) => warn_skipped(beam, dependency, service, "did not start", "up", code),
+                Some(code) => {
+                    warn_skipped(beam, dependency, service, "did not start", &up_exited(code))
+                }
             }
         }
 
@@ -133,33 +139,32 @@ impl Dependencies {
                     dependency,
                     service,
                     "did not become healthy",
-                    "up",
-                    code,
+                    &up_exited(code),
                 );
             }
         }
 
         let completed = Some(Condition::CompletedSuccessfully);
+        let project_name = description.project.as_str();
         for one_shot in names(&required, completed) {
-            if let Some(code) = wait(project, beam, one_shot).await? {
+            if let Some(code) = wait(beam, project_name, service, one_shot).await? {
                 return Err(ExecError {
                     message: format!(
-                        "docker compose wait exited with code {code} for the dependency \
-                         `{one_shot}` of service `{service}`"
+                        "the dependency `{one_shot}` of service `{service}` exited with code \
+                         {code}"
                     ),
                 });
             }
         }
         for dependency in &optional_started {
             for one_shot in names(&[dependency], completed) {
-                if let Some(code) = wait(project, beam, one_shot).await? {
+                if let Some(code) = wait(beam, project_name, service, one_shot).await? {
                     warn_skipped(
                         beam,
                         dependency,
                         service,
                         "did not complete successfully",
-                        "wait",
-                        code,
+                        &format!("its container exited with code {code}"),
                     );
                 }
             }
@@ -265,16 +270,96 @@ async fn up(
     Ok(exit_code_if_failed(up.status))
 }
 
-/// `docker compose wait <one_shot>`: the exit code of the one-shot's
-/// container when it is not 0.
+/// Waits until every container of the one-shot `one_shot` of the Compose
+/// project `project` has exited, and returns the first exit code that is
+/// not 0. The containers are found by Compose's labels, one-off containers
+/// (`docker compose run`) left out, and awaited with `docker wait`, which
+/// answers for a container that already exited as for a running one.
+/// `service` is the beam's service, for the error messages.
 async fn wait(
-    project: &Project,
     beam: &BeamContext,
+    project: &str,
+    service: &str,
     one_shot: &str,
 ) -> Result<Option<i32>, ExecError> {
-    // Its stdout only repeats the exit code.
-    let wait = run_step(project.command(&["wait", one_shot]), beam).await?;
-    Ok(exit_code_if_failed(wait.status))
+    let project_label = format!("label=com.docker.compose.project={project}");
+    let service_label = format!("label=com.docker.compose.service={one_shot}");
+    let ps_args = [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc",
+        "--filter",
+        project_label.as_str(),
+        "--filter",
+        service_label.as_str(),
+        "--filter",
+        "label=com.docker.compose.oneoff=False",
+    ];
+    let ps = run_step(docker(&ps_args), beam).await?;
+    let containers = docker_stdout(ps, "ps", service, one_shot)?;
+    let containers: Vec<&str> = containers.split_whitespace().collect();
+    if containers.is_empty() {
+        return Err(ExecError {
+            message: format!(
+                "the dependency `{one_shot}` of service `{service}` has no container to wait \
+                 for"
+            ),
+        });
+    }
+
+    let mut wait_args = vec!["wait"];
+    wait_args.extend_from_slice(&containers);
+    let wait = run_step(docker(&wait_args), beam).await?;
+    // One exit code per container, in order.
+    let codes = docker_stdout(wait, "wait", service, one_shot)?;
+    for line in codes.lines() {
+        let code: i32 = line.trim().parse().map_err(|_| ExecError {
+            message: format!(
+                "`docker wait` printed `{line}` instead of an exit code for the dependency \
+                 `{one_shot}` of service `{service}`"
+            ),
+        })?;
+        if code != 0 {
+            return Ok(Some(code));
+        }
+    }
+    Ok(None)
+}
+
+/// `docker <args>`, its standard streams closed until [`run_step`] pipes
+/// them.
+fn docker(args: &[&str]) -> Command {
+    let mut command = Command::new("docker");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// The stdout of the `docker <subcommand>` step that served the dependency
+/// `one_shot` of `service`, or why that step failed. Docker's own message is
+/// already on the beam's output.
+fn docker_stdout(
+    outcome: StepOutcome,
+    subcommand: &str,
+    service: &str,
+    one_shot: &str,
+) -> Result<String, ExecError> {
+    if !outcome.status.success() {
+        let code = outcome.status.code().unwrap_or(-1);
+        return Err(ExecError {
+            message: format!(
+                "docker {subcommand} exited with code {code} for the dependency `{one_shot}` \
+                 of service `{service}`"
+            ),
+        });
+    }
+    outcome.stdout.map_err(|cause| ExecError {
+        message: format!("could not read the output of `docker {subcommand}`: {cause}"),
+    })
 }
 
 fn exit_code_if_failed(status: std::process::ExitStatus) -> Option<i32> {
@@ -291,6 +376,11 @@ fn names<'a>(dependencies: &[&'a Dependency], wanted: Option<Condition>) -> Vec<
         .collect()
 }
 
+/// What a failed `up` of an optional dependency reports in its warning.
+fn up_exited(code: i32) -> String {
+    format!("docker compose up exited with code {code}")
+}
+
 fn up_failed(code: i32, service: &str) -> ExecError {
     ExecError {
         message: format!(
@@ -301,21 +391,20 @@ fn up_failed(code: i32, service: &str) -> ExecError {
 }
 
 /// The one line on the beam's output saying that the optional `dependency`
-/// is left out: what went wrong, and which `docker compose` subcommand
-/// exited with which code. Compose's own message is already there.
+/// is left out: what went wrong, and `cause`, the exit code that showed it.
+/// Compose's own message, if any, is already there.
 fn warn_skipped(
     beam: &BeamContext,
     dependency: &Dependency,
     service: &str,
     what: &str,
-    subcommand: &str,
-    code: i32,
+    cause: &str,
 ) {
     let _ = beam.output.send(OutputLine {
         stream: Stream::Stderr,
         text: format!(
-            "optional dependency `{}` of service `{service}` {what} (docker compose \
-             {subcommand} exited with code {code}): continuing without it",
+            "optional dependency `{}` of service `{service}` {what} ({cause}): continuing \
+             without it",
             dependency.service
         ),
     });
