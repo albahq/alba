@@ -59,6 +59,12 @@
 //! not a benchmark of how bad a hypothetical regression could be made to
 //! look.
 //!
+//! The budget is compared to the fastest of the timed runs, not their
+//! median: on a shared CI machine, noise only ever adds time, so the fastest
+//! run is the closest to the work's own cost, while a regression slows every
+//! run, the fastest included. (The measurements quoted above are medians,
+//! taken on an idle machine, where both agree closely.)
+//!
 //! The 10ms budget is calibrated for `cargo test`'s debug (unoptimized)
 //! profile, since that is what every CI leg actually runs; a `--release`
 //! build only has more headroom under the same threshold, never less.
@@ -168,11 +174,11 @@ fn load_project_stays_under_10ms_of_work() {
         .collect();
 
     samples.sort();
-    let median = samples[samples.len() / 2];
+    let fastest = samples[0];
 
     assert!(
-        median < Duration::from_millis(10),
-        "median load_project() time over 10 runs was {median:?}, expected under 10ms \
+        fastest < Duration::from_millis(10),
+        "load_project() took {fastest:?} at best over 10 runs, expected under 10ms \
          (all samples: {samples:?})"
     );
 }
