@@ -15,6 +15,25 @@ fn alba() -> assert_cmd::Command {
     assert_cmd::Command::cargo_bin("alba").unwrap()
 }
 
+/// The `alba-executor-example` binary `cargo build --workspace` left beside
+/// `alba`. Cargo only exposes `CARGO_BIN_EXE_<name>` for the binaries of
+/// the package under test, and since cargo 1.100 `assert_cmd`'s fallback no
+/// longer finds another package's binary, so the path is derived from
+/// `alba`'s own: both land in the same artifact directory, wherever the
+/// intermediate `build-dir` lives.
+fn example_bin() -> std::path::PathBuf {
+    let example = std::path::Path::new(env!("CARGO_BIN_EXE_alba")).with_file_name(format!(
+        "alba-executor-example{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        example.exists(),
+        "{} is missing: run `cargo build --workspace` before the tests",
+        example.display()
+    );
+    example
+}
+
 /// A temporary directory holding `beamfile` as its `Beamfile`.
 fn project(beamfile: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -31,7 +50,7 @@ fn project(beamfile: &str) -> tempfile::TempDir {
 /// kind of same-named collision a real plugin install never has to
 /// contend with.
 ///
-/// `cargo_bin` resolves a path already built into the workspace's target
+/// `example_bin` resolves a path already built into the workspace's target
 /// directory (it does not build anything itself), and `cargo test` does
 /// not build another package's binary either, which is why the full gate
 /// matters here: `alba run test` and CI both run `cargo build --workspace`
@@ -44,7 +63,7 @@ fn project(beamfile: &str) -> tempfile::TempDir {
 /// via `symlink`, the name the child would look up) out from under a
 /// still-running `alba`.
 fn plugin_path() -> (std::ffi::OsString, tempfile::TempDir) {
-    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+    let example = example_bin();
     let name = example
         .file_name()
         .expect("a binary path always has a file name");
@@ -127,7 +146,7 @@ fn a_missing_plugin_is_a_clean_plan_time_error() {
 /// session's close — and reports every check as passing.
 #[test]
 fn plugin_check_passes_the_example_plugin() {
-    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+    let example = example_bin();
 
     alba()
         .args([
@@ -157,7 +176,7 @@ fn plugin_check_passes_the_example_plugin() {
 /// doc comments).
 #[test]
 fn plugin_check_default_cancel_command_actually_exercises_cancel() {
-    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+    let example = example_bin();
 
     alba()
         .args([
@@ -178,7 +197,7 @@ fn plugin_check_default_cancel_command_actually_exercises_cancel() {
 /// exercised nothing.
 #[test]
 fn plugin_check_rejects_a_cancel_command_that_finishes_before_cancel_is_sent() {
-    let example = assert_cmd::cargo::cargo_bin("alba-executor-example");
+    let example = example_bin();
 
     alba()
         .args([
