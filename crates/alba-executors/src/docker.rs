@@ -18,7 +18,7 @@
 //! `run_args`) is the only handle a later, out-of-process cleanup has for
 //! finding and removing containers a crashed run left behind.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -380,21 +380,30 @@ impl PathMapping {
         }
     }
 
-    /// Rewrites a declared volume whose container part is relative to the
-    /// beam's directory (`deps:./node_modules`) into the absolute container
-    /// path docker needs: `beam_dir` as the container sees it, joined with
-    /// that relative part. Any other volume is returned as declared. The
-    /// loader has already checked the entry's shape, so only its last
-    /// colon splits (a windows host path keeps its drive colon).
+    /// Rewrites a declared volume into the `host:container` entry docker
+    /// needs, both parts relative to the beam's directory when they are
+    /// relative at all. A relative host part (`../../libs`) becomes the
+    /// host path it names from `beam_dir`: left as declared, docker would
+    /// resolve it against Alba's own working directory, which depends on
+    /// where Alba was run from. A relative container part
+    /// (`deps:./node_modules`) becomes `beam_dir` as the container sees it,
+    /// joined with that relative part. An absolute path and a named volume
+    /// pass through unchanged. The loader has already checked the entry's
+    /// shape, so only its last colon splits (a windows host path keeps its
+    /// drive colon).
     fn container_volume(&self, volume: &str, beam_dir: &Path) -> String {
-        match volume.rsplit_once(":./") {
-            Some((source, relative)) => {
+        let Some((host, container)) = volume.rsplit_once(':') else {
+            return volume.to_string();
+        };
+        let container = match container.strip_prefix("./") {
+            Some(relative) => {
                 let base = self.container_path(beam_dir);
                 let target = format!("{}/{relative}", base.trim_end_matches('/'));
-                format!("{source}:{}", target.trim_end_matches('/'))
+                target.trim_end_matches('/').to_string()
             }
-            None => volume.to_string(),
-        }
+            None => container.to_string(),
+        };
+        format!("{}:{container}", host_source(host, beam_dir))
     }
 
     /// Where a host path under the project root is found inside the
@@ -421,6 +430,37 @@ impl PathMapping {
             }
         }
     }
+}
+
+/// The source docker mounts for a declared host part. Docker reads a part
+/// with no path separator as the name of a volume it manages, so that one
+/// is kept as declared, and so is an absolute path. Anything else is a
+/// path relative to the beam's directory, resolved here lexically (`.`
+/// and `..` folded, symbolic links left alone) since the directory need
+/// not exist yet: docker creates a missing bind source.
+fn host_source(host: &str, beam_dir: &Path) -> String {
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let path = Path::new(host);
+    let named_volume = !host.contains(separators) && host != "." && host != "..";
+    if named_volume || path.is_absolute() || path.has_root() {
+        return host.to_string();
+    }
+    let mut resolved = PathBuf::new();
+    for component in beam_dir.join(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    resolved.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    resolved.pop();
+                }
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved.display().to_string()
 }
 
 /// Builds the argument vector for `docker run -d`, which starts the
@@ -630,6 +670,52 @@ mod tests {
             mapping.container_volume("/host/cache:/cache", beam_dir),
             "/host/cache:/cache"
         );
+    }
+
+    #[test]
+    fn a_relative_host_part_resolves_against_the_beams_directory() {
+        // Docker would resolve a relative host part against Alba's own
+        // working directory, which changes with where Alba is run from.
+        #[cfg(unix)]
+        let (mapping, beam_dir, cases) = (
+            PathMapping::new(Path::new("/proj"), None),
+            Path::new("/proj/modules/a"),
+            [
+                ("../../libs:/libs", "/proj/libs:/libs"),
+                ("./cache:/cache", "/proj/modules/a/cache:/cache"),
+                ("./:/beam", "/proj/modules/a:/beam"),
+                (
+                    "../shared/./x:./x",
+                    "/proj/modules/shared/x:/proj/modules/a/x",
+                ),
+                ("deps:/deps", "deps:/deps"),
+                ("/host/cache:/cache", "/host/cache:/cache"),
+            ],
+        );
+        #[cfg(windows)]
+        let (mapping, beam_dir, cases) = (
+            PathMapping::new(Path::new(r"C:\proj"), None),
+            Path::new(r"C:\proj\modules\a"),
+            [
+                ("../../libs:/libs", r"C:\proj\libs:/libs"),
+                (r"..\..\libs:/libs", r"C:\proj\libs:/libs"),
+                ("./cache:/cache", r"C:\proj\modules\a\cache:/cache"),
+                (
+                    "../shared/./x:./x",
+                    r"C:\proj\modules\shared\x:/workspace/modules/a/x",
+                ),
+                ("deps:/deps", "deps:/deps"),
+                (r"C:\cache:/cache", r"C:\cache:/cache"),
+            ],
+        );
+
+        for (declared, expected) in cases {
+            assert_eq!(
+                mapping.container_volume(declared, beam_dir),
+                expected,
+                "declared `{declared}`"
+            );
+        }
     }
 
     #[test]

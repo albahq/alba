@@ -885,6 +885,25 @@ Docker creates a named volume owned by root when the image has no
 directory at that path, so a beam that also declares a non-root `user`
 cannot write into it.
 
+A host part is read the way docker reads it: one with no slash (`deps`
+above) names a volume docker manages, and an absolute path is mounted as
+declared. Any other host part, such as `../../libraries` or `./cache`, is
+a path relative to the declaring Beamfile's directory, like the container
+part: a beam in an imported module mounts the same directory whether
+Alba runs from the module or from the root that imports it (alba 0.5.1
+or later; earlier versions let docker resolve it against the directory
+Alba was run from).
+
+```
+beam test {
+  executor docker {
+    image "php:8.4-cli"
+    volumes ["../../libraries:/srv/libraries"]
+  }
+  run "composer install"
+}
+```
+
 `build` takes the place of `image` when the project carries its own
 `Dockerfile`: it names a build context, a directory relative to the
 declaring Beamfile's (it may climb out of it with leading `..`

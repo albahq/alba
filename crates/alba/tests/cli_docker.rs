@@ -151,6 +151,51 @@ fn the_docker_mount_reaches_the_beamfiles_own_directory() {
         .stdout(predicates::str::contains("hi from the host"));
 }
 
+/// A module's relative host part is resolved against the module's own
+/// Beamfile, so the same library is mounted whether the beam runs from the
+/// module or through an import from the root. The project sits two levels
+/// inside the temporary directory, so even a mount resolved against the
+/// wrong directory stays inside it.
+#[test]
+#[ignore = "requires a running docker daemon"]
+fn a_relative_host_part_is_mounted_the_same_from_the_module_and_the_root() {
+    let beam = beam_name("relative_host");
+    let _guard = ContainerGuard::new(&beam);
+    let _imported_guard = ContainerGuard::new(&format!("a:{beam}"));
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("workspace/project");
+    let module = root.join("modules/a");
+    std::fs::create_dir_all(root.join("libs")).unwrap();
+    std::fs::create_dir_all(&module).unwrap();
+    std::fs::write(root.join("libs/marker.txt"), "shared library").unwrap();
+    std::fs::write(
+        root.join("Beamfile"),
+        "import \"modules/a/Beamfile\" as a\n",
+    )
+    .unwrap();
+    std::fs::write(
+        module.join("Beamfile"),
+        format!(
+            "beam {beam} {{\n  executor docker {{ image \"alpine:3\" volumes [\"../../libs:/mnt/libs\"] }}\n  run \"cat /mnt/libs/marker.txt\"\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    alba()
+        .current_dir(&module)
+        .args(["run", &beam])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared library"));
+
+    alba()
+        .current_dir(&root)
+        .args(["run", &format!("a:{beam}")])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shared library"));
+}
+
 /// An image docker cannot find fails the *beam*, not the run machinery: the
 /// process exits 1 (a beam failure, `RunSummary::exit_code`), never 2 (an
 /// Alba error) — the same distinction `cli_run.rs`'s
