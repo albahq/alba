@@ -602,6 +602,41 @@ async fn a_relative_volume_is_mounted_under_the_beams_directory() {
     );
 }
 
+/// A relative host part names a directory relative to the beam's own
+/// directory, not to the directory the process runs from: a module's
+/// beam reaches a sibling directory of the project the same way whoever
+/// runs it.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn a_relative_host_part_is_mounted_from_the_beams_directory() {
+    let beam = beam_name("relative-host");
+    let _guard = ContainerGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    let libs = project_root.path().join("libs");
+    std::fs::create_dir(&libs).unwrap();
+    std::fs::write(libs.join("marker.txt"), "shared library").unwrap();
+    let beam_dir = project_root.path().join("modules/a");
+    std::fs::create_dir_all(&beam_dir).unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+    let options = serde_json::json!({
+        "image": "alpine:3",
+        "volumes": ["../../libs:/mnt/libs"],
+    });
+
+    let (beam_ctx, _output_rx) = beam_context(&beam, &beam_dir, options);
+    let mut session = executor.open(beam_ctx).await.unwrap();
+    let (ctx, mut rx) = exec_context();
+    let result = session
+        .execute(spec("cat /mnt/libs/marker.txt", &beam_dir), ctx)
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(drain_text(&mut rx).await, ["shared library"]);
+}
+
 /// A declared `dockerfile` is the file the image is built from, found
 /// inside the build context: a context with no file named `Dockerfile` at
 /// all still builds.

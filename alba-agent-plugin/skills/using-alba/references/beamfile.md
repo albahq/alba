@@ -112,6 +112,12 @@ literal.
   - `volumes` entries are `host:container` with no `:ro` suffix; a
     container part starting with `./` is relative to the declaring
     Beamfile's directory (`"deps:./node_modules"`).
+  - A host part with no slash is a named volume and an absolute one is
+    mounted as declared; any other host part (`"../../libs:/libs"`) is
+    relative to the declaring Beamfile's directory, so an imported
+    module mounts the same directory from its own directory and from the
+    root. Needs alba 0.5.1 or later: earlier versions resolve it against
+    the directory alba runs from.
   - `build "docker/php"` builds the image from that context (relative to
     the declaring Beamfile's directory) before the beam runs, instead of
     naming one; `image` is then optional and tags the result. List the
