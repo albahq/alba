@@ -5,7 +5,7 @@
 //! deterministically. Real files and directories *are* used: the watched
 //! set resolves `inputs` on disk.
 //!
-//! Timing: every wait on an event is bounded at five seconds, so a hung
+//! Timing: every wait on an event is bounded by [`HANG_GUARD`], so a hung
 //! loop fails the test rather than the CI job's timeout, and the latency
 //! assertions use margins an order of magnitude above what they measure,
 //! so a loaded machine cannot flip them while a real regression still
@@ -23,6 +23,12 @@ use alba_engine::{
 use alba_executors::{FakeBehavior, FakeEvent, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
+
+/// Bound on every wait for an event or for the session to end. A correct
+/// run returns as soon as the awaited thing happens, so the bound only
+/// decides how long a hung loop takes to fail: wide enough that a loaded
+/// machine never trips it, short of the CI job's own timeout.
+const HANG_GUARD: Duration = Duration::from_secs(30);
 
 /// A watcher whose batches the test sends by hand: closing the sender is
 /// how a test stages a watcher that died.
@@ -49,12 +55,12 @@ struct Session {
 }
 
 impl Session {
-    /// The next event, or a panic after five seconds — a hung loop must
+    /// The next event, or a panic after [`HANG_GUARD`]: a hung loop must
     /// fail the test, not the CI job's timeout.
     async fn event(&mut self) -> RunEvent {
-        tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+        tokio::time::timeout(HANG_GUARD, self.events.recv())
             .await
-            .expect("no event within 5s")
+            .expect("no event within the hang guard")
             .expect("event channel closed unexpectedly")
     }
 
@@ -100,7 +106,7 @@ impl Session {
     /// Like [`Session::finish`], keeping the whole [`SessionEnd`].
     async fn finish_with_report(self) -> SessionEnd {
         self.cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), self.handle)
+        tokio::time::timeout(HANG_GUARD, self.handle)
             .await
             .expect("the session must end after cancellation")
             .expect("the session task must not panic")
@@ -116,7 +122,7 @@ impl Session {
 
     /// Like [`Session::ended`], keeping the whole [`SessionEnd`].
     async fn ended_with_report(self) -> SessionEnd {
-        tokio::time::timeout(Duration::from_secs(5), self.handle)
+        tokio::time::timeout(HANG_GUARD, self.handle)
             .await
             .expect("the session must end on its own")
             .expect("the session task must not panic")
@@ -473,7 +479,7 @@ async fn a_closed_watcher_ends_the_session() {
         unbounded_channel().0,
     ));
 
-    let exit = tokio::time::timeout(Duration::from_secs(5), session.handle)
+    let exit = tokio::time::timeout(HANG_GUARD, session.handle)
         .await
         .expect("the session must end when the watcher closes")
         .expect("the session task must not panic");
@@ -519,7 +525,7 @@ async fn a_session_that_loses_its_watcher_still_shuts_down() {
     ));
 
     let executor = Arc::clone(&session.executor);
-    let end = tokio::time::timeout(Duration::from_secs(5), session.handle)
+    let end = tokio::time::timeout(HANG_GUARD, session.handle)
         .await
         .expect("the session must end when the watcher closes")
         .expect("the session task must not panic");

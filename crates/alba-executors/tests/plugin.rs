@@ -55,7 +55,7 @@ fn command(text: &str) -> CommandSpec {
 /// Bound used to keep a regression that made some `await` hang forever
 /// from turning into an indefinite CI hang; well above anything these
 /// tests are meant to take, so it never fires on correct behavior.
-const HANG_GUARD: Duration = Duration::from_secs(3);
+const HANG_GUARD: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn handshake_execute_and_close_roundtrip() {
@@ -159,7 +159,7 @@ async fn a_mute_plugin_fails_the_handshake_within_the_timeout() {
     // Bounding the whole call: if the handshake timeout fired but the
     // child was never killed, `open` would hang forever waiting to reap
     // it instead of returning promptly.
-    let result = tokio::time::timeout(Duration::from_secs(3), executor.open(beam_context(tx)))
+    let result = tokio::time::timeout(HANG_GUARD, executor.open(beam_context(tx)))
         .await
         .expect("open() must not hang past the handshake timeout");
     let error = expect_open_err(result, "a mute plugin must fail the handshake");
@@ -171,7 +171,7 @@ async fn a_garbage_line_is_a_protocol_error_quoting_the_line() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let executor = executor_for("garbage");
 
-    let result = tokio::time::timeout(Duration::from_secs(3), executor.open(beam_context(tx)))
+    let result = tokio::time::timeout(HANG_GUARD, executor.open(beam_context(tx)))
         .await
         .expect("open() must not hang on a garbage line");
     let error = expect_open_err(result, "a garbage line must fail the handshake");
@@ -183,7 +183,7 @@ async fn a_refusing_plugin_surfaces_its_own_error_message() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let executor = executor_for("refuse");
 
-    let result = tokio::time::timeout(Duration::from_secs(3), executor.open(beam_context(tx)))
+    let result = tokio::time::timeout(HANG_GUARD, executor.open(beam_context(tx)))
         .await
         .expect("open() must not hang on a refusing plugin");
     let error = expect_open_err(result, "a refusing plugin must fail the handshake");
@@ -198,7 +198,7 @@ async fn a_dead_plugin_reports_its_exit_code() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let executor = executor_for("die");
 
-    let result = tokio::time::timeout(Duration::from_secs(3), executor.open(beam_context(tx)))
+    let result = tokio::time::timeout(HANG_GUARD, executor.open(beam_context(tx)))
         .await
         .expect("open() must not hang on a plugin that dies immediately");
     let error = expect_open_err(result, "a dead plugin must fail the handshake");
@@ -272,7 +272,7 @@ async fn a_cancel_deaf_plugin_is_killed_after_the_grace() {
 
     let started = tokio::time::Instant::now();
     let result = tokio::time::timeout(
-        Duration::from_secs(3),
+        HANG_GUARD,
         session.execute(command("hang"), exec_context(tx.clone(), cancel)),
     )
     .await
@@ -348,8 +348,12 @@ async fn a_cancelled_beam_interrupts_a_pending_handshake() {
         result,
         "a cancelled beam must interrupt a pending handshake",
     );
+    // Halfway between the two outcomes it tells apart: an honoured
+    // cancellation returns about 50ms in, an ignored one at the 10s
+    // handshake timeout. A tighter bound failed under load, when spawning
+    // and reaping the plugin alone took a couple of seconds.
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < Duration::from_secs(5),
         "expected to return shortly after the 50ms cancellation, took {elapsed:?} \
          (the handshake timeout is 10s, so a value near that means cancellation was ignored)"
     );
