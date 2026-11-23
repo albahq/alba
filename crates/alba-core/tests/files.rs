@@ -56,6 +56,45 @@ fn respects_gitignore_even_outside_a_git_repository() {
     assert_eq!(relative_paths(dir.path(), &["**/*.rs"]), vec!["src/a.rs"]);
 }
 
+/// `.gitignore` decides which files a glob sweeps up, not whether a file
+/// the Beamfile names outright is an input: `.env` is ignored almost
+/// everywhere, and dropping it left its changes invisible to the cache.
+#[test]
+fn a_literal_pattern_names_its_file_even_when_gitignore_ignores_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ".gitignore", ".env\ngenerated/\n");
+    write(dir.path(), ".env", "SECRET=1");
+    write(dir.path(), "generated/schema.json", "{}");
+    write(dir.path(), "generated/other.json", "{}");
+
+    assert_eq!(
+        relative_paths(dir.path(), &[".env", "generated/schema.json"]),
+        vec![".env", "generated/schema.json"]
+    );
+}
+
+#[test]
+fn a_literal_pattern_climbing_out_of_the_base_names_its_ignored_file() {
+    let root = tempfile::tempdir().unwrap();
+    write(root.path(), ".gitignore", "secrets.env\n");
+    write(root.path(), "secrets.env", "SECRET=1");
+    write(root.path(), "app/main.txt", "main");
+
+    assert_eq!(
+        relative_paths(&root.path().join("app"), &["../secrets.env"]),
+        vec!["../secrets.env"]
+    );
+}
+
+#[test]
+fn a_literal_pattern_naming_a_directory_matches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ".gitignore", "generated/\n");
+    write(dir.path(), "generated/schema.json", "{}");
+
+    assert!(relative_paths(dir.path(), &["generated"]).is_empty());
+}
+
 #[test]
 fn never_walks_git_or_alba_directories() {
     let dir = tempfile::tempdir().unwrap();

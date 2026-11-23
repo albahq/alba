@@ -312,6 +312,13 @@ declares `inputs ["../../Dockerfile"]` to depend on the project root's
 A `.` or `..` anywhere past the start of an `inputs` pattern is rejected
 when the Beamfile loads.
 
+A glob in `inputs` skips whatever the project's `.gitignore` files
+exclude, so `src/**/*` never sweeps up build artifacts. A literal path is
+different: it names its file outright, ignored or not, so `inputs
+["Cargo.toml", ".env"]` reruns the beam when an ignored `.env` changes.
+Affected runs cannot see such a file, though: git reports no change to
+a path it ignores.
+
 `alba run <beam> --force` ignores the cache on the way in: the beam runs
 regardless of what changed. If it succeeds, its result is written back to
 the cache for the next invocation to read; a forced run that fails leaves
@@ -386,8 +393,9 @@ files the target's subgraph declares as `inputs`, the same declarations
 the cache fingerprints, so watch mode and the cache can never disagree
 about what a change is. Every Beamfile the project loaded is
 watched as well, so editing the Beamfile itself also triggers a run. A file
-that `.gitignore` excludes never triggers one, for the same reason it never
-enters the cache's fingerprint, and `.alba/` and `.git/` are excluded
+that `.gitignore` excludes never triggers one through a glob, for the same
+reason a glob never puts it in the cache's fingerprint (an ignored file
+named by a literal `inputs` path does trigger one), and `.alba/` and `.git/` are excluded
 outright: the cache writing its own state must never wake the session that
 owns it. If no beam in the target's subgraph declares any `inputs`, Alba
 prints a warning once at startup, since such a session can still only react
