@@ -143,6 +143,10 @@ pub struct Beam {
     /// rather than from the Beamfile. Only meaningful beside `inputs`,
     /// which the loader enforces.
     pub env_inputs: Vec<String>,
+    /// Variables, by name, whose values are masked in everything the
+    /// beam's run emits and stores: looked up in the beam's own `env`
+    /// first, then in the environment the run inherits.
+    pub secrets: Vec<String>,
     pub outputs: Vec<String>,
     pub run: Vec<StringTemplate>,
     pub env: Vec<(String, StringTemplate)>,

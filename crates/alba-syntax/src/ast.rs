@@ -133,6 +133,9 @@ pub struct BeamDecl {
     /// The names of ambient environment variables whose values join the
     /// cache fingerprint (`env_inputs ["NODE_ENV"]`).
     pub env_inputs: Vec<StringTemplate>,
+    /// The names of variables whose values are masked in the beam's
+    /// output (`secrets ["NPM_TOKEN"]`).
+    pub secrets: Vec<StringTemplate>,
     pub outputs: Vec<StringTemplate>,
     /// One entry for the single-string form of `run`, N entries for the
     /// list form.

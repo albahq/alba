@@ -1477,3 +1477,163 @@ async fn a_declared_ambient_variable_that_changed_reruns() {
     assert_eq!(unset.executed(), vec!["generate"], "unset is a value too");
     assert_eq!(empty.executed(), vec!["generate"], "empty is not unset");
 }
+
+/// Every text a run's consumers receive for `id`, live or replayed, in
+/// order.
+fn output_texts(outcome: &Outcome) -> Vec<String> {
+    outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::BeamOutput { line, .. } => Some(line.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether any file under the cache directory holds `needle`.
+fn cache_holds(dir: &Path, needle: &str) -> bool {
+    std::fs::read_dir(dir.join(".alba").join("cache"))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default())
+        .any(|content| content.contains(needle))
+}
+
+fn printing(line: &str) -> FakeExecutor {
+    FakeExecutor::new().on(
+        "deploy",
+        FakeBehavior {
+            output_lines: vec![alba_executors::OutputLine {
+                stream: alba_executors::Stream::Stdout,
+                text: line.to_string(),
+            }],
+            ..FakeBehavior::default()
+        },
+    )
+}
+
+/// A command that prints a secret, by mistake or through a verbose tool,
+/// must not publish it: the value is masked in what the run emits (the
+/// terminal, the interface, the JSON stream) and in the logs the cache
+/// stores and replays.
+#[tokio::test]
+async fn a_declared_secret_is_masked_live_in_the_cache_and_on_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    const SOURCE: &str = r#"
+beam deploy {
+  inputs ["data.txt"]
+  env { TOKEN = "tok-4242-secret" }
+  secrets ["TOKEN"]
+  run "deploy"
+}
+"#;
+    let run = || {
+        run_once(
+            SOURCE,
+            "deploy",
+            dir.path(),
+            options(dir.path(), false),
+            printing("using tok-4242-secret twice: tok-4242-secret"),
+        )
+    };
+
+    let live = run().await;
+    let replayed = run().await;
+
+    assert_eq!(output_texts(&live), vec!["using *** twice: ***"]);
+    assert!(replayed.executed().is_empty(), "the second run is a hit");
+    assert_eq!(output_texts(&replayed), vec!["using *** twice: ***"]);
+    assert!(!cache_holds(dir.path(), "tok-4242-secret"));
+}
+
+/// A secret usually reaches a command from the environment Alba was
+/// started in (a CI variable), not from the Beamfile.
+#[tokio::test]
+async fn a_secret_from_the_ambient_environment_is_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    const SOURCE: &str = r#"
+beam deploy {
+  secrets ["CI_TOKEN"]
+  run "deploy"
+}
+"#;
+    let mut options = options(dir.path(), false);
+    options.ambient_env = vec![("CI_TOKEN".to_string(), "ci-9876-token".to_string())];
+
+    let outcome = run_once(
+        SOURCE,
+        "deploy",
+        dir.path(),
+        options,
+        printing("token=ci-9876-token"),
+    )
+    .await;
+
+    assert_eq!(output_texts(&outcome), vec!["token=***"]);
+}
+
+/// Output is line by line, so a multi-line secret (a private key) is
+/// masked line by line.
+#[tokio::test]
+async fn each_line_of_a_multi_line_secret_is_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    const SOURCE: &str = r#"
+beam deploy {
+  secrets ["KEY"]
+  run "deploy"
+}
+"#;
+    let mut options = options(dir.path(), false);
+    options.ambient_env = vec![(
+        "KEY".to_string(),
+        "-----BEGIN KEY-----\nAAAAsecretbody\n-----END KEY-----".to_string(),
+    )];
+
+    let outcome = run_once(
+        SOURCE,
+        "deploy",
+        dir.path(),
+        options,
+        printing("body: AAAAsecretbody"),
+    )
+    .await;
+
+    assert_eq!(output_texts(&outcome), vec!["body: ***"]);
+}
+
+/// Declaring a secret does not change what a beam runs, so its existing
+/// cache entry, stored while the value was still printed in clear, stays
+/// a hit: the replay masks it all the same.
+#[tokio::test]
+async fn an_entry_stored_before_a_secret_was_declared_replays_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    let source = |secrets: &str| {
+        format!(
+            "beam deploy {{\n  inputs [\"data.txt\"]\n  env {{ TOKEN = \"tok-1111-secret\" }}\n{secrets}  run \"deploy\"\n}}\n"
+        )
+    };
+    let before = source("");
+    let after = source("  secrets [\"TOKEN\"]\n");
+
+    run_once(
+        &before,
+        "deploy",
+        dir.path(),
+        options(dir.path(), false),
+        printing("token tok-1111-secret"),
+    )
+    .await;
+    let replayed = run_once(
+        &after,
+        "deploy",
+        dir.path(),
+        options(dir.path(), false),
+        printing("token tok-1111-secret"),
+    )
+    .await;
+
+    assert!(replayed.executed().is_empty(), "still a hit");
+    assert_eq!(output_texts(&replayed), vec!["token ***"]);
+}
