@@ -19,10 +19,11 @@ pub const EXIT_ALBA_ERROR: i32 = 2;
 /// so it needs a name for it, and the two must agree.
 pub const EXIT_CLEANUP_FAILED: i32 = 1;
 
-/// The user interrupted the run. `128 + SIGINT`, the code a shell reports
-/// for an interrupted command — deliberately outside Alba's own 0/1/2
-/// vocabulary, which describes how a run *ended*, an answer an abandoned
-/// run does not have.
+/// The run was interrupted: by the user's Ctrl-C, or by `SIGTERM` or
+/// `SIGHUP` from outside, which Alba treats the same. `128 + SIGINT`, the
+/// code a shell reports for an interrupted command — deliberately outside
+/// Alba's own 0/1/2 vocabulary, which describes how a run *ended*, an
+/// answer an abandoned run does not have.
 ///
 /// Both interrupt paths return it, and they must agree: a first Ctrl-C
 /// that stops the run in an orderly way (`commands::run::run_exit_code`)

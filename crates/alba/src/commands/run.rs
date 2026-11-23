@@ -9,7 +9,8 @@
 //! - a task consuming the event channel and feeding a [`Renderer`], so
 //!   output is streamed while beams are still running rather than buffered
 //!   until the run ends;
-//! - a task watching for interrupts (see [`watch_interrupts`]).
+//! - a task watching for interrupts and termination signals (see
+//!   [`watch_interrupts`]).
 //!
 //! The consumer's channel closes on its own when the engine returns (the
 //! engine holds the last sender), so joining it afterwards cannot outlive
@@ -190,7 +191,7 @@ async fn execute(
     let (events, incoming) = unbounded_channel();
     let cancel = CancellationToken::new();
 
-    tokio::spawn(watch_interrupts(cancel.clone()));
+    tokio::spawn(watch_interrupts(cancel.clone(), StopSignals::install(true)));
     let consumer = tokio::spawn(consume(incoming, renderer(flags), cancel.clone()));
 
     let result = alba_engine::run(
@@ -287,7 +288,7 @@ async fn watch_execute(
     let (events, incoming) = unbounded_channel();
     let cancel = CancellationToken::new();
 
-    tokio::spawn(watch_interrupts(cancel.clone()));
+    tokio::spawn(watch_interrupts(cancel.clone(), StopSignals::install(true)));
     let consumer = tokio::spawn(consume(incoming, watch_renderer(flags), cancel.clone()));
 
     let end = alba_engine::watch(
@@ -346,11 +347,14 @@ async fn watch_execute(
 /// built whatever `--watch` says, because `w` can turn watching on at any
 /// point in the session and a watcher cannot be added to a running one.
 ///
-/// The one piece of [`execute`]'s shape that is deliberately absent is
-/// [`watch_interrupts`]: raw mode delivers Ctrl-C to the interface as an
-/// ordinary key event, which it answers itself (cancel a run, or quit),
-/// and a signal handler racing it would cancel runs the user never asked
-/// to cancel.
+/// [`watch_interrupts`] listens here for `SIGTERM` and `SIGHUP` only: raw
+/// mode delivers Ctrl-C to the interface as an ordinary key event, which
+/// it answers itself (cancel a run, or quit), and a Ctrl-C handler racing
+/// it would cancel runs the user never asked to cancel. The other two
+/// never reach the interface as keys, and must still stop the session's
+/// commands rather than kill Alba over them: cancelling the session's
+/// token ends the session, which closes the interface, and the session
+/// reports the interruption.
 async fn tui_execute(
     project: &Project,
     sources: &SourceMap,
@@ -403,6 +407,13 @@ async fn tui_execute(
     let (events, incoming) = unbounded_channel();
     let (commands, command_receiver) = unbounded_channel();
     let cancel = CancellationToken::new();
+    // Only the termination watcher ever cancels this token: the interface
+    // stops runs through `commands`, never through it.
+    tokio::spawn(watch_interrupts(
+        cancel.clone(),
+        StopSignals::install(false),
+    ));
+    let terminated = cancel.clone();
 
     let session = tokio::spawn({
         // The session outlives this frame's borrows, so everything it
@@ -478,6 +489,11 @@ async fn tui_execute(
     };
     leave(&mut err, &outcome, affected_by, colour, failure.as_ref());
 
+    if terminated.is_cancelled() {
+        // Stopped from outside: whatever the last run earned, the session
+        // did not end the way the user would have ended it.
+        return EXIT_INTERRUPTED;
+    }
     match failure {
         // A session that did not end on its own terms reports the code the
         // headless session reports for the same end: the last run's code
@@ -792,14 +808,18 @@ async fn consume(
     }
 }
 
-/// Turns Ctrl-C into a cancellation, then into an abort.
+/// Turns a stop request (Ctrl-C, `SIGTERM`, `SIGHUP`) into a cancellation,
+/// then into an abort.
 ///
 /// This has to exist: `alba-executors` puts every command in its own
 /// process group so that cancelling a beam kills the whole command tree,
 /// and the necessary consequence is that a terminal Ctrl-C no longer
 /// reaches those children. Alba is the only thing left that can stop them,
 /// so without this watcher a Ctrl-C would kill `alba` and orphan every
-/// running command.
+/// running command. The same holds for the signals that stop Alba from
+/// outside: a CI cancellation, `docker stop`, or `kill` sends `SIGTERM`,
+/// and a closed terminal sends `SIGHUP`, whose default disposition would
+/// kill Alba just as outright.
 ///
 /// The first signal cancels the run's token, which terminates the running
 /// commands and lets the run finish reporting normally — with
@@ -807,22 +827,140 @@ async fn consume(
 /// [`run_exit_code`]. Because stopping is bounded but not instant, a
 /// second signal gives up on the orderly path and leaves immediately with
 /// the same code. Commands still alive at that point are left running,
-/// which is the user's explicit second-Ctrl-C request to stop waiting, and
+/// which is the user's explicit second request to stop waiting, and
 /// so are the dependencies an executor started for the run, since nothing
 /// gets to shut the executors down: the line it prints says so.
-async fn watch_interrupts(cancel: CancellationToken) {
-    // An `Err` means no signal handler could be installed at all; there is
+async fn watch_interrupts(cancel: CancellationToken, mut signals: StopSignals) {
+    // `None` means no signal handler could be installed at all; there is
     // nothing to fall back to, so the watcher simply stands down.
-    if tokio::signal::ctrl_c().await.is_err() {
+    if signals.next().await.is_none() {
         return;
     }
     cancel.cancel();
 
-    if tokio::signal::ctrl_c().await.is_err() {
+    if signals.next().await.is_none() {
         return;
     }
     LineSink::stderr().line("aborting; dependencies Alba started may be left running");
     std::process::exit(EXIT_INTERRUPTED);
+}
+
+/// The signals that ask Alba to stop, installed up front so none of them
+/// meets its default disposition (which kills Alba outright) once the run
+/// has started.
+struct StopSignals {
+    /// Whether Ctrl-C counts. The interactive interface reads it as a key
+    /// in raw mode and answers it itself, so it listens for the others only.
+    interrupt: bool,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hangup: Option<tokio::signal::unix::Signal>,
+    #[cfg(windows)]
+    close: Option<tokio::signal::windows::CtrlClose>,
+    #[cfg(windows)]
+    ctrl_break: Option<tokio::signal::windows::CtrlBreak>,
+}
+
+impl StopSignals {
+    /// Installs every handler it can. One that cannot be installed is
+    /// reported and left out: the others still stop the run.
+    fn install(interrupt: bool) -> Self {
+        Self {
+            interrupt,
+            #[cfg(unix)]
+            terminate: installed(
+                "SIGTERM",
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()),
+            ),
+            #[cfg(unix)]
+            hangup: installed(
+                "SIGHUP",
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()),
+            ),
+            #[cfg(windows)]
+            close: installed("CTRL_CLOSE", tokio::signal::windows::ctrl_close()),
+            #[cfg(windows)]
+            ctrl_break: installed("CTRL_BREAK", tokio::signal::windows::ctrl_break()),
+        }
+    }
+
+    /// Waits for the next stop request, whichever signal carries it;
+    /// `None` once no signal can arrive any more.
+    async fn next(&mut self) -> Option<()> {
+        let interrupt = async {
+            // Registered on first poll; an `Err` means Ctrl-C cannot be
+            // watched, which leaves the other signals to wait on.
+            if !self.interrupt || tokio::signal::ctrl_c().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(unix)]
+        let (any_other, others) = (self.terminate.is_some() || self.hangup.is_some(), async {
+            tokio::select! {
+                Some(()) = recv(&mut self.terminate) => {}
+                Some(()) = recv(&mut self.hangup) => {}
+                // Both ended: nothing more can arrive through them.
+                else => std::future::pending::<()>().await,
+            }
+        });
+        #[cfg(windows)]
+        let (any_other, others) = (self.close.is_some() || self.ctrl_break.is_some(), async {
+            tokio::select! {
+                Some(()) = recv_close(&mut self.close) => {}
+                Some(()) = recv_break(&mut self.ctrl_break) => {}
+                else => std::future::pending::<()>().await,
+            }
+        });
+        #[cfg(not(any(unix, windows)))]
+        let (any_other, others) = (false, std::future::pending::<()>());
+
+        if !self.interrupt && !any_other {
+            return None;
+        }
+        tokio::select! {
+            () = interrupt => Some(()),
+            () = others => Some(()),
+        }
+    }
+}
+
+/// `handler`, or `None` after saying on stderr why it is missing.
+fn installed<T>(name: &str, handler: std::io::Result<T>) -> Option<T> {
+    match handler {
+        Ok(handler) => Some(handler),
+        Err(error) => {
+            LineSink::stderr().line(&format!(
+                "cannot watch for {name}: {error}; it will stop Alba without cleanup"
+            ));
+            None
+        }
+    }
+}
+
+/// The next delivery of `signal`; never, when it was not installed.
+#[cfg(unix)]
+async fn recv(signal: &mut Option<tokio::signal::unix::Signal>) -> Option<()> {
+    match signal {
+        Some(signal) => signal.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(windows)]
+async fn recv_close(signal: &mut Option<tokio::signal::windows::CtrlClose>) -> Option<()> {
+    match signal {
+        Some(signal) => signal.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(windows)]
+async fn recv_break(signal: &mut Option<tokio::signal::windows::CtrlBreak>) -> Option<()> {
+    match signal {
+        Some(signal) => signal.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The cache directory for the project `beamfile` defines: `.alba/cache`

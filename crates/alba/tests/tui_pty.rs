@@ -105,20 +105,14 @@ fn drive(
     drive_with_script(beamfile, beam, "", env)
 }
 
-/// Same as [`drive`], but also writes `script` to `red.sh` next to the
-/// Beamfile when it is not empty, for a beam whose `run` shells out to it.
-fn drive_with_script(
-    beamfile: &str,
+/// Spawns `alba run <beam>` on a fresh pty in `project`, with `env` added,
+/// and returns the child, a channel of the raw chunks it writes, and the
+/// pty's writer for sending it keys.
+fn spawn_on_pty(
+    project: &std::path::Path,
     beam: &str,
-    script: &str,
     env: &[(&str, &str)],
-) -> (String, String, portable_pty::ExitStatus) {
-    let project = tempfile::tempdir().unwrap();
-    std::fs::write(project.path().join("Beamfile"), beamfile).unwrap();
-    if !script.is_empty() {
-        std::fs::write(project.path().join("red.sh"), script).unwrap();
-    }
-
+) -> (KillOnDrop, mpsc::Receiver<Vec<u8>>, Box<dyn Write + Send>) {
     let pty = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -129,21 +123,21 @@ fn drive_with_script(
         .unwrap();
     let mut command = CommandBuilder::new(assert_cmd::cargo::cargo_bin("alba"));
     command.args(["run", beam]);
-    command.cwd(project.path());
+    command.cwd(project);
     // The color assertions below exercise both modes explicitly; do not
     // inherit a developer or CI NO_COLOR setting into the default case.
     command.env_remove("NO_COLOR");
     for (name, value) in env {
         command.env(name, value);
     }
-    let mut child = KillOnDrop(pty.slave.spawn_command(command).unwrap());
+    let child = KillOnDrop(pty.slave.spawn_command(command).unwrap());
     // The slave's own handle is not needed once the child holds it; drop
     // it so the master sees EOF once the child's copy closes too, rather
     // than being kept alive by a slave reference this test never uses.
     drop(pty.slave);
 
     let mut reader = pty.master.try_clone_reader().unwrap();
-    let mut writer = pty.master.take_writer().unwrap();
+    let writer = pty.master.take_writer().unwrap();
 
     // Read on a background thread and forward raw chunks over a channel:
     // a `Read::read` on a pty can itself block indefinitely, so the only
@@ -164,6 +158,25 @@ fn drive_with_script(
             }
         }
     });
+
+    (child, chunks_rx, writer)
+}
+
+/// Same as [`drive`], but also writes `script` to `red.sh` next to the
+/// Beamfile when it is not empty, for a beam whose `run` shells out to it.
+fn drive_with_script(
+    beamfile: &str,
+    beam: &str,
+    script: &str,
+    env: &[(&str, &str)],
+) -> (String, String, portable_pty::ExitStatus) {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("Beamfile"), beamfile).unwrap();
+    if !script.is_empty() {
+        std::fs::write(project.path().join("red.sh"), script).unwrap();
+    }
+
+    let (mut child, chunks_rx, mut writer) = spawn_on_pty(project.path(), beam, env);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = String::new();
@@ -299,4 +312,73 @@ fn the_replay_keeps_colour_on_a_terminal_and_drops_it_under_no_color() {
         !replay.contains("\u{1b}[31m"),
         "colour leaked under NO_COLOR: {replay:?}"
     );
+}
+
+/// A `SIGTERM` (a CI cancellation, `docker stop`) or `SIGHUP` (the
+/// terminal closing) reaches the interface too, which reads Ctrl-C as a
+/// key but cannot read these: it must stop the run's commands, restore the
+/// terminal, and report the interruption, rather than die and orphan them.
+#[cfg(unix)]
+#[test]
+fn a_termination_signal_stops_the_interface_and_its_commands() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    for signal in [Signal::SIGTERM, Signal::SIGHUP] {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Beamfile"),
+            "beam slow { executor system_shell run \"echo $$ > shell.pid; sleep 30\" }\n",
+        )
+        .unwrap();
+        let (mut child, chunks_rx, mut writer) = spawn_on_pty(project.path(), "slow", &[]);
+        let pid_file = project.path().join("shell.pid");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = String::new();
+        let mut answered = 0usize;
+        let shell: i32 = loop {
+            assert!(
+                Instant::now() < deadline,
+                "{signal}: the beam never started"
+            );
+            if let Ok(chunk) = chunks_rx.recv_timeout(Duration::from_millis(20)) {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                answer_cursor_queries(&seen, &mut answered, &mut writer);
+            }
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+        };
+
+        let alba = Pid::from_raw(child.0.process_id().unwrap() as i32);
+        kill(alba, signal).unwrap();
+
+        let status = loop {
+            assert!(Instant::now() < deadline, "{signal}: alba never exited");
+            if let Ok(chunk) = chunks_rx.recv_timeout(Duration::from_millis(20)) {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+        };
+        while let Ok(chunk) = chunks_rx.recv_timeout(Duration::from_millis(200)) {
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
+        assert_eq!(status.exit_code(), 130, "{signal}: got {seen:?}");
+        assert!(
+            seen.contains(ALTERNATE_SCREEN_LEAVE),
+            "{signal}: the terminal was not restored"
+        );
+        assert_eq!(
+            kill(Pid::from_raw(shell), None),
+            Err(nix::errno::Errno::ESRCH),
+            "{signal}: the beam's shell outlived Alba"
+        );
+    }
 }
