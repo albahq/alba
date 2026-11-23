@@ -234,7 +234,7 @@ would have restated there.
 | `0` | Success. |
 | `1` | A beam failed (and was not `allow_failure`), or an executor could not release what it held for the run. |
 | `2` | Alba itself failed: a missing Beamfile, a parse or validation error, a bad invocation, an unschedulable run. |
-| `130` | The user interrupted the run (Ctrl-C). |
+| `130` | The run was interrupted: Ctrl-C, or `SIGTERM` or `SIGHUP` from outside (a CI cancellation, `docker stop`, a closed terminal). |
 
 `alba run --watch` reports differently, because a session outlives any single
 run inside it: every run already reported its own outcome as it happened, so
@@ -244,6 +244,13 @@ not release what it held once the session ended. `2` covers whatever keeps
 the session from being a session at all: a Beamfile that fails to load at
 startup, a file watcher that cannot start, or one that dies partway through
 and leaves nothing left to watch; it wins over `1` when both happen.
+
+`SIGTERM` and `SIGHUP` stop Alba the way a Ctrl-C does, on Windows the
+console's close and Ctrl-Break events too: the first cancels the run and
+stops its commands, a second one aborts at once. Every command runs in its
+own process group, out of reach of a signal aimed at Alba, so Alba
+catching these is what keeps a cancelled CI job or a closed terminal from
+leaving the commands it started running.
 
 On a terminal, where the interactive interface is the front end by default
 (see [Interactive interface](#interactive-interface)), `q` exits with the
@@ -258,7 +265,8 @@ session ending some other way than the user closing it, reports `2`, the
 same as a headless session's own startup failures; so does `--ui` refused
 because stdout is not a terminal. An executor that could not release what
 it held once the session ended reports `1` in place of the last run's code,
-as it does headless.
+as it does headless. `SIGTERM` or `SIGHUP` closes the interface after
+stopping the session's commands, and reports `130`.
 
 ### Executors
 

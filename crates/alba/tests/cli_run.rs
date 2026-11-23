@@ -676,8 +676,54 @@ mod interrupts {
     }
 
     fn interrupt(child: &Child) {
+        send(child, nix::sys::signal::Signal::SIGINT);
+    }
+
+    fn send(child: &Child, signal: nix::sys::signal::Signal) {
         let pid = nix::unistd::Pid::from_raw(child.id() as i32);
-        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).unwrap();
+        nix::sys::signal::kill(pid, signal).unwrap();
+    }
+
+    /// A CI cancellation, `docker stop`, or `kill` sends `SIGTERM`, and a
+    /// closed terminal sends `SIGHUP`: either one must cancel the run like
+    /// Ctrl-C does, or Alba dies and leaves the commands it started (and
+    /// the containers behind them) running in their own process groups.
+    /// The beam records its shell's pid, so the test can prove that shell
+    /// is gone once Alba has exited, rather than only that Alba said so.
+    #[test]
+    fn a_termination_signal_cancels_the_run_and_stops_its_commands() {
+        use nix::sys::signal::Signal;
+
+        for signal in [Signal::SIGTERM, Signal::SIGHUP] {
+            let dir = project(
+                "beam slow { executor system_shell run \"echo $$ > shell.pid; echo ready; sleep 30\" }\n",
+            );
+            let child = spawn_running(&dir, "slow");
+
+            send(&child, signal);
+            let output = child.wait_with_output().unwrap();
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("cancelling"),
+                "{signal}: the signal must cancel the run, got:\n{stderr}"
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(130),
+                "{signal}: a terminated run must not report success, stderr:\n{stderr}"
+            );
+            let shell: i32 = std::fs::read_to_string(dir.path().join("shell.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(shell), None),
+                Err(nix::errno::Errno::ESRCH),
+                "{signal}: the beam's shell outlived Alba"
+            );
+        }
     }
 
     /// The first signal cancels the run: Alba announces it, terminates the

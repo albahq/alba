@@ -36,7 +36,7 @@ text renderers on a terminal.
 | `0` | Success. |
 | `1` | A beam failed and was not `allow_failure`, or an executor could not release what it held for the run. |
 | `2` | Alba itself failed: missing Beamfile, parse or validation error, bad invocation. |
-| `130` | Interrupted. |
+| `130` | Interrupted: Ctrl-C, `SIGTERM`, or `SIGHUP`. |
 
 `alba check` and `alba affected` exit `0` when nothing is wrong, even with
 an empty affected list. A `--watch` session ended by Ctrl-C exits `0`, or
