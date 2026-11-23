@@ -392,6 +392,37 @@ beam gen {
     assert_eq!(without_output.executed().len(), 1, "outputs missing: rerun");
 }
 
+/// The cache replays a beam's logs, which hold whatever its commands
+/// printed: on a shared machine they must be readable by their owner only.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_cache_is_readable_by_its_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let cache = dir.path().join(".alba").join("cache");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&cache), 0o700, "the cache directory");
+    let entries: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        assert_eq!(mode(&entry), 0o600, "{}", entry.display());
+    }
+}
+
 #[tokio::test]
 async fn a_failed_beam_writes_no_manifest() {
     let dir = tempfile::tempdir().unwrap();

@@ -7,6 +7,10 @@
 //! entry, if any, stays in place. Writes are atomic (temporary file +
 //! rename) so a concurrent `alba run` in the same project can at worst
 //! overwrite an entry, never tear one.
+//!
+//! The logs hold whatever a beam's commands printed, secrets included when
+//! a command prints one, so on unix the directory is private to its owner
+//! (`0700`) and every entry is written `0600`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -85,7 +89,7 @@ impl CacheStore {
     }
 
     fn try_store(&self, id: &BeamId, manifest: &Manifest, logs: &[OutputLine]) -> io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        create_private_dir(&self.dir)?;
 
         let mut log_lines = String::new();
         for line in logs {
@@ -130,8 +134,35 @@ impl CacheStore {
 /// rename whatever the other had written into it half-way.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = temporary_path(path);
-    std::fs::write(&tmp, bytes)?;
+    write_private(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Creates `dir` if needed and makes it private to its owner, including a
+/// directory an earlier version created world-readable.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Writes a new file readable by its owner only, from its creation on:
+/// there is no window in which it exists with wider permissions.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// A temporary sibling of `path`, never the same one twice.

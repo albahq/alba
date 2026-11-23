@@ -334,6 +334,9 @@ the previous entry untouched. Use it to force a rebuild without clearing
 history for every other beam.
 
 The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
+It replays the logs of each beam's last successful run, so on unix the
+directory is readable by its owner only, and each entry is written with
+`0600` permissions.
 `alba cache clean` removes it entirely; the next run of any beam starts
 from scratch and repopulates it. Alba never edits your `.gitignore`, so
 add `.alba/` to it yourself in any project that turns caching on.
