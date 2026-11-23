@@ -58,8 +58,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
 use crate::cache::{
-    BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile, fingerprint,
-    hash_file, static_contribution,
+    ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
+    fingerprint, hash_file, static_contribution,
 };
 use crate::event::{BeamStatus, RunEvent, RunSummary};
 
@@ -836,6 +836,7 @@ async fn process(
                 &task.beam.id,
                 &Manifest {
                     version: FORMAT_VERSION,
+                    alba_version: ALBA_VERSION.to_string(),
                     fingerprint: assessment.fingerprint.clone(),
                     outputs: task.beam.outputs.clone(),
                     duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),

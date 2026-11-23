@@ -25,10 +25,15 @@ use serde::{Deserialize, Serialize};
 /// re-runs the beam and rewrites the entry — no migration, ever.
 pub(crate) const FORMAT_VERSION: u32 = 3;
 
+/// The Alba that writes and reads entries: an entry another version wrote
+/// is a miss, like one in another format.
+pub(crate) const ALBA_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// What the last successful run of a beam left behind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     pub version: u32,
+    pub alba_version: String,
     pub fingerprint: String,
     /// The rendered `outputs` patterns at the time of that run. Currently
     /// informational (the decision checks the beam's *current*
@@ -100,7 +105,8 @@ impl CacheStore {
     pub(crate) fn load(&self, id: &BeamId) -> Option<Manifest> {
         let bytes = std::fs::read(self.entry(id, "json")).ok()?;
         let manifest: Manifest = serde_json::from_slice(&bytes).ok()?;
-        (manifest.version == FORMAT_VERSION).then_some(manifest)
+        (manifest.version == FORMAT_VERSION && manifest.alba_version == ALBA_VERSION)
+            .then_some(manifest)
     }
 
     pub(crate) fn store(&self, id: &BeamId, manifest: &Manifest, logs: &[OutputLine]) {
@@ -231,6 +237,7 @@ mod tests {
     fn manifest(fingerprint: &str) -> Manifest {
         Manifest {
             version: FORMAT_VERSION,
+            alba_version: ALBA_VERSION.to_string(),
             fingerprint: fingerprint.to_string(),
             outputs: vec!["out.txt".to_string()],
             duration_ms: 1234,
@@ -315,6 +322,23 @@ mod tests {
             ..manifest("fp1")
         };
         store.store(&id, &old, &[]);
+
+        assert_eq!(store.load(&id), None);
+    }
+
+    /// Another Alba may run a beam differently (the embedded shell's
+    /// builtins, how commands are rendered): its entries are not trusted.
+    #[test]
+    fn a_manifest_written_by_another_alba_version_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let id = BeamId("build".to_string());
+
+        let other = Manifest {
+            alba_version: "0.0.0-other".to_string(),
+            ..manifest("fp1")
+        };
+        store.store(&id, &other, &[]);
 
         assert_eq!(store.load(&id), None);
     }

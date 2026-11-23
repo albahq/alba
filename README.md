@@ -290,7 +290,7 @@ run. If so, the beam is skipped: it is reported as `cached` in the
 output, its stored logs are replayed in its place, and the run's summary
 counts it under `cached` rather than `succeeded`. Change any of those
 inputs, even a single character in one matched file, and the beam runs
-again.
+again. Upgrading Alba itself invalidates every entry.
 
 The executor's fingerprint is only as precise as what it hashes, though:
 for `executor docker`, it is the `image` field's own text, not the image
