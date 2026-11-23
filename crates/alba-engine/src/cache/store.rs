@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever the manifest layout *or the fingerprint recipe*
 /// changes incompatibly: a manifest from another version is a miss, which
 /// re-runs the beam and rewrites the entry — no migration, ever.
-pub(crate) const FORMAT_VERSION: u32 = 2;
+pub(crate) const FORMAT_VERSION: u32 = 3;
 
 /// What the last successful run of a beam left behind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +36,47 @@ pub(crate) struct Manifest {
     pub outputs: Vec<String>,
     /// How long the run took, replayed as the cached beam's duration.
     pub duration_ms: u64,
+    /// Every file the run left under `outputs`, as it left it: a hit
+    /// requires the outputs on disk to still match, file for file.
+    pub output_files: Vec<OutputFile>,
+}
+
+/// One output file as a run left it. Size and modification time rather
+/// than a content hash: outputs are build artifacts, often large and
+/// numerous (`dist/`, a release binary), and reading them whole on every
+/// run would cost more than the beam the cache is skipping. Anything that
+/// rewrites a file moves its modification time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutputFile {
+    pub path: String,
+    pub size: u64,
+    /// Nanoseconds since the unix epoch; `None` on a filesystem that does
+    /// not report one, where the size alone is compared.
+    pub modified_ns: Option<u64>,
+}
+
+impl OutputFile {
+    /// What `outputs` name on disk right now under `dir`, in the form a
+    /// manifest stores. A file that vanishes while being listed is left
+    /// out, which can only turn a hit into a miss.
+    pub(crate) fn current(dir: &Path, outputs: &[String]) -> Vec<OutputFile> {
+        alba_core::output_files(dir, outputs)
+            .into_iter()
+            .filter_map(|(path, absolute)| {
+                let metadata = std::fs::metadata(absolute).ok()?;
+                let modified_ns = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|since| u64::try_from(since.as_nanos()).ok());
+                Some(OutputFile {
+                    path,
+                    size: metadata.len(),
+                    modified_ns,
+                })
+            })
+            .collect()
+    }
 }
 
 /// One stored log line. A type of this module's own rather than a serde
@@ -193,6 +234,11 @@ mod tests {
             fingerprint: fingerprint.to_string(),
             outputs: vec!["out.txt".to_string()],
             duration_ms: 1234,
+            output_files: vec![OutputFile {
+                path: "out.txt".to_string(),
+                size: 8,
+                modified_ns: Some(1),
+            }],
         }
     }
 

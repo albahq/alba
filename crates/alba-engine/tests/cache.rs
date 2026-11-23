@@ -392,6 +392,105 @@ beam gen {
     assert_eq!(without_output.executed().len(), 1, "outputs missing: rerun");
 }
 
+/// Runs `source`'s `gen` beam twice around `between`, returning whether
+/// the second run executed: the first run populates the cache, `between`
+/// stands for whatever touches the outputs after it.
+async fn reruns_after(source: &str, dir: &Path, between: impl FnOnce()) -> bool {
+    run_once(source, "gen", dir, options(dir, false), FakeExecutor::new()).await;
+    between();
+    let second = run_once(source, "gen", dir, options(dir, false), FakeExecutor::new()).await;
+    !second.executed().is_empty()
+}
+
+/// A cache entry stands in for the outputs the run left behind, not for
+/// any file that happens to sit at their path: an output rewritten since
+/// (by hand, by another tool) must not be replayed as if the beam had
+/// produced it.
+#[tokio::test]
+async fn a_modified_output_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "out.txt", "produced");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["out.txt"]
+  run "generate"
+}
+"#;
+
+    assert!(
+        reruns_after(SOURCE, dir.path(), || write(
+            dir.path(),
+            "out.txt",
+            "edited by hand"
+        ))
+        .await
+    );
+}
+
+#[tokio::test]
+async fn untouched_outputs_still_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "dist/a.js", "a");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["dist"]
+  run "generate"
+}
+"#;
+
+    assert!(!reruns_after(SOURCE, dir.path(), || {}).await);
+}
+
+/// A directory output is checked file by file, not by its own existence.
+#[tokio::test]
+async fn a_file_changed_inside_an_output_directory_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "dist/nested/a.js", "a");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["dist"]
+  run "generate"
+}
+"#;
+
+    assert!(
+        reruns_after(SOURCE, dir.path(), || {
+            write(dir.path(), "dist/nested/a.js", "rewritten")
+        })
+        .await
+    );
+}
+
+/// A glob output used to be satisfied by any single match: losing one of
+/// the files the run produced went unnoticed as long as another remained.
+#[tokio::test]
+async fn losing_one_of_the_files_a_glob_output_matched_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "dist/a.js", "a");
+    write(dir.path(), "dist/b.js", "b");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["dist/*.js"]
+  run "generate"
+}
+"#;
+
+    assert!(
+        reruns_after(SOURCE, dir.path(), || {
+            std::fs::remove_file(dir.path().join("dist/b.js")).unwrap()
+        })
+        .await
+    );
+}
+
 /// The cache replays a beam's logs, which hold whatever its commands
 /// printed: on a shared machine they must be readable by their owner only.
 #[cfg(unix)]

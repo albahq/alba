@@ -9,7 +9,7 @@ mod fingerprint;
 mod store;
 
 pub(crate) use fingerprint::{BeamFacts, fingerprint, hash_file, static_contribution};
-pub(crate) use store::{CacheStore, FORMAT_VERSION, Manifest};
+pub(crate) use store::{CacheStore, FORMAT_VERSION, Manifest, OutputFile};
 
 /// Caller-facing cache configuration: where the state lives and whether
 /// this run ignores it when reading. `force` still *writes*: a forced run

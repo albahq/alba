@@ -58,8 +58,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
 use crate::cache::{
-    BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, fingerprint, hash_file,
-    static_contribution,
+    BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile, fingerprint,
+    hash_file, static_contribution,
 };
 use crate::event::{BeamStatus, RunEvent, RunSummary};
 
@@ -823,16 +823,27 @@ async fn process(
     if status == BeamStatus::Succeeded
         && let (Some(assessment), Some(store)) = (&assessment, &task.cache)
     {
-        store.store(
-            &task.beam.id,
-            &Manifest {
-                version: FORMAT_VERSION,
-                fingerprint: assessment.fingerprint.clone(),
-                outputs: task.beam.outputs.clone(),
-                duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-            },
-            &lines,
-        );
+        let (dir, outputs) = (task.beam.dir.clone(), task.beam.outputs.clone());
+        // Off the worker threads for the same reason as the assessment: a
+        // directory output is walked and every file in it is stat'ed.
+        let output_files = tokio::task::spawn_blocking(move || OutputFile::current(&dir, &outputs))
+            .await
+            .ok();
+        // Without the outputs' state the entry could never be trusted, so
+        // none is written: the next run simply runs the beam again.
+        if let Some(output_files) = output_files {
+            store.store(
+                &task.beam.id,
+                &Manifest {
+                    version: FORMAT_VERSION,
+                    fingerprint: assessment.fingerprint.clone(),
+                    outputs: task.beam.outputs.clone(),
+                    duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                    output_files,
+                },
+                &lines,
+            );
+        }
     }
 
     (status, duration, contribution)
@@ -962,7 +973,10 @@ impl CacheableBeam {
             .then(|| self.store.load(&self.id))
             .flatten()
             .filter(|manifest| manifest.fingerprint == fingerprint)
-            .filter(|_| outputs_satisfied(&self.dir, &self.outputs));
+            .filter(|_| outputs_satisfied(&self.dir, &self.outputs))
+            .filter(|manifest| {
+                manifest.output_files == OutputFile::current(&self.dir, &self.outputs)
+            });
 
         (Some(Assessment { fingerprint, hit }), None)
     }

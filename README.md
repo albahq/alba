@@ -307,9 +307,11 @@ reference changed.
 A beam without declared `inputs` is never cacheable and always runs. This
 is deliberate for beams whose own work is cheaper than hashing their
 inputs would be, such as an umbrella beam that only reports on the beams
-it needs. If a beam declares `outputs` and one of them is missing from
-disk, the beam also reruns even if its inputs are otherwise unchanged: a
-cache entry only stands in for work whose result is actually still there.
+it needs. If a beam declares `outputs`, the beam also reruns, even with
+unchanged inputs, when its outputs are no longer what its last run left:
+a file missing, removed from a glob's matches or a directory, or
+rewritten since (its size or modification time changed). A cache entry
+only stands in for work whose result is actually still there.
 Both `inputs` and `outputs` patterns resolve relative to the directory of
 the Beamfile that declares the beam, never to the beam's `cwd`, so a beam
 with `cwd "sub"` writing `out.txt` must declare it as `outputs
