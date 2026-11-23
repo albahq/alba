@@ -1364,3 +1364,63 @@ async fn extra_env_does_not_change_the_fingerprint() {
     );
     assert_eq!(ids(&second.summary.cached), vec!["gen"]);
 }
+
+/// The executor's identity stands for what the declaration does not pin:
+/// `docker pull` moving `alpine:3` to a new build, a plugin binary
+/// upgraded in place. A beam whose identity changed must rerun.
+#[tokio::test]
+async fn a_changed_executor_identity_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    let run_on = |identity: &'static str| {
+        run_once(
+            GEN,
+            "gen",
+            dir.path(),
+            options(dir.path(), false),
+            FakeExecutor::new().with_identity(identity),
+        )
+    };
+
+    run_on("image-a").await;
+    let unchanged = run_on("image-a").await;
+    let moved = run_on("image-b").await;
+
+    assert!(unchanged.executed().is_empty(), "same identity: hit");
+    assert_eq!(moved.executed(), vec!["generate"], "new identity: rerun");
+}
+
+/// An identity that cannot be read (a stopped docker daemon) cannot be
+/// compared with the stored one: the beam runs, uncached, and says why.
+#[tokio::test]
+async fn an_unreadable_executor_identity_runs_the_beam_uncached() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let blind = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new().fail_identity("daemon unreachable"),
+    )
+    .await;
+
+    assert_eq!(blind.executed(), vec!["generate"]);
+    assert!(
+        blind
+            .stderr()
+            .iter()
+            .any(|line| line.contains("cache:") && line.contains("daemon unreachable")),
+        "{:?}",
+        blind.stderr()
+    );
+}

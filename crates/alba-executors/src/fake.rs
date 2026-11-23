@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor, OutputLine,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession,
+    Executor, OutputLine,
 };
 
 /// What a scripted command should do when [`FakeExecutor`] runs it: the
@@ -58,6 +59,8 @@ struct FakeState {
     open_failures: Mutex<Vec<(String, String)>>,
     /// The message `shutdown` fails with, when set.
     shutdown_failure: Mutex<Option<String>>,
+    /// What `identity` answers: an identity, or the message it fails with.
+    identity: Mutex<Result<Option<String>, String>>,
     running: AtomicUsize,
     peak: AtomicUsize,
 }
@@ -95,6 +98,7 @@ impl FakeExecutor {
                 events: Mutex::new(Vec::new()),
                 open_failures: Mutex::new(Vec::new()),
                 shutdown_failure: Mutex::new(None),
+                identity: Mutex::new(Ok(None)),
                 running: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
             }),
@@ -130,6 +134,21 @@ impl FakeExecutor {
     /// `self`, chainable like [`FakeExecutor::on`].
     pub fn fail_shutdown(self, message: impl Into<String>) -> Self {
         *self.state.shutdown_failure.lock().unwrap() = Some(message.into());
+        self
+    }
+
+    /// Makes `identity` answer `identity` for every beam, standing for an
+    /// executor whose environment (an image, a binary) can change under an
+    /// unchanged declaration. Chainable like [`FakeExecutor::on`].
+    pub fn with_identity(self, identity: impl Into<String>) -> Self {
+        *self.state.identity.lock().unwrap() = Ok(Some(identity.into()));
+        self
+    }
+
+    /// Makes `identity` fail with `message`, standing for an environment
+    /// that cannot be inspected right now (a stopped docker daemon).
+    pub fn fail_identity(self, message: impl Into<String>) -> Self {
+        *self.state.identity.lock().unwrap() = Err(message.into());
         self
     }
 
@@ -182,6 +201,15 @@ impl Executor for FakeExecutor {
             state: Arc::clone(&self.state),
             beam: beam.beam,
         }))
+    }
+
+    async fn identity(&self, _beam: &BeamIdentity) -> Result<Option<String>, ExecError> {
+        self.state
+            .identity
+            .lock()
+            .unwrap()
+            .clone()
+            .map_err(|message| ExecError { message })
     }
 
     async fn shutdown(&self) -> Result<(), ExecError> {

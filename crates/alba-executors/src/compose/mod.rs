@@ -46,8 +46,8 @@ use tokio::task::JoinHandle;
 use crate::container::{self, DRAIN_PERIOD, STOP_GRACE, container_name, run_quiet, spawn_error};
 use crate::shell::stream_lines;
 use crate::{
-    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
-    OutputLine, Stream,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession,
+    Executor, OutputLine, Stream,
 };
 
 use dependencies::Dependencies;
@@ -164,6 +164,60 @@ impl Project {
 
 #[async_trait::async_trait]
 impl Executor for ComposeExecutor {
+    /// The service's resolved configuration, as `docker compose config`
+    /// prints it (every file, override and interpolation applied), plus
+    /// what that configuration only names: the image a service's tag
+    /// points at now, or the content of the Dockerfile it is built from.
+    /// The build context beyond the Dockerfile is not read.
+    async fn identity(&self, beam: &BeamIdentity) -> Result<Option<String>, ExecError> {
+        let options = ComposeOptions::from_value(&beam.options)?;
+        let project = Project {
+            dir: beam.dir.clone(),
+            file: options.file.as_ref().map(|file| beam.dir.join(file)),
+        };
+        let service = options.service.as_str();
+        let output = project
+            .command(&["config", "--format", "json", service])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|error| spawn_error(error, COMPOSE_REQUIREMENT))?;
+        if !output.status.success() {
+            return Err(ExecError {
+                message: format!(
+                    "cannot read the configuration of service `{service}`: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        let config: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| ExecError {
+                message: format!("`docker compose config` printed invalid JSON: {error}"),
+            })?;
+        let definition = &config["services"][service];
+        let runs_on = if let Some(build) = definition.get("build") {
+            let context = build["context"].as_str().unwrap_or(".");
+            let dockerfile = build["dockerfile"].as_str().unwrap_or("Dockerfile");
+            let path = beam.dir.join(context).join(dockerfile);
+            format!(
+                "dockerfile:{}",
+                container::content_hash(&path, "the Dockerfile").await?
+            )
+        } else if let Some(image) = definition["image"].as_str() {
+            format!(
+                "image:{}",
+                container::image_id(image, COMPOSE_REQUIREMENT).await?
+            )
+        } else {
+            String::new()
+        };
+        Ok(Some(format!(
+            "compose:{}:{runs_on}",
+            blake3::hash(&output.stdout).to_hex()
+        )))
+    }
+
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
         let options = ComposeOptions::from_value(&beam.options)?;
         let project = Project::new(&beam, &options);

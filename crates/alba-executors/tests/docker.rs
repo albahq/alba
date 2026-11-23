@@ -19,7 +19,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use alba_executors::{BeamContext, CommandSpec, DockerExecutor, ExecContext, Executor, OutputLine};
+use alba_executors::{
+    BeamContext, BeamIdentity, CommandSpec, DockerExecutor, ExecContext, Executor, OutputLine,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// A beam name unique to both this test (`suffix`) and this run (the
@@ -674,4 +676,88 @@ async fn the_image_is_built_from_the_declared_dockerfile() {
     assert_eq!(drain_text(&mut rx).await, ["baked"]);
 
     session.close().await.unwrap();
+}
+
+fn identity_request(dir: &Path, options: serde_json::Value) -> BeamIdentity {
+    BeamIdentity {
+        dir: dir.to_path_buf(),
+        options,
+    }
+}
+
+/// A beam built from a context runs on whatever its Dockerfile describes,
+/// which its declaration (the context's path) does not show. No daemon is
+/// involved: the Dockerfile is read from disk.
+#[tokio::test]
+async fn a_built_beams_identity_follows_its_dockerfile() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("ctx")).unwrap();
+    std::fs::write(dir.path().join("ctx/dev.Dockerfile"), "FROM alpine:3\n").unwrap();
+    let executor = DockerExecutor::new(dir.path().to_path_buf());
+    let request = identity_request(
+        dir.path(),
+        serde_json::json!({"build": "ctx", "dockerfile": "dev.Dockerfile", "volumes": []}),
+    );
+
+    let first = executor.identity(&request).await.unwrap();
+    let again = executor.identity(&request).await.unwrap();
+    std::fs::write(
+        dir.path().join("ctx/dev.Dockerfile"),
+        "FROM alpine:3\nRUN apk add git\n",
+    )
+    .unwrap();
+    let edited = executor.identity(&request).await.unwrap();
+
+    assert!(first.is_some());
+    assert_eq!(first, again);
+    assert_ne!(first, edited);
+}
+
+#[tokio::test]
+async fn a_missing_dockerfile_leaves_the_identity_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let executor = DockerExecutor::new(dir.path().to_path_buf());
+    let request = identity_request(
+        dir.path(),
+        serde_json::json!({"build": "ctx", "volumes": []}),
+    );
+
+    let error = executor.identity(&request).await.unwrap_err();
+
+    assert!(error.message.contains("Dockerfile"), "{}", error.message);
+}
+
+/// A tag is mutable: `docker pull`, or a local `docker tag`, moves it to
+/// another image without the beam's declaration changing. The identity
+/// is the image the tag points at now.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn an_image_beams_identity_follows_what_its_tag_points_at() {
+    let tag = format!("alba-it-identity-{}:latest", std::process::id());
+    let docker = |args: &[&str]| {
+        let status = std::process::Command::new("docker")
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "docker {args:?}");
+    };
+    docker(&["pull", "-q", "alpine:3"]);
+    docker(&["pull", "-q", "busybox:1"]);
+    let dir = tempfile::tempdir().unwrap();
+    let executor = DockerExecutor::new(dir.path().to_path_buf());
+    let request = identity_request(dir.path(), serde_json::json!({"image": tag, "volumes": []}));
+
+    let absent = executor.identity(&request).await.unwrap();
+    docker(&["tag", "alpine:3", &tag]);
+    let on_alpine = executor.identity(&request).await.unwrap();
+    docker(&["tag", "busybox:1", &tag]);
+    let on_busybox = executor.identity(&request).await.unwrap();
+    docker(&["rmi", &tag]);
+
+    assert!(
+        absent.is_some(),
+        "an image not pulled yet still has an identity"
+    );
+    assert_ne!(absent, on_alpine);
+    assert_ne!(on_alpine, on_busybox);
 }

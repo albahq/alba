@@ -50,7 +50,8 @@ use alba_core::{
     outputs_satisfied, render_template,
 };
 use alba_executors::{
-    BeamContext, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor, Stream,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor,
+    Stream,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -877,6 +878,25 @@ async fn assess(
         return (None, None);
     };
 
+    // Asked before the blocking half: the executor may have to consult
+    // something outside the process (the docker daemon) to answer.
+    let request = BeamIdentity {
+        dir: task.beam.dir.clone(),
+        options: executor_options(&task.beam.executor),
+    };
+    let executor_identity = match task.executor.identity(&request).await {
+        Ok(identity) => identity.unwrap_or_default(),
+        Err(error) => {
+            return (
+                None,
+                Some(format!(
+                    "cache: cannot tell what this beam runs on ({}); running without cache",
+                    error.message
+                )),
+            );
+        }
+    };
+
     let facts = CacheableBeam {
         store: Arc::clone(store),
         id: task.beam.id.clone(),
@@ -890,6 +910,7 @@ async fn assess(
         needs,
         force: task.force,
         executor: executor_label(&task.beam.executor),
+        executor_identity,
     };
     // Off the runtime's worker threads: `decide` walks a directory tree
     // and reads every input file whole through `std::fs`. Doing that in an
@@ -921,6 +942,7 @@ struct CacheableBeam {
     needs: Vec<String>,
     force: bool,
     executor: String,
+    executor_identity: String,
 }
 
 impl CacheableBeam {
@@ -968,6 +990,7 @@ impl CacheableBeam {
             args: &self.args,
             needs: &self.needs,
             executor: &self.executor,
+            executor_identity: &self.executor_identity,
         });
 
         let hit = (!self.force)

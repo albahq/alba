@@ -52,8 +52,8 @@ use crate::protocol::{HostMessage, PROTOCOL_VERSION, PluginMessage, WireStream};
 use crate::shell::kill_process_group;
 use crate::shell::stream_lines;
 use crate::{
-    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
-    OutputLine, Stream,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession,
+    Executor, OutputLine, Stream,
 };
 
 /// How long `close`/`kill` wait for the stderr relay task (spawned once in
@@ -136,6 +136,13 @@ impl PluginExecutor {
 
 #[async_trait::async_trait]
 impl Executor for PluginExecutor {
+    /// The plugin binary's content hash: upgrading the plugin in place,
+    /// under the same name and options, changes what the beam runs on.
+    async fn identity(&self, _beam: &BeamIdentity) -> Result<Option<String>, ExecError> {
+        let hash = crate::container::content_hash(&self.binary, "the plugin binary").await?;
+        Ok(Some(format!("plugin:{hash}")))
+    }
+
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
         // Destructured up front so `cancel` can be selected on below
         // while `beam_name`/`dir`/`options` are moved into the `open`
