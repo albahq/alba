@@ -16,6 +16,9 @@ pub(crate) struct BeamFacts<'a> {
     pub commands: &'a [String],
     pub cwd: &'a str,
     pub env: &'a [(String, String)],
+    /// Each `env_inputs` name with its ambient value, `None` when unset,
+    /// in declaration order.
+    pub env_inputs: &'a [(String, Option<String>)],
     pub args: &'a [String],
     pub needs: &'a [String],
     /// Which executor this beam dispatches to, and its full configuration
@@ -60,6 +63,19 @@ pub(crate) fn fingerprint(facts: &BeamFacts<'_>) -> String {
         item(&mut hasher, name);
         item(&mut hasher, value);
     }
+    item(&mut hasher, "env_inputs");
+    for (name, value) in facts.env_inputs {
+        item(&mut hasher, name);
+        // Unset and empty are different environments: the marker keeps
+        // them apart.
+        match value {
+            Some(value) => {
+                item(&mut hasher, "set");
+                item(&mut hasher, value);
+            }
+            None => item(&mut hasher, "unset"),
+        }
+    }
     item(&mut hasher, "args");
     for arg in facts.args {
         item(&mut hasher, arg);
@@ -89,6 +105,7 @@ pub(crate) fn static_contribution(
         commands,
         cwd,
         env,
+        env_inputs: &[],
         args,
         needs: &[],
         executor,
@@ -151,6 +168,7 @@ mod tests {
             commands: &strings(commands),
             cwd,
             env: &pairs(env),
+            env_inputs: &[],
             args: &strings(args),
             needs: &strings(needs),
             executor,

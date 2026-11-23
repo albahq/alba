@@ -292,6 +292,25 @@ counts it under `cached` rather than `succeeded`. Change any of those
 inputs, even a single character in one matched file, and the beam runs
 again. Upgrading Alba itself invalidates every entry.
 
+The environment a beam's commands inherit is not part of the
+fingerprint: it changes all the time (`PWD`, `TERM`, `SHLVL`) for
+reasons that have nothing to do with the build. A variable read through
+`env(...)` in the Beamfile already is, as part of what it renders. For a
+variable a tool reads on its own, name it in `env_inputs`, beside the
+beam's `inputs`; its current value, or its being unset, then joins the
+fingerprint:
+
+```
+beam bundle {
+  inputs ["src/**", "package-lock.json"]
+  env_inputs ["NODE_ENV", "PATH"]
+  run "npm run build"
+}
+```
+
+`env_inputs` requires `inputs`, and each entry must be a variable name
+(letters, digits and `_`, not starting with a digit).
+
 The executor's fingerprint also covers what its declaration only names.
 For `executor docker`, that is the image a tag points at right now (so
 `docker pull alpine:3` fetching a new build reruns the beam), or, for a

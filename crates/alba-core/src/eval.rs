@@ -1119,6 +1119,7 @@ fn build_beam(
     let beam_name = decl.name.value.as_str();
     let inputs = build_patterns("inputs", beam_name, &decl.inputs, lets, &params)?;
     let outputs = build_patterns("outputs", beam_name, &decl.outputs, lets, &params)?;
+    let env_inputs = build_env_inputs(decl, lets, &params, &inputs)?;
 
     for run_template in &decl.run {
         validate_template(run_template, lets, &params, Timing::Schedule)?;
@@ -1140,6 +1141,7 @@ fn build_beam(
         needs,
         params,
         inputs,
+        env_inputs,
         outputs,
         run: decl.run.clone(),
         env: decl
@@ -1200,6 +1202,49 @@ fn build_patterns(
         patterns.push(pattern);
     }
     Ok(patterns)
+}
+
+/// Renders a beam's `env_inputs` names and checks each one could name an
+/// environment variable: a name none can hold would read as unset forever.
+/// The field also requires `inputs`, the only thing that makes a beam
+/// cached; without them it would silently do nothing.
+fn build_env_inputs(
+    decl: &BeamDecl,
+    lets: &Scope,
+    params: &[String],
+    inputs: &[String],
+) -> Result<Vec<String>, CoreError> {
+    let beam = decl.name.value.as_str();
+    if let Some(first) = decl.env_inputs.first()
+        && inputs.is_empty()
+    {
+        return Err(CoreError::new(
+            format!(
+                "`env_inputs` in beam `{beam}` needs `inputs`: only a beam with inputs is cached"
+            ),
+            first.span,
+        ));
+    }
+    let mut names = Vec::with_capacity(decl.env_inputs.len());
+    for template in &decl.env_inputs {
+        let name = render_load_time_template("env_inputs", template, lets, params)?;
+        let mut characters = name.chars();
+        let valid = characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_');
+        if !valid {
+            return Err(CoreError::new(
+                format!(
+                    "invalid `env_inputs` name `{name}` in beam `{beam}`: \
+                     a variable name is letters, digits and `_`, not starting with a digit"
+                ),
+                template.span,
+            ));
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 fn build_executor(
@@ -1804,6 +1849,60 @@ beam b {
 "#,
         )
         .expect("leading `.` and `..` components are anchored, not rejected");
+    }
+
+    #[test]
+    fn env_inputs_name_the_variables_the_cache_reads() {
+        let project = load_str(
+            r#"
+beam b {
+  inputs ["src/**"]
+  env_inputs ["NODE_ENV", "PATH"]
+  run "x"
+}
+"#,
+        )
+        .unwrap();
+        assert_eq!(project.beams[0].env_inputs, vec!["NODE_ENV", "PATH"]);
+    }
+
+    /// A name no environment can hold would be read as unset forever, so
+    /// the beam would look unchanged however the variable it meant moved.
+    #[test]
+    fn env_inputs_reject_a_name_that_is_not_a_variable() {
+        for name in ["", "1ST", "NODE-ENV", "A B", "A=B"] {
+            let source = format!(
+                "beam b {{\n  inputs [\"src/**\"]\n  env_inputs [\"{name}\"]\n  run \"x\"\n}}\n"
+            );
+            let err = load_str(&source).unwrap_err();
+            assert!(
+                err.message
+                    .contains(&format!("invalid `env_inputs` name `{name}` in beam `b`")),
+                "{}",
+                err.message
+            );
+        }
+    }
+
+    /// Only a beam with `inputs` is cached: on any other beam the field
+    /// would do nothing, without a word.
+    #[test]
+    fn env_inputs_require_inputs() {
+        let err = load_str(
+            r#"
+beam b {
+  env_inputs ["NODE_ENV"]
+  run "x"
+}
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.message
+                .contains("`env_inputs` in beam `b` needs `inputs`"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

@@ -130,6 +130,9 @@ pub struct BeamDecl {
     pub description: Option<StringTemplate>,
     pub needs: Vec<Spanned<NeedRef>>,
     pub inputs: Vec<StringTemplate>,
+    /// The names of ambient environment variables whose values join the
+    /// cache fingerprint (`env_inputs ["NODE_ENV"]`).
+    pub env_inputs: Vec<StringTemplate>,
     pub outputs: Vec<StringTemplate>,
     /// One entry for the single-string form of `run`, N entries for the
     /// list form.
