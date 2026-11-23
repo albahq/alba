@@ -28,9 +28,11 @@ use std::path::{Component, Path, PathBuf};
 /// (`require_git(false)`), so behaviour does not silently change when a
 /// project is unpacked from a tarball; only the project's own ignore files
 /// apply, not the machine's global excludes, so inputs remain reproducible
-/// regardless of whose machine resolves them. Hidden files are included —
-/// `inputs [".env"]` must work — but `.git/` and `.alba/` are never
-/// walked: the first is noise, and hashing the cache's own directory
+/// regardless of whose machine resolves them. Those ignore files only
+/// decide what a glob sweeps up: a literal pattern names its file outright,
+/// ignored or not, since `inputs [".env"]` must notice a change to an
+/// `.env` that every `.gitignore` lists. Hidden files are included, but
+/// `.git/` and `.alba/` are never walked: the first is noise, and hashing the cache's own directory
 /// would invalidate every beam on every run. Symbolic links are followed:
 /// a linked source file (or a linked source directory, as a vendored or
 /// workspace-shared tree often is) is a real input, and dropping it for
@@ -42,8 +44,17 @@ use std::path::{Component, Path, PathBuf};
 /// its own, leaving its siblings' matches intact.
 pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> {
     let mut anchors: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut literals: Vec<PathBuf> = Vec::new();
     for pattern in patterns {
         let (anchor, rest) = anchor_pattern(base, pattern);
+        if is_literal(&rest) {
+            let path = anchor.join(&rest);
+            // `is_file` follows symbolic links, as the walk does.
+            if path.is_file() {
+                literals.push(path);
+            }
+            continue;
+        }
         match anchors.iter_mut().find(|(dir, _)| *dir == anchor) {
             Some((_, group)) => group.push(rest),
             None => anchors.push((anchor, vec![rest])),
@@ -54,6 +65,7 @@ pub fn expand_globs(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> 
     let mut files: Vec<(String, PathBuf)> = anchors
         .iter()
         .flat_map(|(anchor, group)| walk(anchor, group))
+        .chain(literals)
         .map(|absolute| (relative_name(&base_components, &absolute), absolute))
         .collect();
     files.sort();
@@ -105,6 +117,12 @@ pub fn pattern_dir(base: &Path, pattern: &str) -> PathBuf {
     literal
         .iter()
         .fold(anchor, |dir, component| dir.join(component))
+}
+
+/// Whether `pattern` (already past its [`anchor_pattern`]) holds no glob
+/// syntax, so it names exactly one path.
+fn is_literal(pattern: &str) -> bool {
+    !pattern.contains(['*', '?', '[', ']', '{', '}', '\\'])
 }
 
 /// Whether `pattern` holds a `.` or `..` component past the leading ones
