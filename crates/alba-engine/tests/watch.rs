@@ -1247,6 +1247,13 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
     git(dir.path(), &["config", "user.email", "alba@example.com"]);
     git(dir.path(), &["config", "user.name", "Alba"]);
     git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    // The machine's global excludes would otherwise apply: one that
+    // ignores `Beamfile` leaves it uncommitted and every assertion about it
+    // answering for that machine instead of for the code under test.
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
     std::fs::write(dir.path().join("docs/index.md"), "v1").unwrap();
     std::fs::write(

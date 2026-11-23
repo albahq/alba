@@ -64,6 +64,13 @@ fn repository_with(files: &[(&str, &str)]) -> tempfile::TempDir {
     git(dir.path(), &["config", "user.email", "alba@example.com"]);
     git(dir.path(), &["config", "user.name", "Alba"]);
     git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    // The machine's global excludes would otherwise apply: one that
+    // ignores `Beamfile` leaves it uncommitted and every assertion about it
+    // answering for that machine instead of for the code under test.
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
     for (file, content) in files {
         write(dir.path().join(file), content);
     }

@@ -29,6 +29,13 @@ fn repository() -> tempfile::TempDir {
     git(dir.path(), &["config", "user.email", "alba@example.com"]);
     git(dir.path(), &["config", "user.name", "Alba"]);
     git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    // The machine's global excludes would otherwise apply: one that
+    // ignores `Beamfile` leaves it uncommitted and every assertion about it
+    // answering for that machine instead of for the code under test.
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}").unwrap();
     std::fs::write(dir.path().join("README.md"), "# x").unwrap();
