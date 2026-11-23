@@ -70,6 +70,12 @@
 //! build only has more headroom under the same threshold, never less.
 //! Building the fixture (writing ~100 files to a tempdir) happens before
 //! the clock starts and is never part of the measurement.
+//!
+//! Ignored by default: an absolute wall-clock budget measures the machine
+//! as much as the code, and the rest of the suite running beside it is
+//! enough load to break it. CI runs it alone in its own step, on every
+//! platform; run it locally with
+//! `cargo test -p alba-core --test perf -- --ignored`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -155,6 +161,7 @@ fn write_fixture(dir: &std::path::Path) -> PathBuf {
 }
 
 #[test]
+#[ignore = "timing guard: needs an idle machine; CI runs it in its own step"]
 fn load_project_stays_under_10ms_of_work() {
     let dir = tempfile::tempdir().unwrap();
     let root = write_fixture(dir.path());

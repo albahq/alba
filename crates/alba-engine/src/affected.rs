@@ -200,7 +200,12 @@ mod tests {
     /// The spec's guard: on the order of ten milliseconds, git's own time
     /// excluded. 300 beams in a chain, each with an input pattern, against
     /// 2000 changed paths; the median of 15 samples, as the other guards do.
+    ///
+    /// Ignored by default, like the other wall-clock budgets: the suite
+    /// running beside it is enough load to break it. CI runs it alone; run
+    /// it locally with `cargo test -p alba-engine --lib -- --ignored affected_selection`.
     #[test]
+    #[ignore = "timing guard: needs an idle machine; CI runs it in its own step"]
     fn affected_selection_stays_imperceptible() {
         let mut source = String::new();
         for i in 0..300 {

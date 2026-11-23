@@ -48,9 +48,25 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+      # The wall-clock budgets are `#[ignore]`d in the default run because
+      # the rest of the suite running beside them is enough load to break
+      # an absolute budget. Here each one runs alone in its test binary,
+      # on every platform. `--exact` keeps the other ignored tests out.
+      - name: Performance
+        run: >-
+          cargo test --workspace --all-features -- --ignored --exact
+          load_project_stays_under_10ms_of_work
+          a_fully_cached_run_stays_imperceptible
+          affected::tests::affected_selection_stays_imperceptible
+
       # The docker and compose executors' integration tests are
       # `#[ignore]`d because they need a running daemon; the ubuntu runner
-      # has one, the macOS and windows runners do not.
+      # has one, the macOS and windows runners do not. The wall-clock
+      # budgets already ran alone in the step above.
       - name: Test (docker and compose executors)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace --all-features -- --ignored
+        run: >-
+          cargo test --workspace --all-features -- --ignored
+          --skip load_project_stays_under_10ms_of_work
+          --skip a_fully_cached_run_stays_imperceptible
+          --skip affected_selection_stays_imperceptible
