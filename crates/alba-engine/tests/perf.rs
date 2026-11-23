@@ -15,6 +15,12 @@
 //! dev profile `cargo test` builds, nearly all of it hashing and reading;
 //! blake3 is optimized even there (see the workspace `Cargo.toml`), as it is
 //! in the binary users run.
+//!
+//! Ignored by default: an absolute wall-clock budget measures the machine
+//! as much as the code, and the rest of the suite running beside it is
+//! enough load to break it. CI runs it alone in its own step, on every
+//! platform; run it locally with
+//! `cargo test -p alba-engine --test perf -- --ignored`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -64,6 +70,7 @@ async fn run_once(dir: &Path) -> alba_engine::RunSummary {
 }
 
 #[tokio::test]
+#[ignore = "timing guard: needs an idle machine; CI runs it in its own step"]
 async fn a_fully_cached_run_stays_imperceptible() {
     let dir = tempfile::tempdir().unwrap();
     for i in 0..100 {
