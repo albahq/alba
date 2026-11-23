@@ -85,6 +85,12 @@ pub(crate) fn mv(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
 /// exit for it (a `-f`'d directory without `-r` is still an error: `-f`
 /// only forgives missing paths, not the wrong type). Every path is
 /// attempted; the exit code is 1 if any of them failed.
+///
+/// Three operands are refused outright, `-f` or not, as GNU `rm` refuses
+/// them: an empty one, which joined onto the cwd would name the cwd itself;
+/// one whose last component is `.` or `..`; and one that names the
+/// filesystem root, what `rm -rf $OUT_DIR/` becomes when `OUT_DIR` is
+/// unset.
 pub(crate) fn rm(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
     let (flags, rest) = match take_flags(args, &["-r", "-f"]) {
         Ok(parsed) => parsed,
@@ -99,6 +105,11 @@ pub(crate) fn rm(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
     let mut writer = stderr.writer();
     let mut failed = false;
     for path in rest {
+        if let Some(refusal) = rm_refusal(path, cwd) {
+            failed = true;
+            let _ = writeln!(writer, "rm: {refusal}");
+            continue;
+        }
         let target = cwd.join(path);
         if !target.exists() {
             if !force {
@@ -124,6 +135,44 @@ pub(crate) fn rm(args: &[String], cwd: &Path, stderr: OutTarget) -> Flow {
         }
     }
     Flow::Next(if failed { 1 } else { 0 })
+}
+
+/// Why `rm` must not touch `path`, if it must not: checked before the
+/// disk is, so a refused operand is refused whether it exists or not.
+fn rm_refusal(path: &str, cwd: &Path) -> Option<String> {
+    if path.is_empty() {
+        return Some("'': no such file or directory".to_string());
+    }
+    if lexically_normal(&cwd.join(path)).parent().is_none() {
+        return Some(format!("refusing to remove the filesystem root: {path}"));
+    }
+    let last = path
+        .trim_end_matches(['/', std::path::MAIN_SEPARATOR])
+        .rsplit(['/', std::path::MAIN_SEPARATOR])
+        .next()
+        .unwrap_or_default();
+    if matches!(last, "." | "..") {
+        return Some(format!("refusing to remove '.' or '..': {path}"));
+    }
+    None
+}
+
+/// `path` with `.` dropped and each `..` folded into the component before
+/// it, without touching the disk: `/missing/..` is `/`, however little of
+/// it exists.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // At the root, `..` is the root again.
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    normal
 }
 
 /// `mkdir [-p] dir...`: without `-p`, an existing directory or a missing

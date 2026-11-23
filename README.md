@@ -676,6 +676,12 @@ the same name, so `rm -rf dist` behaves the same on every platform even
 where a system `rm` also exists; an explicit path such as `/bin/rm`
 bypasses the builtin and reaches the system binary directly.
 
+Like GNU `rm`, the builtin refuses three operands even under `-f`: the
+filesystem root (what `rm -rf $OUT_DIR/` names when `OUT_DIR` is unset),
+one ending in `.` or `..`, and an empty one, which would otherwise name
+the current directory. Each refusal is reported on stderr and makes `rm`
+exit `1`; the other operands are still removed.
+
 A few behaviors are deliberately frozen rather than left
 implementation-defined: an unset variable expands to the empty string
 (there is no `set -u`); a pipeline's exit code is always its last
