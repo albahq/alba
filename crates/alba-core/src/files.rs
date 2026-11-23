@@ -154,6 +154,14 @@ fn walk(anchor: &Path, patterns: &[String]) -> Vec<PathBuf> {
     files
 }
 
+/// `path` with `.` dropped and each `..` folded into the component before
+/// it, without touching the disk: the form in which two spellings of one
+/// path (`/repo/app/../libs` and `/repo/libs`) compare equal, the way
+/// [`anchor_pattern`] reads a pattern's `..`.
+pub fn lexically_normal(path: &Path) -> PathBuf {
+    lexical_components(path).iter().collect()
+}
+
 /// `path`'s components with `.` dropped and `..` folded into the component
 /// before it, so two spellings of one path compare equal.
 fn lexical_components(path: &Path) -> Vec<Component<'_>> {

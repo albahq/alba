@@ -68,7 +68,8 @@ stderr as `cleanup failed: <message>` lines.
 ## Affected runs
 
 A beam is affected when one of its `inputs` globs matches a path changed
-since `<ref>` (tracked diff plus untracked, non-ignored files), when its
+since `<ref>` (tracked diff plus untracked, non-ignored files, anywhere in
+the repository, so `../` inputs and imports count), when its
 declaring Beamfile changed, or transitively when it `needs` an affected
 beam. A beam with no `inputs` is never affected on its own. Requires `git`
 on the `PATH`.

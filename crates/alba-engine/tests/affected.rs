@@ -250,3 +250,66 @@ fn an_unknown_reference_is_reported_as_a_git_error() {
     let err = affected(&project, &sources, dir.path(), "no-such-ref").unwrap_err();
     assert!(err.to_string().contains("no-such-ref"), "{err}");
 }
+
+/// A project living in `app/` of a larger repository, whose inputs and
+/// imports climb out of it: what changed next to it is still its business.
+fn nested_repository() -> tempfile::TempDir {
+    repository_with(&[
+        (
+            "app/Beamfile",
+            "import \"../shared/Beamfile\" as shared\n\
+             beam build { inputs [\"../libs/**\"] run \"build\" }\n",
+        ),
+        ("shared/Beamfile", "beam lint { run \"lint\" }\n"),
+        ("libs/lib.txt", "v1"),
+        ("elsewhere/file.txt", "v1"),
+    ])
+}
+
+fn affected_in_app(dir: &tempfile::TempDir) -> Vec<BeamId> {
+    let app = dir.path().join("app");
+    let (project, sources) = load_project(&app.join("Beamfile")).unwrap();
+    affected(&project, &sources, &app, "HEAD").unwrap()
+}
+
+#[test]
+fn a_changed_input_outside_the_beamfile_directory_affects_its_beam() {
+    let dir = nested_repository();
+    write(dir.path().join("libs/lib.txt"), "v2");
+    assert_eq!(names(&affected_in_app(&dir)), ["build"]);
+}
+
+#[test]
+fn an_untracked_input_outside_the_beamfile_directory_affects_its_beam() {
+    let dir = nested_repository();
+    write(dir.path().join("libs/new.txt"), "v1");
+    assert_eq!(names(&affected_in_app(&dir)), ["build"]);
+}
+
+#[test]
+fn a_changed_import_outside_the_beamfile_directory_affects_its_beams() {
+    let dir = nested_repository();
+    let shared = dir.path().join("shared/Beamfile");
+    let mut content = std::fs::read_to_string(&shared).unwrap();
+    content.push_str("\n# v2\n");
+    write(shared, &content);
+    assert_eq!(names(&affected_in_app(&dir)), ["shared:lint"]);
+}
+
+#[test]
+fn a_change_no_input_names_affects_nothing_even_outside_the_directory() {
+    let dir = nested_repository();
+    write(dir.path().join("elsewhere/file.txt"), "v2");
+    assert!(affected_in_app(&dir).is_empty());
+}
+
+/// A reference git would read as one of its own options (`--output=x`
+/// writes a file) is refused before git ever sees it.
+#[test]
+fn a_reference_shaped_like_an_option_is_refused() {
+    let dir = repository();
+    let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let err = affected(&project, &sources, dir.path(), "--output=leak").unwrap_err();
+    assert!(err.to_string().contains("--output=leak"), "{err}");
+    assert!(!dir.path().join("leak").exists());
+}

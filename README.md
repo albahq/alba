@@ -327,7 +327,11 @@ add `.alba/` to it yourself in any project that turns caching on.
 
 `alba run --affected <ref> [beam]` runs only the beams affected by what
 changed since `<ref>`: every path `git diff --name-only <ref>` reports,
-plus every untracked file `.gitignore` does not exclude.
+plus every untracked file `.gitignore` does not exclude. Both cover the
+whole repository, not only the Beamfile's directory, so a beam in `app/`
+declaring `inputs ["../libs/**"]`, or importing `../shared/Beamfile`, is
+affected by a change there. A `<ref>` starting with `-` is refused, since
+git would read it as one of its own options.
 
 A beam is affected when:
 

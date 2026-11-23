@@ -186,13 +186,59 @@ pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
 
 /// Every path that differs between `reference` and the working tree
 /// (committed since, staged, modified, deleted, renamed) plus every
-/// untracked file `.gitignore` does not exclude; relative to `cwd`,
-/// sorted, without duplicates. Paths outside `cwd` are not reported.
+/// untracked file `.gitignore` does not exclude, anywhere in the
+/// repository holding `cwd`; absolute, sorted, without duplicates.
+///
+/// The whole repository, not just `cwd`: a beam's `inputs` and imports may
+/// climb out of its Beamfile's directory (`../libs/**`), and a change
+/// there must affect it as surely as one beside it. Each path is built
+/// from `cwd` and put in [`crate::lexically_normal`] form, the way an
+/// `inputs` pattern's `..` is read, so the two compare equal without
+/// touching the disk: a path under `cwd` is `cwd` joined with what lies
+/// below it, and one outside climbs from `cwd` by as many `..` as git says
+/// separate it from the top level.
+///
+/// A `reference` starting with `-` is refused: git would read it as one of
+/// its own options (`--output=<file>` writes a file), not as a revision.
 pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitError> {
-    let diff = git_output(cwd, &["diff", "--name-only", "--relative", "-z", reference])?;
-    let untracked = git_output(cwd, &["ls-files", "-z", "--others", "--exclude-standard"])?;
-    let mut paths = split_nul_terminated(&diff);
-    paths.extend(split_nul_terminated(&untracked));
+    if reference.starts_with('-') {
+        return Err(GitError(format!(
+            "`{reference}` is not a git reference: it would be read as an option"
+        )));
+    }
+    let prefix = git_output(cwd, &["rev-parse", "--show-prefix"])?;
+    let prefix = String::from_utf8_lossy(&prefix)
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
+    let climb = "../".repeat(prefix.split('/').filter(|part| !part.is_empty()).count());
+
+    // Both list paths relative to the top level: `diff` without
+    // `--relative` always does, `ls-files` once told `--full-name` and
+    // the `:/` pathspec (the top level, wherever `cwd` is).
+    let diff = git_output(cwd, &["diff", "--name-only", "-z", reference, "--"])?;
+    let untracked = git_output(
+        cwd,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "--",
+            ":/",
+        ],
+    )?;
+    let mut paths: Vec<PathBuf> = split_nul_terminated(&diff)
+        .into_iter()
+        .chain(split_nul_terminated(&untracked))
+        .map(|path| {
+            let joined = match path.strip_prefix(&prefix) {
+                Ok(below) => cwd.join(below),
+                Err(_) => cwd.join(&climb).join(path),
+            };
+            crate::lexically_normal(&joined)
+        })
+        .collect();
     paths.sort();
     paths.dedup();
     Ok(paths)
