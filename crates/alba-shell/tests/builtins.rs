@@ -173,6 +173,68 @@ async fn rm_needs_r_for_directories_and_f_forgives_missing() {
     );
 }
 
+fn stderr(lines: &[(ShellStream, String)]) -> Vec<&str> {
+    lines
+        .iter()
+        .filter(|(s, _)| *s == ShellStream::Stderr)
+        .map(|(_, t)| t.as_str())
+        .collect()
+}
+
+/// `rm -rf $OUT_DIR/` with `OUT_DIR` unset names the filesystem root, and
+/// must be refused, as GNU `rm` refuses it. The operand here reaches the
+/// root only lexically through a directory that does not exist, so a
+/// broken guard removes nothing: `-f` forgives the missing path and the
+/// test fails on its exit code alone.
+#[tokio::test]
+async fn rm_refuses_the_filesystem_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, lines) = run_in(
+        "rm -r -f /alba-no-such-directory/..",
+        dir.path().to_path_buf(),
+    )
+    .await;
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr(&lines),
+        ["rm: refusing to remove the filesystem root: /alba-no-such-directory/.."]
+    );
+}
+
+#[tokio::test]
+async fn rm_refuses_dot_and_dot_dot_and_removes_the_other_operands() {
+    let outer = tempfile::tempdir().unwrap();
+    let inner = outer.path().join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    std::fs::write(inner.join("keep.txt"), "x").unwrap();
+    std::fs::write(inner.join("drop.txt"), "x").unwrap();
+
+    let (code, lines) = run_in("rm -r -f . drop.txt ..", inner.clone()).await;
+
+    assert_eq!(code, 1);
+    assert_eq!(
+        stderr(&lines),
+        [
+            "rm: refusing to remove '.' or '..': .",
+            "rm: refusing to remove '.' or '..': ..",
+        ]
+    );
+    assert!(inner.join("keep.txt").exists());
+    assert!(!inner.join("drop.txt").exists());
+}
+
+/// An empty operand (`rm -rf "$UNSET"`) joined onto the cwd names the cwd
+/// itself; like GNU `rm`, it names no file at all.
+#[tokio::test]
+async fn rm_treats_an_empty_operand_as_no_such_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("keep.txt"), "x").unwrap();
+    let (code, lines) = run_in("rm -r -f \"\"", dir.path().to_path_buf()).await;
+    assert_eq!(code, 1);
+    assert_eq!(stderr(&lines), ["rm: '': no such file or directory"]);
+    assert!(dir.path().join("keep.txt").exists());
+}
+
 #[tokio::test]
 async fn rm_rejects_an_unknown_flag() {
     let dir = tempfile::tempdir().unwrap();
