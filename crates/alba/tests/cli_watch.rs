@@ -170,6 +170,13 @@ fn git_watch_project() -> tempfile::TempDir {
     git(dir.path(), &["config", "user.email", "alba@example.com"]);
     git(dir.path(), &["config", "user.name", "Alba"]);
     git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    // The machine's global excludes would otherwise apply: one that
+    // ignores `Beamfile` leaves it uncommitted and every assertion about it
+    // answering for that machine instead of for the code under test.
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
     dir

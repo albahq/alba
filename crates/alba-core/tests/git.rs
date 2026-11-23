@@ -29,12 +29,32 @@ fn repository() -> tempfile::TempDir {
     git(dir.path(), &["config", "user.email", "alba@example.com"]);
     git(dir.path(), &["config", "user.name", "Alba"]);
     git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    // The machine's global excludes would otherwise apply: one that
+    // ignores `Beamfile` leaves it uncommitted and every assertion about it
+    // answering for that machine instead of for the code under test.
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}").unwrap();
     std::fs::write(dir.path().join("README.md"), "# x").unwrap();
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
     dir
+}
+
+/// What changed since `reference`, named relative to `dir`, the
+/// directory asked from, with `/` separators.
+fn changed_names(dir: &Path, reference: &str) -> Vec<String> {
+    changed_files(dir, reference)
+        .unwrap()
+        .iter()
+        .map(|path| {
+            let relative = path.strip_prefix(dir).expect("a path under the repository");
+            relative.to_string_lossy().replace('\\', "/")
+        })
+        .collect()
 }
 
 #[test]
@@ -71,24 +91,39 @@ fn changed_files_unions_the_diff_and_untracked_files() {
     std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
     std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
 
-    let changed = changed_files(dir.path(), "HEAD").unwrap();
-    let names: Vec<String> = changed
-        .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .collect();
     assert_eq!(
-        names,
+        changed_names(dir.path(), "HEAD"),
         [".gitignore", "README.md", "src/lib.rs", "src/new.rs"]
     );
 }
 
+/// Asked from a subdirectory, the answer still covers the whole
+/// repository, each path built from that subdirectory: an input may climb
+/// out of its Beamfile's directory, and its change must still count.
 #[test]
-fn changed_files_are_relative_to_the_directory_asked_from() {
+fn changed_files_cover_the_repository_beyond_the_directory_asked_from() {
     let dir = repository();
     std::fs::write(dir.path().join("src/lib.rs"), "fn b() {}").unwrap();
     std::fs::write(dir.path().join("README.md"), "changed").unwrap();
-    let changed = changed_files(&dir.path().join("src"), "HEAD").unwrap();
-    assert_eq!(changed, [Path::new("lib.rs")]);
+    std::fs::write(dir.path().join("new.txt"), "").unwrap();
+    let src = dir.path().join("src");
+    assert_eq!(
+        changed_files(&src, "HEAD").unwrap(),
+        [
+            dir.path().join("README.md"),
+            dir.path().join("new.txt"),
+            src.join("lib.rs"),
+        ]
+    );
+}
+
+/// A reference git would parse as one of its own options is refused.
+#[test]
+fn changed_files_refuses_a_reference_shaped_like_an_option() {
+    let dir = repository();
+    let err = changed_files(dir.path(), "--output=leak").unwrap_err();
+    assert!(err.to_string().contains("--output=leak"), "{err}");
+    assert!(!dir.path().join("leak").exists());
 }
 
 #[test]
@@ -97,8 +132,7 @@ fn changed_files_against_a_branch_sees_commits_since_it() {
     git(dir.path(), &["checkout", "-q", "-b", "feature"]);
     std::fs::write(dir.path().join("src/lib.rs"), "fn b() {}").unwrap();
     git(dir.path(), &["commit", "-q", "-am", "change"]);
-    let changed = changed_files(dir.path(), "main").unwrap();
-    assert_eq!(changed, [Path::new("src/lib.rs")]);
+    assert_eq!(changed_names(dir.path(), "main"), ["src/lib.rs"]);
     assert!(changed_files(dir.path(), "HEAD").unwrap().is_empty());
 }
 
@@ -109,8 +143,7 @@ fn changed_files_against_a_branch_sees_commits_since_it() {
 fn changed_files_reports_a_non_ascii_filename_verbatim() {
     let dir = repository();
     std::fs::write(dir.path().join("café.txt"), "").unwrap();
-    let changed = changed_files(dir.path(), "HEAD").unwrap();
-    assert_eq!(changed, [Path::new("café.txt")]);
+    assert_eq!(changed_names(dir.path(), "HEAD"), ["café.txt"]);
 }
 
 #[test]

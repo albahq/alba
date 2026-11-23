@@ -54,6 +54,17 @@ fn repository(beamfile: &str) -> tempfile::TempDir {
         dir.path(),
         &["config", "--local", "commit.gpgsign", "false"],
     );
+    // The machine's global excludes would otherwise apply: one that
+    // ignores `Beamfile` leaves it uncommitted.
+    git_ok(
+        dir.path(),
+        &[
+            "config",
+            "--local",
+            "core.excludesFile",
+            ".git/no-global-excludes",
+        ],
+    );
     std::fs::write(dir.path().join("Beamfile"), beamfile).unwrap();
     std::fs::write(dir.path().join(".gitignore"), ".alba/\n").unwrap();
     git_ok(dir.path(), &["add", "-A"]);

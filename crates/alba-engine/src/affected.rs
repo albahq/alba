@@ -40,17 +40,14 @@ impl Selection {
 /// Every beam affected by what changed since `reference`, in project
 /// order: the beams whose `inputs` match a changed path or whose Beamfile
 /// changed, closed over their dependents. `root` is the project root git
-/// runs from; paths git reports are relative to it.
+/// runs from; changes anywhere in its repository count.
 pub fn affected(
     project: &Project,
     sources: &SourceMap,
     root: &Path,
     reference: &str,
 ) -> Result<Vec<BeamId>, EngineError> {
-    let changed: Vec<PathBuf> = changed_files(root, reference)?
-        .into_iter()
-        .map(|path| root.join(path))
-        .collect();
+    let changed = changed_files(root, reference)?;
     Ok(affected_beams(project, sources, &changed))
 }
 
@@ -109,9 +106,11 @@ pub(crate) fn affected_beams(
     changed: &[PathBuf],
 ) -> Vec<BeamId> {
     // No filesystem touched, deliberately: `changed` and every `beam.dir`
-    // are already absolute (the caller's `root.join(..)` and the loader's
-    // own `std::path::absolute`, respectively), built from the same root,
-    // so a lexical prefix match is both correct and syscall-free — unlike
+    // are already absolute (`changed_files`' lexical paths and the loader's
+    // own `std::path::absolute`, respectively), built from the same root.
+    // Both sides are compared in `lexically_normal` form, since an import
+    // that climbs out (`../shared/Beamfile`) keeps its `..` in the loader's
+    // paths, so a lexical prefix match is both correct and syscall-free — unlike
     // `watch::set::normalize`, which exists to reconcile paths a live OS
     // watcher resolved through a symlink, a problem git-diff paths do not
     // have.
@@ -121,7 +120,8 @@ pub(crate) fn affected_beams(
     for beam in &project.beams {
         let beamfile = sources
             .get(beam.source)
-            .map(|(path, _)| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+            .map(|(path, _)| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
+            .map(|path| alba_core::lexically_normal(&path));
         if beamfile.is_some_and(|beamfile| changed_set.contains(&beamfile)) {
             affected.insert(beam.id.0.as_str());
         }
@@ -138,7 +138,7 @@ pub(crate) fn affected_beams(
         for pattern in &beam.inputs {
             let (anchor, rest) = alba_core::anchor_pattern(&beam.dir, pattern);
             groups
-                .entry(anchor)
+                .entry(alba_core::lexically_normal(&anchor))
                 .or_default()
                 .push((rest, beam.id.0.as_str()));
         }
