@@ -650,6 +650,50 @@ mod tests {
         assert!(buffer[(x, plain)].modifier.contains(Modifier::REVERSED));
     }
 
+    fn broken(state: &mut AppState, text: &str) {
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: text.to_string(),
+                report: Some(report(&[(5, "tset", true)], 0..4)),
+            },
+            Instant::now(),
+        );
+    }
+
+    #[test]
+    fn a_new_break_replaces_the_plain_text_and_resyncs_a_kept_search() {
+        let mut state = parked(Some(report(&[(5, "tset", true)], 0..4)));
+        commit(&mut state, "tset");
+        broken(&mut state, "error: second tset\nsecond tset\n");
+        let buffer = &state.logs[crate::state::DIAGNOSTIC_LOG];
+        assert_eq!(buffer.len(), 2, "the first diagnostic is gone");
+        let kept = state.last_search.as_ref().unwrap();
+        assert_eq!(kept.search.matches.len(), 2, "matches follow the new text");
+    }
+
+    #[test]
+    fn unparking_with_a_search_kept_on_the_diagnostic_moves_it_to_the_beam() {
+        let mut state = parked(Some(report(&[(5, "tset", true)], 0..4)));
+        commit(&mut state, "tset");
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![alba_core::BeamId("build".to_string())],
+                affected_by: None,
+                beams: vec![alba_core::BeamId("build".to_string())],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            Instant::now(),
+        );
+        let all = rows(&drawn(&state, 100, 24));
+        assert!(
+            !all.iter().any(|row| row.contains("match ")),
+            "the counter is not shown on the beam: {all:#?}"
+        );
+        state.search_next();
+        assert_eq!(state.last_search.as_ref().unwrap().beam, "build");
+    }
+
     #[test]
     fn copying_shows_the_plain_text() {
         let mut state = parked(Some(report(&[(5, "tset = 1", true)], 0..4)));

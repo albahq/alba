@@ -412,9 +412,19 @@ impl AppState {
                 self.phase = Phase::Parked;
                 self.outcome = None;
                 self.diagnostic = report.clone();
+                // Each break replaces the plain text, as it replaces the
+                // structured report: the old lines describe an old Beamfile.
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
+                buffer.clear();
                 for line in diagnostic.lines() {
                     buffer.push_output(line, alba_executors::Stream::Stdout, false);
+                }
+                // A search kept on that text must match the new lines.
+                if let Some(mut committed) = self.last_search.take() {
+                    if committed.beam == DIAGNOSTIC_LOG {
+                        self.recompute_search_against(DIAGNOSTIC_LOG, &mut committed.search);
+                    }
+                    self.last_search = Some(committed);
                 }
             }
         }
@@ -632,7 +642,8 @@ impl AppState {
             Mode::Search(_)
         );
         // On a structured diagnostic a kept search holds the plain view
-        // up, so `Esc` in Normal mode lets it go.
+        // up, so `Esc` lets it go from any mode (Normal, Copy or Help):
+        // the structured view returns, by design.
         let releases_kept_search = self.diagnostic.is_some() && self.last_search.is_some();
         if was_searching || releases_kept_search {
             self.last_search = None;
