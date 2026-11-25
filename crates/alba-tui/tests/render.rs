@@ -463,3 +463,28 @@ fn a_long_beam_name_is_truncated_in_the_tree() {
     );
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
+
+/// `drawn` flattens styles away, so the buffer itself is read: in
+/// monochrome a pending beam's row is dim (muted text), a running one is
+/// not.
+#[test]
+fn a_pending_beam_is_dim_in_monochrome() {
+    use ratatui::style::Modifier;
+    let state = three_beam_chain();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| alba_tui::ui::draw(frame, &state, Instant::now()))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let dim_of = |glyph: &str| {
+        buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == glyph)
+            .unwrap_or_else(|| panic!("no {glyph} drawn"))
+            .modifier
+            .contains(Modifier::DIM)
+    };
+    assert!(dim_of("○"), "pending glyph is dim");
+    assert!(!dim_of("▶"), "running glyph is not dim");
+}

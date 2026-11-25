@@ -21,7 +21,9 @@ pub enum ColourMode {
     Monochrome,
 }
 
-/// The palette's eleven colours, named as the spec names them.
+/// The palette's eleven colours, named as the spec names them. Some are
+/// not drawn yet: the bands that use them arrive with the layout work.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     Surface,
@@ -94,7 +96,9 @@ pub fn style(token: Token, mode: ColourMode) -> Style {
     }
 }
 
-/// The token as a background; monochrome paints none.
+/// The token as a background; monochrome paints none. Unused until the
+/// bands paint their surface.
+#[allow(dead_code)]
 pub fn fill(token: Token, mode: ColourMode) -> Style {
     match colour(token, mode) {
         Some(colour) => Style::new().bg(colour),
@@ -116,22 +120,28 @@ fn ansi_token(colour: Color) -> Option<Token> {
     }
 }
 
-/// A command's own style drawn on the palette: the sixteen base colours
-/// become tokens, indexed and RGB colours stay as written, and monochrome
-/// drops every colour (modifiers stay).
+/// A command's own style drawn on the palette: the sixteen base
+/// foreground colours become tokens (`Reset`, the default foreground,
+/// becomes `Text`), indexed and RGB colours and every background stay as
+/// written, and monochrome drops every colour, underline colour included
+/// (modifiers stay).
 pub fn remap_ansi(style: Style, mode: ColourMode) -> Style {
-    let remap = |colour: Option<Color>| match (colour, mode) {
-        (_, ColourMode::Monochrome) | (None, _) => None,
-        (Some(colour), _) => match ansi_token(colour) {
+    if mode == ColourMode::Monochrome {
+        return Style {
+            fg: None,
+            bg: None,
+            underline_color: None,
+            ..style
+        };
+    }
+    let fg = match style.fg {
+        Some(colour) => match ansi_token(colour) {
             Some(token) => self::colour(token, mode),
             None => Some(colour),
         },
+        None => None,
     };
-    Style {
-        fg: remap(style.fg),
-        bg: remap(style.bg),
-        ..style
-    }
+    Style { fg, ..style }
 }
 
 /// The token a beam's status is drawn in; pending and cancelled beams
@@ -313,35 +323,63 @@ mod tests {
     }
 
     #[test]
-    fn ansi_red_becomes_the_error_token() {
+    fn ansi_base_colours_become_their_spec_tokens() {
+        let rows = [
+            (Color::Red, Token::Error),
+            (Color::LightRed, Token::Error),
+            (Color::Green, Token::Success),
+            (Color::LightGreen, Token::Success),
+            (Color::Yellow, Token::Accent),
+            (Color::LightYellow, Token::Accent),
+            (Color::Cyan, Token::Cached),
+            (Color::LightCyan, Token::Cached),
+            (Color::Gray, Token::Text),
+            (Color::White, Token::Text),
+            (Color::Reset, Token::Text),
+            (Color::Black, Token::TextMuted),
+            (Color::DarkGray, Token::TextMuted),
+        ];
         for mode in [ColourMode::TrueColour, ColourMode::Indexed] {
-            let error = style(Token::Error, mode);
-            assert_eq!(remap_ansi(Style::new().fg(Color::Red), mode), error);
-            assert_eq!(remap_ansi(Style::new().fg(Color::LightRed), mode), error);
+            for (colour, token) in rows {
+                assert_eq!(
+                    remap_ansi(Style::new().fg(colour), mode),
+                    style(token, mode),
+                    "{colour:?} in {mode:?}"
+                );
+            }
             assert_eq!(
                 remap_ansi(Style::new().fg(Color::Green).bold(), mode),
                 style(Token::Success, mode).bold()
             );
+        }
+    }
+
+    #[test]
+    fn ansi_red_becomes_the_error_token() {
+        for mode in [ColourMode::TrueColour, ColourMode::Indexed] {
             assert_eq!(
-                remap_ansi(Style::new().fg(Color::Yellow), mode),
-                style(Token::Accent, mode)
+                remap_ansi(Style::new().fg(Color::Red), mode),
+                style(Token::Error, mode)
             );
-            assert_eq!(
-                remap_ansi(Style::new().fg(Color::LightCyan), mode),
-                style(Token::Cached, mode)
-            );
-            assert_eq!(
-                remap_ansi(Style::new().fg(Color::Gray), mode),
-                style(Token::Text, mode)
-            );
-            assert_eq!(
-                remap_ansi(Style::new().fg(Color::DarkGray), mode),
-                style(Token::TextMuted, mode)
-            );
-            assert_eq!(
-                remap_ansi(Style::new().bg(Color::Red), mode),
-                fill(Token::Error, mode)
-            );
+        }
+    }
+
+    /// The table is a foreground table: a command's own background is
+    /// drawn as written.
+    #[test]
+    fn command_backgrounds_are_left_alone() {
+        for mode in [ColourMode::TrueColour, ColourMode::Indexed] {
+            for colour in [
+                Color::Red,
+                Color::Reset,
+                Color::Indexed(9),
+                Color::Rgb(1, 2, 3),
+            ] {
+                assert_eq!(
+                    remap_ansi(Style::new().bg(colour), mode),
+                    Style::new().bg(colour)
+                );
+            }
         }
     }
 
@@ -368,7 +406,11 @@ mod tests {
     fn monochrome_drops_command_colours_and_keeps_modifiers() {
         assert_eq!(
             remap_ansi(
-                Style::new().fg(Color::Rgb(1, 2, 3)).bg(Color::Red).bold(),
+                Style::new()
+                    .fg(Color::Rgb(1, 2, 3))
+                    .bg(Color::Red)
+                    .underline_color(Color::Green)
+                    .bold(),
                 ColourMode::Monochrome
             ),
             Style::new().bold()
