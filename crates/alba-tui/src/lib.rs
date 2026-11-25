@@ -365,16 +365,16 @@ fn half_pane(height: usize) -> usize {
 
 /// Copy mode's own hit testing: a click or a drag only means something
 /// once it lands inside the log pane's own content area — the tree
-/// pane, the borders, and the title row are not part of the buffer copy
+/// pane, the divider, and the title row are not part of the buffer copy
 /// mode addresses, and neither are the separators and the bands around
-/// the body, which sit outside the pane entirely. A release (`Up`) is the one exception:
-/// it always finishes whatever selection is already there, wherever the
-/// pointer ended up, since dragging off the bottom of the buffer or
-/// into the tree pane and letting go there are both routine and must
-/// not strand the user mid-selection with nothing copied. Every other
-/// mode leaves a mouse event exactly as inert as before this task;
-/// their own hit testing (e.g. click-to-select in the tree) is a later
-/// task's to add.
+/// the body, which sit outside the pane entirely. A release (`Up`) is
+/// the one exception: it always finishes whatever selection is already
+/// there, wherever the pointer ended up, since dragging off the bottom
+/// of the buffer or into the tree pane and letting go there are both
+/// routine and must not strand the user mid-selection with nothing
+/// copied. Every other mode leaves a mouse event exactly as inert as
+/// before this task; their own hit testing (e.g. click-to-select in the
+/// tree) is a later task's to add.
 fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) {
     if matches!(mouse.kind, MouseEventKind::Up(_)) {
         state.finish_copy();

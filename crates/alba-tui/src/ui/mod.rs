@@ -309,21 +309,73 @@ mod tests {
 
     #[test]
     fn drawing_never_panics_from_40_to_200_columns() {
+        use crate::graph::GraphState;
+        use alba_engine::RunSummary;
+
         let now = Instant::now();
-        let state = running(now);
-        let mut help = running(now);
-        help.mode = Mode::Help;
+        let with_mode = |mode: Mode| {
+            let mut state = running(now);
+            state.mode = mode;
+            state
+        };
+        let mut waiting = running(now);
+        waiting.watch_enabled = true;
+        waiting.apply(
+            &RunEvent::RunFinished {
+                summary: RunSummary::default(),
+            },
+            now,
+        );
+        waiting.apply(&RunEvent::WatchWaiting { files: 12 }, now);
+        let mut parked = running(now);
+        parked.watch_enabled = true;
+        parked.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: unknown target `nope`\n".to_string(),
+                report: None,
+            },
+            now,
+        );
+        let mut search = running(now);
+        search.enter_search();
+        if let Mode::Search(typed) = &mut search.mode {
+            typed.query = "compiling 国 crate".to_string();
+        }
+        let states = [
+            (running(now), "▶ RUNNING"),
+            (with_mode(Mode::Help), "▶ RUNNING"),
+            (with_mode(Mode::Graph(GraphState::new(0))), "▶ RUNNING"),
+            (search, "▶ RUNNING"),
+            (waiting, "● WATCHING"),
+            (parked, "Ⅱ PARKED"),
+        ];
         for height in [12, 24, 50] {
             for width in 40..=200 {
-                for state in [&state, &help] {
+                let content = width as usize - 4;
+                for (state, label) in &states {
+                    let at = format!("{label} at {width}x{height}");
+                    assert!(
+                        header::line(state, now, width - 4).width() <= content,
+                        "{at}"
+                    );
+                    let progress = progress::banner(state, width - 4)
+                        .unwrap_or_else(|| progress::line(state, width - 4));
+                    assert!(progress.width() <= content, "{at}");
+                    assert!(keys::line(state, width - 4).width() <= content, "{at}");
+
                     let buffer = drawn(state, width, height, now);
-                    for y in [1, 3, height - 2] {
-                        assert_eq!(
-                            row(&buffer, y).width(),
-                            width as usize,
-                            "row {y} at {width}x{height}"
-                        );
-                    }
+                    let header = row(&buffer, 1);
+                    let drawn_header = header.trim_end();
+                    assert_eq!(
+                        drawn_header.width(),
+                        width as usize - 2,
+                        "the header ends at column W-3, {at}: {header:?}"
+                    );
+                    assert!(
+                        drawn_header.ends_with(label)
+                            || drawn_header.contains(&format!("{label}   ")),
+                        "the state closes the header, {at}: {header:?}"
+                    );
                 }
             }
         }

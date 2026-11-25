@@ -16,6 +16,7 @@ use crate::state::{AppState, Mode, Phase};
 
 use super::help;
 use super::theme::{ColourMode, Token, style};
+use super::tree::fit_name;
 
 const PAIR_GAP: &str = "   ";
 /// The pairs that never drop.
@@ -23,28 +24,40 @@ const KEPT: [&str; 2] = ["?", "q"];
 
 /// The key hints for a row `width` cells wide.
 pub fn line(state: &AppState, width: u16) -> Line<'static> {
+    let width = width as usize;
+    // While searching, the first item is the query being typed: one
+    // item however many words it has, never dropped, cut last.
+    let searching = matches!(state.mode, Mode::Search(_));
     let mut pairs = match &state.mode {
         Mode::Normal => normal_pairs(state),
         Mode::Search(search) => {
             let total = search.matches.len();
             let current = if total == 0 { 0 } else { search.current + 1 };
-            pairs_of(&format!(
-                "/{} · {current}/{total} · Enter commit · Esc cancel",
-                search.query
-            ))
+            vec![
+                pair(&format!("/{}", search.query), ""),
+                pair(&format!("{current}/{total}"), ""),
+                pair("Enter", "commit"),
+                pair("Esc", "cancel"),
+            ]
         }
         Mode::Copy(_) => pairs_of(help::COPY_KEYS),
         Mode::Graph(_) => pairs_of(help::GRAPH_KEYS),
         Mode::Help => pairs_of(help::HELP_KEYS),
     };
-    while row_width(&pairs) > width as usize {
+    let kept = |index: usize, key: &str| KEPT.contains(&key) || (searching && index == 0);
+    while row_width(&pairs) > width {
         let Some(last) = pairs
             .iter()
-            .rposition(|(key, _)| !KEPT.contains(&key.as_str()))
+            .enumerate()
+            .rposition(|(index, (key, _))| !kept(index, key))
         else {
             break;
         };
         pairs.remove(last);
+    }
+    if searching && row_width(&pairs) > width {
+        let others = row_width(&pairs) - pair_width(&pairs[0]);
+        pairs[0].0 = fit_name(&pairs[0].0, width.saturating_sub(others));
     }
     render(&pairs, state.colour)
 }
@@ -238,6 +251,49 @@ mod tests {
             "↑↓ beam   / search   ? help   q quit"
         );
         assert_eq!(line(&state, 10).to_string(), "? help   q quit");
+    }
+
+    fn searching(query: &str) -> AppState {
+        let mut state = started(false);
+        state.enter_search();
+        if let Mode::Search(search) = &mut state.mode {
+            search.query = query.to_string();
+        }
+        state
+    }
+
+    /// A query with a space is one item, styled as one key.
+    #[test]
+    fn a_search_query_with_spaces_stays_one_item() {
+        let state = searching("unused import");
+        let hints = line(&state, 200);
+        assert_eq!(
+            hints.to_string(),
+            "/unused import   0/0   Enter commit   Esc cancel"
+        );
+        assert_eq!(hints.spans[0].content, "/unused import");
+    }
+
+    /// The query is what the reader is typing: the other pairs give way
+    /// first, then the query is cut by display width, never dropped.
+    #[test]
+    fn a_long_search_query_is_cut_not_dropped() {
+        let state = searching(&"国".repeat(30));
+        assert_eq!(
+            line(&state, 95).to_string(),
+            format!("/{}   0/0   Enter commit   Esc cancel", "国".repeat(30))
+        );
+        assert_eq!(
+            line(&state, 67).to_string(),
+            format!("/{}   0/0", "国".repeat(30))
+        );
+        assert_eq!(
+            line(&state, 66).to_string(),
+            format!("/{}", "国".repeat(30))
+        );
+        let cut = line(&state, 20).to_string();
+        assert_eq!(cut, format!("/{}…", "国".repeat(9)));
+        assert!(cut.width() <= 20);
     }
 
     /// Copy's, Graph's and Help's rows are `help.rs`'s shared constants,

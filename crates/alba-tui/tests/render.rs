@@ -1,8 +1,8 @@
 //! Snapshot tests for `alba_tui::ui::draw`: the header, progress row,
-//! tree pane, log pane, and key hints as they render for a handful of representative
-//! states. `TestBackend::to_string()` drops styles, so these pin layout
-//! and text, not colour — see the spec's Layout section for what each
-//! region is supposed to show.
+//! tree pane, log pane, and key hints as they render for a handful of
+//! representative states. `TestBackend::to_string()` drops styles, so
+//! these pin layout and text, not colour: see the spec's Layout
+//! section for what each region is supposed to show.
 
 use std::time::{Duration, Instant};
 
