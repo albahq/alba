@@ -14,6 +14,7 @@
 //! closure of a target beam, for whichever engine schedules and runs it.
 //! [`git`] wraps the `git` CLI, the only place in the workspace that spawns it.
 
+mod definition;
 mod error;
 mod eval;
 mod files;
@@ -23,6 +24,7 @@ mod loader;
 mod model;
 
 pub use alba_syntax::{DiagnosticReport, SnippetLine, line_col};
+pub use definition::{BeamDefinition, definitions};
 pub use error::CoreError;
 pub use eval::{Scope, eval_expr, render_template, suggest};
 pub use files::{
