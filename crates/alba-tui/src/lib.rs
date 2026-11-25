@@ -410,8 +410,13 @@ fn selected_buffer_mut(state: &mut AppState) -> Option<&mut LogBuffer> {
     if state.shows_structured_diagnostic() {
         return None;
     }
-    let id = state.selected_beam()?.id.clone();
-    Some(state.logs.entry(id).or_default())
+    // The buffer on screen: the selected beam's, or the diagnostic's
+    // while parked.
+    let key = state.displayed_log_key();
+    if key.is_empty() {
+        return None;
+    }
+    Some(state.logs.entry(key).or_default())
 }
 
 /// What the CLI needs once the screen is gone: the exit code the session
@@ -1313,6 +1318,32 @@ mod tests {
         assert!(matches!(
             state.logs["codegen"].scroll(),
             logs::Scroll::Following
+        ));
+    }
+
+    /// In the parked plain view (a search is kept), the scroll keys act
+    /// on the diagnostic's own buffer, not on the selected beam's.
+    #[test]
+    fn scrolling_in_the_parked_plain_view_pauses_the_diagnostic() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["codegen"]);
+        let now = Instant::now();
+        let long: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: long,
+                report: None,
+            },
+            now,
+        );
+        dispatch(&mut state, &commands, Action::ScrollUp(2), size());
+        assert!(matches!(
+            state.logs[state::DIAGNOSTIC_LOG].scroll(),
+            logs::Scroll::Paused { .. }
+        ));
+        assert!(matches!(
+            state.logs.get("codegen").map(|b| b.scroll()),
+            None | Some(logs::Scroll::Following)
         ));
     }
 }

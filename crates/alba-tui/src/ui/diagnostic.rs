@@ -620,6 +620,36 @@ mod tests {
         assert!(all.iter().any(|row| row.contains('^')), "{all:#?}");
     }
 
+    fn commit(state: &mut AppState, query: &str) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        state.enter_search();
+        typed(state, query);
+        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn escape_after_a_committed_search_returns_to_the_structure() {
+        let mut state = parked(Some(report(&[(5, "tset = 1", true)], 0..4)));
+        commit(&mut state, "tset");
+        let all = rows(&drawn(&state, 100, 24));
+        assert!(!all.iter().any(|row| row.contains('^')), "plain while kept");
+        state.leave_mode();
+        let all = rows(&drawn(&state, 100, 24));
+        assert!(all.iter().any(|row| row.contains('^')), "{all:#?}");
+    }
+
+    #[test]
+    fn a_committed_search_on_the_parked_diagnostic_is_matched_and_counted() {
+        let mut state = parked(Some(report(&[(5, "tset = 1", true)], 0..4)));
+        commit(&mut state, "tset");
+        let buffer = drawn(&state, 100, 24);
+        let all = rows(&buffer);
+        assert!(all.iter().any(|row| row.contains("match 1/1")), "{all:#?}");
+        let plain = row_with(&buffer, "unknown field");
+        let x = column_of_text(&buffer, plain, "tset") as u16;
+        assert!(buffer[(x, plain)].modifier.contains(Modifier::REVERSED));
+    }
+
     #[test]
     fn copying_shows_the_plain_text() {
         let mut state = parked(Some(report(&[(5, "tset = 1", true)], 0..4)));

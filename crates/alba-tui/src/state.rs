@@ -460,10 +460,9 @@ impl AppState {
     }
 
     /// The selected beam's id, or an empty string when there is none.
-    /// Search is tied to a specific beam's own buffer even while parked
-    /// (there is nothing there to search anyway), so it uses this
-    /// directly; anything that should instead follow whatever the pane
-    /// is *currently showing* — parked or not — uses `displayed_log_key`.
+    /// Anything that should follow whatever the pane is *currently
+    /// showing* — parked or not, search and scrolling included — uses
+    /// `displayed_log_key`, which is this key except while parked.
     fn current_beam_id(&self) -> String {
         self.selected_beam()
             .map(|row| row.id.clone())
@@ -628,12 +627,16 @@ impl AppState {
     /// an older query's highlights lit while the query bar is gone is
     /// the same confusion under a different name.
     pub fn leave_mode(&mut self) {
-        if matches!(
+        let was_searching = matches!(
             std::mem::replace(&mut self.mode, Mode::Normal),
             Mode::Search(_)
-        ) {
+        );
+        // On a structured diagnostic a kept search holds the plain view
+        // up, so `Esc` in Normal mode lets it go.
+        let releases_kept_search = self.diagnostic.is_some() && self.last_search.is_some();
+        if was_searching || releases_kept_search {
             self.last_search = None;
-            let id = self.current_beam_id();
+            let id = self.displayed_log_key();
             if let Some(buffer) = self.logs.get_mut(&id) {
                 buffer.follow_tail();
             }
@@ -671,7 +674,7 @@ impl AppState {
         match key.code {
             KeyCode::Enter => {
                 self.last_search = Some(CommittedSearch {
-                    beam: self.current_beam_id(),
+                    beam: self.displayed_log_key(),
                     search,
                 });
                 return;
@@ -932,7 +935,7 @@ impl AppState {
             self.last_search = Some(committed);
             return;
         }
-        let selected = self.current_beam_id();
+        let selected = self.displayed_log_key();
         if committed.beam != selected {
             // The selection has moved on since this search was
             // committed: the query is what the user typed, the beam is
@@ -1011,7 +1014,7 @@ impl AppState {
     /// keystroke (`search_next`/`search_previous` step the existing
     /// matches instead of rescanning them).
     fn recompute_search(&self, search: &mut SearchState) {
-        self.recompute_search_against(&self.current_beam_id(), search);
+        self.recompute_search_against(&self.displayed_log_key(), search);
     }
 
     /// Same as `recompute_search`, against an explicit beam rather than
@@ -1039,7 +1042,7 @@ impl AppState {
     /// search with nothing to show must not leave the pane pinned to a
     /// stale view.
     fn sync_search_scroll(&mut self, search: &SearchState) {
-        let id = self.current_beam_id();
+        let id = self.displayed_log_key();
         let Some(buffer) = self.logs.get_mut(&id) else {
             return;
         };
