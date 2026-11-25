@@ -29,7 +29,12 @@ Alba is a task runner written in Rust, an alternative to `make`, `just`, and
   lists the beams.
 - **Caching is opt-in per beam** through `inputs` globs: a beam with
   `inputs` is skipped when nothing it depends on changed, and reruns when a
-  declared `outputs` file is missing. A beam without `inputs` always runs.
+  declared `outputs` file is missing or was rewritten. `env_inputs` adds
+  the values of ambient variables to the cache fingerprint. A beam without
+  `inputs` always runs.
+- **`secrets`** names variables whose values Alba masks as `***` in the
+  output it shows and stores. `env_inputs` and `secrets` need alba 0.6.0
+  or later.
 - **Commands run on Alba's embedded shell** by default: a POSIX-like subset
   that behaves identically on macOS, Linux, and Windows. Shell control flow
   (`if`, `for`, `while`, `case`), functions, heredocs, and `$1`-style

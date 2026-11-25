@@ -72,12 +72,15 @@ since `<ref>` (tracked diff plus untracked, non-ignored files, anywhere in
 the repository, so `../` inputs and imports count), when its
 declaring Beamfile changed, or transitively when it `needs` an affected
 beam. A beam with no `inputs` is never affected on its own. Requires `git`
-on the `PATH`.
+on the `PATH`. A `<ref>` starting with `-` is refused.
 
 ## Caching
 
 A beam with `inputs` is skipped when its matched files, rendered command,
-`cwd`, `env`, arguments, executor options, and every dependency's
-fingerprint are unchanged since the last success; its stored output is
-replayed and it counts as `cached`. Cache lives under
-`<beamfile dir>/.alba/cache`.
+`cwd`, `env`, `env_inputs` values, arguments, executor options and
+resolved executor state (see `beamfile.md`, Executors), and every
+dependency's fingerprint are unchanged since the last success, and its
+declared `outputs` are still what that run left. Its stored output is
+replayed and it counts as `cached`. Since alba 0.6.0, upgrading Alba
+invalidates every entry, and on unix the cache is readable by its owner
+only. The cache lives under `<beamfile dir>/.alba/cache`.
