@@ -22,6 +22,7 @@ mod graph;
 mod loader;
 mod model;
 
+pub use alba_syntax::{DiagnosticReport, SnippetLine, line_col};
 pub use error::CoreError;
 pub use eval::{Scope, eval_expr, render_template, suggest};
 pub use files::{

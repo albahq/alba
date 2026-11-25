@@ -12,6 +12,7 @@
 use miette::{Diagnostic as MietteDiagnostic, GraphicalReportHandler, GraphicalTheme};
 use miette::{LabeledSpan, NamedSource, SourceCode, SourceSpan};
 use std::fmt;
+use std::ops::Range;
 
 use crate::parser::ParseError;
 use crate::token::Span;
@@ -56,6 +57,90 @@ impl Diagnostic {
             span: span.map(to_source_span),
             help,
         }
+    }
+}
+
+/// Number of context lines shown before and after the faulty line.
+const CONTEXT_LINES: usize = 2;
+
+/// A structured, source-aware view of a [`Diagnostic`], for front ends that
+/// draw the report themselves instead of using [`render_diagnostic`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticReport {
+    pub message: String,
+    pub path: String,
+    /// 1-based line of the span start.
+    pub line: usize,
+    /// 1-based column of the span start, counted in chars.
+    pub column: usize,
+    /// The faulty line with up to two lines of context on each side.
+    pub snippet: Vec<SnippetLine>,
+    /// Char range of the span on the faulty line, clipped to that line.
+    pub caret: Range<usize>,
+    pub help: Option<String>,
+}
+
+/// One source line of a [`DiagnosticReport`] snippet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnippetLine {
+    /// 1-based line number.
+    pub number: usize,
+    pub text: String,
+    pub faulty: bool,
+}
+
+/// Maps a byte `offset` to a 1-based `(line, column)`, the column counted
+/// in chars. An offset past the end maps to the last position; one inside
+/// a multi-byte char maps to that char.
+pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut end = offset.min(source.len());
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    let before = &source[..end];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (line, before[line_start..].chars().count() + 1)
+}
+
+impl Diagnostic {
+    /// Builds the structured report of this diagnostic against `source`
+    /// (identified as `path`), or `None` when it has no span to point at.
+    pub fn report(&self, source: &str, path: &str) -> Option<DiagnosticReport> {
+        let span = self.span?;
+        let start = span.offset().min(source.len());
+        let end = (span.offset() + span.len()).min(source.len()).max(start);
+        let (line, column) = line_col(source, start);
+
+        let lines: Vec<&str> = source
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
+        let faulty_index = line - 1;
+        let first = faulty_index.saturating_sub(CONTEXT_LINES);
+        let last = (faulty_index + CONTEXT_LINES).min(lines.len() - 1);
+        let snippet = (first..=last)
+            .map(|i| SnippetLine {
+                number: i + 1,
+                text: lines[i].to_string(),
+                faulty: i == faulty_index,
+            })
+            .collect();
+
+        let faulty_text = lines[faulty_index];
+        let caret_start = column - 1;
+        let span_chars = source[start..end].chars().count();
+        let caret_end = (caret_start + span_chars).min(faulty_text.chars().count());
+
+        Some(DiagnosticReport {
+            message: self.message.clone(),
+            path: path.to_string(),
+            line,
+            column,
+            snippet,
+            caret: caret_start..caret_end.max(caret_start),
+            help: self.help.clone(),
+        })
     }
 }
 
@@ -208,6 +293,85 @@ mod tests {
         assert!(
             !rendered.contains("Beamfile:"),
             "no source position may be asserted, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn line_col_counts_from_one() {
+        let source = "beam a {\n  needs [b]\n}\n";
+        assert_eq!(line_col(source, 0), (1, 1));
+        assert_eq!(line_col(source, 11), (2, 3));
+    }
+
+    #[test]
+    fn line_col_counts_columns_in_chars_and_clamps_past_the_end() {
+        let source = "é→x\nab";
+        assert_eq!(line_col(source, "é→".len()), (1, 3));
+        assert_eq!(line_col(source, 999), (2, 3));
+    }
+
+    #[test]
+    fn a_report_points_at_the_faulty_span_with_context() {
+        let source =
+            "beam check {\n  description \"x\"\n  needs [fmt, lint, tset]\n  run \"echo\"\n}\n";
+        let start = source.find("tset").unwrap();
+        let d = Diagnostic::new(
+            "unknown beam `tset`",
+            Some(Span {
+                start,
+                end: start + 4,
+            }),
+            Some("did you mean `test`?".into()),
+        );
+        let r = d.report(source, "Beamfile").unwrap();
+        assert_eq!((r.line, r.column), (3, 21));
+        assert_eq!(r.path, "Beamfile");
+        assert_eq!(r.message, "unknown beam `tset`");
+        assert_eq!(
+            r.snippet.iter().map(|l| l.number).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(r.snippet[2].faulty);
+        assert_eq!(r.snippet[2].text, "  needs [fmt, lint, tset]");
+        assert_eq!(r.caret, 20..24);
+        assert_eq!(r.help.as_deref(), Some("did you mean `test`?"));
+    }
+
+    #[test]
+    fn a_report_clips_the_snippet_to_the_file_and_the_caret_to_the_line() {
+        let source = "one\ntwo\nthree";
+        let d = Diagnostic::new("m", Some(Span { start: 1, end: 100 }), None);
+        let r = d.report(source, "Beamfile").unwrap();
+        assert_eq!(
+            r.snippet.iter().map(|l| l.number).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(r.caret, 1..3);
+        assert_eq!(r.help, None);
+    }
+
+    #[test]
+    fn a_report_for_a_span_at_the_end_of_input_does_not_panic() {
+        let source = "beam x {";
+        let d = Diagnostic::new(
+            "m",
+            Some(Span {
+                start: source.len(),
+                end: source.len(),
+            }),
+            None,
+        );
+        let r = d.report(source, "Beamfile").unwrap();
+        assert_eq!((r.line, r.column), (1, 9));
+        assert_eq!(r.caret, 8..8);
+    }
+
+    #[test]
+    fn a_diagnostic_without_a_span_has_no_report() {
+        assert!(
+            Diagnostic::new("boom", None, None)
+                .report("", "Beamfile")
+                .is_none()
         );
     }
 }
