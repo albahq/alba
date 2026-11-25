@@ -1692,6 +1692,32 @@ mod tests {
         assert_eq!(report.help.as_deref(), Some("did you mean `test`?"));
     }
 
+    /// A run that fails at schedule time with a spanned core error is
+    /// reported like a load failure: same text, structured location.
+    #[test]
+    fn a_spanned_core_error_from_a_run_has_a_report() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let beamfile = dir.path().join("Beamfile");
+        std::fs::write(
+            &beamfile,
+            "beam test {\n  run \"true\"\n}\n\nbeam build { needs [tset]\n  run \"true\"\n}\n",
+        )
+        .expect("Beamfile");
+        let load = alba_core::load_project(&beamfile).expect_err("`tset` is not a beam");
+        let expected_text = crate::render_load_error(&load);
+        let error = SessionError::Run {
+            error: EngineError::Core(load.error),
+            sources: load.sources,
+        };
+
+        let rendered = render_session_error(&error);
+
+        assert_eq!(rendered.text, expected_text);
+        let report = rendered.report.expect("a spanned error has a report");
+        assert_eq!((report.line, report.column), (5, 21));
+        assert_eq!(report.help.as_deref(), Some("did you mean `test`?"));
+    }
+
     /// Only a spanned core error can be drawn as a snippet; the other
     /// engine errors stay plain sentences.
     #[test]
