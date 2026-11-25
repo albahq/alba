@@ -357,7 +357,7 @@ impl AppState {
                 }
                 self.waiting_seen = false;
             }
-            RunEvent::ProjectBroken { diagnostic } => {
+            RunEvent::ProjectBroken { diagnostic, .. } => {
                 self.phase = Phase::Parked;
                 self.outcome = None;
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
@@ -1175,6 +1175,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: nope\n".to_string(),
+                report: None,
             },
             Instant::now(),
         );
@@ -1415,6 +1416,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: nope\n".to_string(),
+                report: None,
             },
             now,
         );
@@ -1436,6 +1438,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: no executor for `wasm`\n".to_string(),
+                report: None,
             },
             now,
         );
@@ -1458,6 +1461,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: nope\n".to_string(),
+                report: None,
             },
             now,
         );
@@ -1484,6 +1488,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: nope\n".to_string(),
+                report: None,
             },
             now,
         );
@@ -1512,6 +1517,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: nope\nhelp: fix it\n".to_string(),
+                report: None,
             },
             now,
         );
@@ -2277,6 +2283,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: nope\nhelp: fix it\n".to_string(),
+                report: None,
             },
             now,
         );

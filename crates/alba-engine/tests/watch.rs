@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, Selection, SessionCommand,
-    SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session, watch,
+    CacheOptions, EngineError, Executors, RenderedError, RunEvent, RunOptions, Selection,
+    SessionCommand, SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session, watch,
 };
 use alba_executors::{FakeBehavior, FakeEvent, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -138,7 +138,15 @@ enum ObservedError {
 }
 
 fn start(beamfile: &str, target: &str, executor: FakeExecutor, force: bool) -> Session {
-    start_reporting_to(beamfile, target, executor, force, |_| String::new())
+    start_reporting_to(beamfile, target, executor, force, |_| unrendered())
+}
+
+/// The answer of a `render_error` callback whose text nobody reads.
+fn unrendered() -> RenderedError {
+    RenderedError {
+        text: String::new(),
+        report: None,
+    }
 }
 
 /// A session whose `render_error` reports are recorded, so a test can
@@ -155,7 +163,10 @@ fn start_with_error_log(
             SessionError::Load(_) => ObservedError::Load,
             SessionError::Run { .. } => ObservedError::Run,
         });
-        String::new()
+        RenderedError {
+            text: String::new(),
+            report: None,
+        }
     });
     (session, log)
 }
@@ -165,7 +176,7 @@ fn start_reporting_to(
     target: &str,
     executor: FakeExecutor,
     force: bool,
-    render_error: impl FnMut(&SessionError) -> String + Send + 'static,
+    render_error: impl FnMut(&SessionError) -> RenderedError + Send + 'static,
 ) -> Session {
     spawn(beamfile, target, executor, force, true, None, render_error)
 }
@@ -186,7 +197,7 @@ fn start_commandable(
         false,
         watch_enabled,
         Some(receiver),
-        |_| String::new(),
+        |_| unrendered(),
     );
     (session, commands)
 }
@@ -198,7 +209,7 @@ fn spawn(
     force: bool,
     watch_enabled: bool,
     commands: Option<UnboundedReceiver<SessionCommand>>,
-    mut render_error: impl FnMut(&SessionError) -> String + Send + 'static,
+    mut render_error: impl FnMut(&SessionError) -> RenderedError + Send + 'static,
 ) -> Session {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -758,9 +769,23 @@ async fn a_broken_beamfile_reports_waits_and_recovers() {
 /// diagnostic is the callback's answer, not something the engine invented.
 #[tokio::test]
 async fn a_failed_reload_emits_project_broken() {
-    let mut session = start_reporting_to(ONE_BEAM, "build", FakeExecutor::new(), false, |_| {
-        "rendered by the callback".to_string()
-    });
+    let report = alba_core::DiagnosticReport {
+        message: "reported by the callback".to_string(),
+        path: "Beamfile".to_string(),
+        line: 1,
+        column: 1,
+        snippet: Vec::new(),
+        caret: 0..0,
+        help: None,
+    };
+    let answer = report.clone();
+    let mut session =
+        start_reporting_to(ONE_BEAM, "build", FakeExecutor::new(), false, move |_| {
+            RenderedError {
+                text: "rendered by the callback".to_string(),
+                report: Some(answer.clone()),
+            }
+        });
     session.event_matching(is_waiting).await;
 
     let beamfile = session.touch("Beamfile", "beam build { this does not parse");
@@ -770,10 +795,15 @@ async fn a_failed_reload_emits_project_broken() {
     let event = session
         .event_matching(|event| matches!(event, RunEvent::ProjectBroken { .. }))
         .await;
-    let RunEvent::ProjectBroken { diagnostic } = event else {
+    let RunEvent::ProjectBroken {
+        diagnostic,
+        report: emitted,
+    } = event
+    else {
         unreachable!()
     };
     assert_eq!(diagnostic, "rendered by the callback");
+    assert_eq!(emitted, Some(report));
 
     session.finish().await;
 }
@@ -951,7 +981,7 @@ async fn a_run_error_after_a_reload_carries_the_reloaded_sources() {
                     .map_or_else(String::new, |(_, source)| source.to_string());
                 sink.lock().unwrap().push(text);
             }
-            String::new()
+            unrendered()
         },
     );
     session.event_matching(is_waiting).await;
@@ -1354,7 +1384,7 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
                 events_tx,
                 cancel,
                 watcher,
-                &mut |_| String::new(),
+                &mut |_| unrendered(),
             )
             .await
         }

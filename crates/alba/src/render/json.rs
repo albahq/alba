@@ -56,7 +56,7 @@ impl<O: Write, E: Write> JsonRenderer<O, E> {
 
 impl<O: Write + Send, E: Write + Send> super::Renderer for JsonRenderer<O, E> {
     fn handle(&mut self, event: &RunEvent) {
-        if let RunEvent::ProjectBroken { diagnostic } = event {
+        if let RunEvent::ProjectBroken { diagnostic, .. } = event {
             self.err.line(diagnostic.trim_end());
         }
         let Some(wire) = WireEvent::of(event) else {
@@ -192,7 +192,7 @@ impl<'a> WireEvent<'a> {
             RunEvent::CommandStarted { .. } => return None,
             RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
             RunEvent::WatchTriggered { paths } => WireEvent::WatchTriggered { paths },
-            RunEvent::ProjectBroken { diagnostic } => WireEvent::ProjectBroken { diagnostic },
+            RunEvent::ProjectBroken { diagnostic, .. } => WireEvent::ProjectBroken { diagnostic },
         })
     }
 }
@@ -466,6 +466,7 @@ mod tests {
     fn project_broken_is_emitted_on_the_wire() {
         let event = RunEvent::ProjectBroken {
             diagnostic: "error: oh no\n".to_string(),
+            report: None,
         };
 
         let line = serde_json::to_string(&WireEvent::of(&event).unwrap()).unwrap();

@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use alba_core::{BeamId, ExecutorKind};
+use alba_core::{BeamId, DiagnosticReport, ExecutorKind};
 use alba_executors::OutputLine;
 
 /// A beam's definition, for an interface that wants to show more than its
@@ -177,9 +177,22 @@ pub enum RunEvent {
     /// caret, spans, help — because rendering lives above this crate and is
     /// done by the session's `render_error` callback; the event exists so a
     /// stream consumer that never sees stderr still learns why nothing runs.
+    /// `report` is the same diagnostic in structured form, for a front end
+    /// that draws the snippet itself; absent when the failure has no span
+    /// to point at.
     ProjectBroken {
         diagnostic: String,
+        report: Option<DiagnosticReport>,
     },
+}
+
+/// What a session's `render_error` callback answers: the diagnostic as the
+/// headless renderers print it, and, when the failure points into a
+/// Beamfile, the structured report a front end can draw itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedError {
+    pub text: String,
+    pub report: Option<DiagnosticReport>,
 }
 
 /// How a beam ended.

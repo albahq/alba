@@ -126,7 +126,7 @@ impl Renderer for GroupedRenderer {
             | RunEvent::CommandStarted { .. } => {}
             // Alba commentary, not the run's output — stderr, like every
             // other diagnostic this module prints (see the module doc).
-            RunEvent::ProjectBroken { diagnostic } => {
+            RunEvent::ProjectBroken { diagnostic, .. } => {
                 self.err.line(diagnostic.trim_end());
             }
         }

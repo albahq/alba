@@ -308,6 +308,7 @@ mod tests {
         state.apply(
             &alba_engine::RunEvent::ProjectBroken {
                 diagnostic: "error: unknown target `nope`\n".to_string(),
+                report: None,
             },
             Instant::now(),
         );

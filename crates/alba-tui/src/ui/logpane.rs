@@ -273,6 +273,7 @@ mod tests {
         state.apply(
             &RunEvent::ProjectBroken {
                 diagnostic: "error: unknown target `nope`\n".to_string(),
+                report: None,
             },
             std::time::Instant::now(),
         );

@@ -221,6 +221,22 @@ pub(crate) fn render_core_error(error: &CoreError, sources: &SourceMap) -> Strin
     }
 }
 
+/// The structured counterpart of [`render_core_error`]: the same error read
+/// against the same source, as a report a front end can draw itself.
+/// `path` is the display path [`render_core_error`] prints for that source.
+/// `None` when the error carries no span, or its `source_id` was never
+/// registered in `sources`.
+pub(crate) fn render_core_report(
+    error: &CoreError,
+    sources: &SourceMap,
+) -> Option<alba_core::DiagnosticReport> {
+    let (path, source) = sources.get(error.source_id)?;
+    error
+        .clone()
+        .into_diagnostic()
+        .report(source, &path.display().to_string())
+}
+
 /// Whether ANSI color should be emitted: stdout is a real terminal, and the
 /// user has not opted out via `NO_COLOR` (https://no-color.org). Checked
 /// explicitly here rather than left to `owo-colors`' own ambient detection,

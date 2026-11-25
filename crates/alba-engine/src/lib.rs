@@ -25,7 +25,9 @@ mod watch;
 
 pub use affected::{Selection, affected, select};
 pub use cache::CacheOptions;
-pub use event::{BeamDetails, BeamStatus, ExecutorLabel, NoticeLevel, RunEvent, RunSummary};
+pub use event::{
+    BeamDetails, BeamStatus, ExecutorLabel, NoticeLevel, RenderedError, RunEvent, RunSummary,
+};
 pub use scheduler::{Executors, RunOptions, Targets, run};
 pub use session::{SessionCommand, session};
 pub use watch::{

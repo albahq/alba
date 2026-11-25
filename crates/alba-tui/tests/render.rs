@@ -144,6 +144,7 @@ fn a_parked_session_renders_the_diagnostic() {
     state.apply(
         &RunEvent::ProjectBroken {
             diagnostic: "error: unknown target `nope`\n".to_string(),
+            report: None,
         },
         Instant::now(),
     );
@@ -197,6 +198,7 @@ fn a_parked_session_renders_at_the_forty_column_floor() {
     state.apply(
         &RunEvent::ProjectBroken {
             diagnostic: "error: unknown target `nope`\n".to_string(),
+            report: None,
         },
         Instant::now(),
     );

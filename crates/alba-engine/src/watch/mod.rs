@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
 use crate::affected::Selection;
-use crate::event::RunEvent;
+use crate::event::{RenderedError, RunEvent};
 use crate::scheduler::{Executors, RunOptions};
 use crate::session::session;
 pub use notify::NotifyWatcher;
@@ -114,7 +114,7 @@ pub async fn watch(
     events: UnboundedSender<RunEvent>,
     cancel: CancellationToken,
     watcher: Box<dyn Watcher>,
-    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> RenderedError + Send),
 ) -> SessionEnd {
     session(
         beamfile,
