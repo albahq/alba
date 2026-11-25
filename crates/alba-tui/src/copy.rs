@@ -86,6 +86,34 @@ impl CopyState {
         parts.join("\n")
     }
 
+    /// What of `line` (`len` characters long) `selected_text` copies,
+    /// so the drawing can mark exactly that: nothing outside the span;
+    /// the whole line, its line break included, when the span runs
+    /// through it from its first character to its last on a span of
+    /// several lines; otherwise the inclusive character range it takes.
+    /// A single-line span is always its own range.
+    pub fn coverage(&self, line: usize, len: usize) -> Coverage {
+        let (start, end) = self.normalized();
+        if line < start.0 || line > end.0 {
+            return Coverage::Outside;
+        }
+        let from = if line == start.0 { start.1 } else { 0 };
+        let reaches_end = line != end.0 || end.1 + 1 >= len;
+        if start.0 != end.0 && from == 0 && reaches_end {
+            return Coverage::Whole;
+        }
+        if len == 0 {
+            return Coverage::Outside;
+        }
+        let to = if line == end.0 { end.1 } else { len - 1 };
+        let (from, to) = (from.min(len - 1), to.min(len - 1));
+        if from <= to {
+            Coverage::Chars(from, to)
+        } else {
+            Coverage::Outside
+        }
+    }
+
     /// `anchor`/`cursor` in `(line, column)` order rather than in
     /// drag order — the same normalization every method here needs
     /// before it can clip against a span, since the user may have
@@ -97,6 +125,15 @@ impl CopyState {
             (self.cursor, self.anchor)
         }
     }
+}
+
+/// What a selection copies of one line (see [`CopyState::coverage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    Outside,
+    Whole,
+    /// An inclusive character range.
+    Chars(usize, usize),
 }
 
 fn clamp_by(current: usize, delta: isize, max: usize) -> usize {

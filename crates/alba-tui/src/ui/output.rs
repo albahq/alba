@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
+use crate::copy::{CopyState, Coverage};
 use crate::logs::{Extent, LineKind, LogBuffer, LogLine, Row, Scroll, StreamFilter};
 use crate::state::{AppState, BeamState, Mode, Phase};
 use alba_executors::Stream;
@@ -232,13 +233,12 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
             decorated(row, line, text, width, mode)
         })
         .collect();
-    // Copy mode's selected lines are painted first, from the text column
-    // to the pane's edge, so the text, the cursor cell and the scrollbar
-    // drawn next keep the background.
+    // Copy mode's wholly copied lines are painted first, from the text
+    // column to the pane's edge, so the text, the cursor cell and the
+    // scrollbar drawn next keep the background.
     if let Mode::Copy(copy) = &state.mode {
-        let selected = copy.anchor.0.min(copy.cursor.0)..=copy.anchor.0.max(copy.cursor.0);
         for (index, row) in rows.iter().enumerate() {
-            if row.line.is_some_and(|line| selected.contains(&line)) {
+            if copy_coverage(copy, buffer, row) == Coverage::Whole {
                 let y = parts.text.y + index as u16;
                 let edge = Rect::new(parts.text.x, y, parts.text.width + parts.rail.width, 1);
                 frame.buffer_mut().set_style(edge, selection_style(mode));
@@ -486,8 +486,8 @@ struct Marks<'a> {
     current: Option<usize>,
 }
 
-/// The background of copy mode's selected lines: `selection`, reversed
-/// in monochrome.
+/// The background of what copy mode copies: `selection`, reversed in
+/// monochrome.
 fn selection_style(mode: ColourMode) -> Style {
     match mode {
         ColourMode::Monochrome => Style::new().reversed(),
@@ -525,10 +525,11 @@ fn other_match_style(mode: ColourMode) -> Style {
     }
 }
 
-/// A rendered row's text, styled. In copy mode a row of a selected line
-/// is drawn in `text` (its background is painted by `draw`), the cursor
-/// cell on `accent`; otherwise the search's matches are marked. Copy
-/// mode takes priority: the two are not shown blended.
+/// A rendered row's text, styled. In copy mode what `y` copies is drawn
+/// in `text` on `selection`: a whole line's row gets its background
+/// from `draw`, up to the pane's edge; a partly copied line gets it on
+/// the copied characters only. The cursor cell is on `accent`. Copy
+/// mode takes priority over search marks on the rows it touches.
 ///
 /// Starts from the row's own spans, carrying the colour ANSI parsing
 /// gave the line, and patches the highlight over the covered range, so
@@ -562,20 +563,31 @@ fn styled_line(
     let full_text = line_ref.map(|line| line.text.as_str()).unwrap_or(&row.text);
 
     if let (Mode::Copy(copy), Some(line)) = (mode, row.line) {
-        let first = copy.anchor.0.min(copy.cursor.0);
-        let last = copy.anchor.0.max(copy.cursor.0);
-        if (first..=last).contains(&line) {
-            let text = style(Token::Text, colour);
-            spans = spans
-                .into_iter()
-                .map(|span| {
-                    let style = span.style.patch(text);
-                    span.style(style)
-                })
-                .collect();
-            if line == copy.cursor.0 {
-                spans = with_cursor(spans, row, copy.cursor.1, colour);
+        let text = style(Token::Text, colour);
+        let coverage = copy_coverage(copy, buffer, row);
+        match coverage {
+            Coverage::Outside => {}
+            // The row's background is painted by `draw`.
+            Coverage::Whole => {
+                spans = spans
+                    .into_iter()
+                    .map(|span| {
+                        let style = span.style.patch(text);
+                        span.style(style)
+                    })
+                    .collect();
             }
+            Coverage::Chars(from, to) => {
+                if let Some((from, to)) = within(row, from, to) {
+                    spans = patch(spans, from, to, selection_style(colour).patch(text));
+                }
+            }
+        }
+        let has_cursor = line == copy.cursor.0;
+        if has_cursor {
+            spans = with_cursor(spans, row, copy.cursor.1, colour);
+        }
+        if has_cursor || coverage != Coverage::Outside {
             return Line::from(spans);
         }
     }
@@ -592,6 +604,15 @@ fn styled_line(
         }
     }
     Line::from(spans)
+}
+
+/// What the copy selection takes of the line `row` belongs to; the
+/// truncation marker belongs to none.
+fn copy_coverage(copy: &CopyState, buffer: &LogBuffer, row: &Row) -> Coverage {
+    match full_line(buffer, row.line).zip(row.line) {
+        Some((line, index)) => copy.coverage(index, line.text.chars().count()),
+        None => Coverage::Outside,
+    }
 }
 
 /// `spans` with the copy cursor's cell at `column` of the line, when
@@ -1079,12 +1100,15 @@ mod tests {
         state.mode = Mode::Copy(copy);
         assert!(title_row(&state).ends_with("COPY · 2 lines"));
         let buffer = drawn(&state, 80, 24);
+        // bravo is copied whole: its row runs to the pane's edge.
+        for x in TEXT..=RAIL {
+            assert_eq!(buffer[(x, FIRST + 1)].bg, SELECTION, "({x}, {})", FIRST + 1);
+        }
+        // charlie is copied up to the cursor: `cha` only.
+        for x in TEXT..TEXT + 2 {
+            assert_eq!(buffer[(x, FIRST + 2)].bg, SELECTION, "({x}, {})", FIRST + 2);
+        }
         for y in [FIRST + 1, FIRST + 2] {
-            for x in TEXT..=RAIL {
-                if (x, y) != (TEXT + 2, FIRST + 2) {
-                    assert_eq!(buffer[(x, y)].bg, SELECTION, "({x}, {y})");
-                }
-            }
             assert_eq!(buffer[(TEXT, y)].fg, TEXT_FG, "row {y}");
         }
         assert_eq!(buffer[(GUTTER, FIRST + 1)].symbol(), "▎");
@@ -1092,7 +1116,8 @@ mod tests {
         assert_eq!(buffer[(GUTTER, FIRST + 1)].bg, SURFACE);
         assert_eq!(buffer[(TEXT + 2, FIRST + 2)].bg, ACCENT, "the cursor cell");
         assert_eq!(buffer[(TEXT + 2, FIRST + 2)].fg, ON_ACCENT);
-        assert_eq!(buffer[(TEXT + 3, FIRST + 2)].bg, SELECTION);
+        assert_eq!(buffer[(TEXT + 3, FIRST + 2)].bg, SURFACE, "past the cursor");
+        assert_eq!(buffer[(RAIL, FIRST + 2)].bg, SURFACE);
         for y in [FIRST, FIRST + 3] {
             assert_eq!(buffer[(TEXT, y)].bg, SURFACE, "row {y}");
             assert_eq!(buffer[(RAIL, y)].bg, SURFACE, "row {y}");
@@ -1105,7 +1130,68 @@ mod tests {
         assert!(title_row(&state).ends_with("COPY · 1 line"));
         let buffer = drawn(&state, 80, 24);
         assert_eq!(buffer[(TEXT, FIRST + 3)].bg, ACCENT);
-        assert_eq!(buffer[(TEXT + 1, FIRST + 3)].bg, SELECTION);
+        assert_eq!(buffer[(TEXT + 1, FIRST + 3)].bg, SURFACE);
+    }
+
+    /// The cells drawn on `selection` or `accent` in the text column,
+    /// row by row, without the blank fill a whole line gets up to the
+    /// pane's edge: what the reader sees selected.
+    fn highlighted(buffer: &Buffer, rows: std::ops::RangeInclusive<u16>) -> Vec<String> {
+        rows.map(|y| {
+            (TEXT..RAIL)
+                .filter(|&x| [SELECTION, ACCENT].contains(&buffer[(x, y)].bg))
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+    }
+
+    /// A selection from mid-line to mid-line: its first and last lines
+    /// are drawn on `selection` only over the copied cells, the lines
+    /// between to the pane's edge, and the highlighted cells read
+    /// exactly what `y` copies.
+    #[test]
+    fn the_copy_highlight_is_what_gets_copied() {
+        let mut state = started("test");
+        for text in ["alpha", "bravo", "charlie", "delta"] {
+            write(&mut state, Stream::Stdout, text);
+        }
+        let mut copy = CopyState::new_at(0);
+        copy.anchor = (2, 3);
+        copy.cursor = (0, 2);
+        state.mode = Mode::Copy(copy);
+        let buffer = drawn(&state, 80, 24);
+        assert_eq!(buffer[(TEXT + 1, FIRST)].bg, SURFACE, "before the anchor");
+        assert_eq!(buffer[(TEXT + 2, FIRST)].bg, ACCENT, "the cursor");
+        assert_eq!(buffer[(TEXT + 5, FIRST)].bg, SURFACE, "past the first line");
+        assert_eq!(buffer[(RAIL, FIRST + 1)].bg, SELECTION, "a whole line");
+        assert_eq!(buffer[(TEXT + 3, FIRST + 2)].bg, SELECTION);
+        assert_eq!(buffer[(TEXT + 4, FIRST + 2)].bg, SURFACE, "past the anchor");
+        let copied = copy.selected_text(&state.logs["test"], StreamFilter::All);
+        assert_eq!(copied, "pha\nbravo\nchar");
+        let seen = highlighted(&buffer, FIRST..=FIRST + 3);
+        assert_eq!(seen.join("\n").trim_end_matches('\n'), copied);
+    }
+
+    /// A single line wrapped over two rows: the selection follows the
+    /// wrap, covering only its own range on each row.
+    #[test]
+    fn a_wrapped_selection_covers_only_its_range() {
+        let mut state = started("test");
+        let long: String = ('a'..='z').cycle().take(120).collect();
+        write(&mut state, Stream::Stdout, &long);
+        let mut copy = CopyState::new_at(0);
+        copy.anchor = (0, 50);
+        copy.cursor = (0, 60);
+        state.mode = Mode::Copy(copy);
+        let buffer = drawn(&state, 80, 24);
+        let copied = copy.selected_text(&state.logs["test"], StreamFilter::All);
+        assert_eq!(copied, long[50..=60]);
+        let seen = highlighted(&buffer, FIRST..=FIRST + 1);
+        assert_eq!(seen, [long[50..53].to_string(), long[53..=60].to_string()]);
+        assert_eq!(buffer[(RAIL, FIRST)].bg, SURFACE);
     }
 
     /// Before the first run there is no beam whose output is followed,
@@ -1275,8 +1361,17 @@ mod tests {
         let buffer = drawn(&state, 80, 24);
         for y in [FIRST + 1, FIRST + 2] {
             assert!(buffer[(TEXT, y)].modifier.contains(Modifier::REVERSED));
-            assert!(buffer[(RAIL, y)].modifier.contains(Modifier::REVERSED));
         }
+        assert!(
+            buffer[(RAIL, FIRST + 1)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            !buffer[(TEXT + 3, FIRST + 2)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
         let cursor = buffer[(TEXT + 2, FIRST + 2)].modifier;
         assert!(cursor.contains(Modifier::BOLD) && !cursor.contains(Modifier::REVERSED));
         for y in [FIRST, FIRST + 3] {
