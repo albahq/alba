@@ -17,6 +17,7 @@ beam build {
   needs [api:build, codegen]
   inputs ["src/**/*.rs", "Cargo.toml"]
   env_inputs ["RUSTFLAGS"]
+  secrets ["CARGO_REGISTRY_TOKEN"]
   outputs ["target/{profile}/app"]
   run "cargo build {if release then '--release' else ''}"
 }

@@ -33,6 +33,7 @@ that declares one, in import order. Each `*` matches exactly one level
 | `needs` | `[beam, api:beam, *:beam, ...]` | Prerequisites; all must succeed first. `*` stands for any one import alias. |
 | `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. A glob skips `.gitignore`d files; a literal path is always an input. Turns caching on, and drives `--watch` and `--affected`. |
 | `env_inputs` | `["NODE_ENV", "PATH"]` | Ambient variables whose values (or absence) join the cache fingerprint; the inherited environment is otherwise ignored. Requires `inputs`. |
+| `secrets` | `["NPM_TOKEN"]` | Variables (from the beam's `env`, else the inherited environment) whose values are replaced by `***` in all output, live, JSON and cached. |
 | `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. A missing or rewritten output file forces a rerun. |
 | `run` | `"cmd"` or `["cmd1", "cmd2"]` | String templates. Commands run in order on the same executor. |
 | `env` | `{ NAME = "value", OTHER = param }` | Values are string templates or a bare `let` / parameter name. |

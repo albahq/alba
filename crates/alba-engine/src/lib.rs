@@ -18,6 +18,7 @@
 mod affected;
 mod cache;
 mod event;
+mod mask;
 mod scheduler;
 mod session;
 mod watch;

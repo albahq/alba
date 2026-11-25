@@ -1120,6 +1120,7 @@ fn build_beam(
     let inputs = build_patterns("inputs", beam_name, &decl.inputs, lets, &params)?;
     let outputs = build_patterns("outputs", beam_name, &decl.outputs, lets, &params)?;
     let env_inputs = build_env_inputs(decl, lets, &params, &inputs)?;
+    let secrets = variable_names("secrets", beam_name, &decl.secrets, lets, &params)?;
 
     for run_template in &decl.run {
         validate_template(run_template, lets, &params, Timing::Schedule)?;
@@ -1142,6 +1143,7 @@ fn build_beam(
         params,
         inputs,
         env_inputs,
+        secrets,
         outputs,
         run: decl.run.clone(),
         env: decl
@@ -1204,9 +1206,8 @@ fn build_patterns(
     Ok(patterns)
 }
 
-/// Renders a beam's `env_inputs` names and checks each one could name an
-/// environment variable: a name none can hold would read as unset forever.
-/// The field also requires `inputs`, the only thing that makes a beam
+/// Renders a beam's `env_inputs` names (see [`variable_names`]). The field
+/// also requires `inputs`, the only thing that makes a beam
 /// cached; without them it would silently do nothing.
 fn build_env_inputs(
     decl: &BeamDecl,
@@ -1225,9 +1226,22 @@ fn build_env_inputs(
             first.span,
         ));
     }
-    let mut names = Vec::with_capacity(decl.env_inputs.len());
-    for template in &decl.env_inputs {
-        let name = render_load_time_template("env_inputs", template, lets, params)?;
+    variable_names("env_inputs", beam, &decl.env_inputs, lets, params)
+}
+
+/// Renders a field listing environment variables by name (`env_inputs`,
+/// `secrets`) and checks each one could name a variable: a name none can
+/// hold would match nothing, forever and without a word.
+fn variable_names(
+    field: &str,
+    beam: &str,
+    templates: &[StringTemplate],
+    lets: &Scope,
+    params: &[String],
+) -> Result<Vec<String>, CoreError> {
+    let mut names = Vec::with_capacity(templates.len());
+    for template in templates {
+        let name = render_load_time_template(field, template, lets, params)?;
         let mut characters = name.chars();
         let valid = characters
             .next()
@@ -1236,7 +1250,7 @@ fn build_env_inputs(
         if !valid {
             return Err(CoreError::new(
                 format!(
-                    "invalid `env_inputs` name `{name}` in beam `{beam}`: \
+                    "invalid `{field}` name `{name}` in beam `{beam}`: \
                      a variable name is letters, digits and `_`, not starting with a digit"
                 ),
                 template.span,
@@ -1900,6 +1914,31 @@ beam b {
         assert!(
             err.message
                 .contains("`env_inputs` in beam `b` needs `inputs`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn secrets_name_the_variables_whose_values_are_masked() {
+        let project = load_str(
+            r#"
+beam b {
+  secrets ["NPM_TOKEN", "DEPLOY_KEY"]
+  run "x"
+}
+"#,
+        )
+        .unwrap();
+        assert_eq!(project.beams[0].secrets, vec!["NPM_TOKEN", "DEPLOY_KEY"]);
+    }
+
+    #[test]
+    fn secrets_reject_a_name_that_is_not_a_variable() {
+        let err = load_str("beam b {\n  secrets [\"NPM-TOKEN\"]\n  run \"x\"\n}\n").unwrap_err();
+        assert!(
+            err.message
+                .contains("invalid `secrets` name `NPM-TOKEN` in beam `b`"),
             "{}",
             err.message
         );

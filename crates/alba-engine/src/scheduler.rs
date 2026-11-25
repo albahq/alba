@@ -63,6 +63,7 @@ use crate::cache::{
     fingerprint, hash_file, static_contribution,
 };
 use crate::event::{BeamStatus, RunEvent, RunSummary};
+use crate::mask::Mask;
 
 /// How a run is parameterized: everything the caller chose, as opposed to
 /// what the Beamfile declares.
@@ -789,6 +790,11 @@ async fn process(
     }
 
     let plan = render(&task.beam, &task.args).ok();
+    let mask = Mask::new(
+        &task.beam.secrets,
+        plan.as_ref().map_or(&[], |plan| plan.env.as_slice()),
+        &task.ambient_env,
+    );
     let Some(permit) = acquire_slot(task).await else {
         return cancelled;
     };
@@ -807,7 +813,7 @@ async fn process(
         // Released before replaying: a hit occupies a slot only for as
         // long as deciding it takes, never for reading its logs back.
         drop(permit);
-        replay(task);
+        replay(task, &mask);
         return (
             BeamStatus::Cached,
             Duration::from_millis(manifest.duration_ms),
@@ -827,7 +833,7 @@ async fn process(
         (None, None) => None,
     };
 
-    let (status, duration, lines) = execute(task, plan, notice, permit).await;
+    let (status, duration, lines) = execute(task, plan, notice, mask, permit).await;
 
     // Only a plain success is worth remembering: a failure, an allowed
     // failure, and a cancellation all leave the previous entry alone.
@@ -1027,12 +1033,19 @@ impl CacheableBeam {
 /// Announces a hit, then replays its stored output lines in order —
 /// `BeamCached` first, so a consumer sees the hit before any of the
 /// original run's lines, mirroring a live beam's started/output order.
-fn replay(task: &BeamTask) {
+///
+/// Masked again on the way out: an entry stored before a variable was
+/// declared secret still holds its value.
+fn replay(task: &BeamTask, mask: &Mask) {
     let _ = task.events.send(RunEvent::BeamCached {
         id: task.beam.id.clone(),
     });
     if let Some(store) = &task.cache {
         for line in store.load_logs(&task.beam.id) {
+            let line = OutputLine {
+                text: mask.apply(&line.text),
+                ..line
+            };
             let _ = task.events.send(RunEvent::BeamOutput {
                 id: task.beam.id.clone(),
                 line,
@@ -1065,6 +1078,7 @@ async fn execute(
     task: &BeamTask,
     plan: Option<RenderedBeam>,
     notice: Option<String>,
+    mask: Mask,
     // Bound (rather than dropped as `_`) so the slot stays held until this
     // function returns.
     _permit: OwnedSemaphorePermit,
@@ -1085,6 +1099,7 @@ async fn execute(
         task.beam.id.clone(),
         output,
         task.events.clone(),
+        mask,
     ));
 
     // Why this beam is running uncached, told where the user is already
@@ -1300,14 +1315,21 @@ async fn run_commands(
 
 /// Relabels an executor's output lines as this beam's output events until
 /// the executor drops the last sender, and returns everything it saw —
-/// the capture a successful beam stores for future replay.
+/// the capture a successful beam stores for future replay. Every line is
+/// masked here, the one place all of a beam's output passes through
+/// before anything can show or store it.
 async fn forward_output(
     id: BeamId,
     mut output: UnboundedReceiver<OutputLine>,
     events: UnboundedSender<RunEvent>,
+    mask: Mask,
 ) -> Vec<OutputLine> {
     let mut seen = Vec::new();
     while let Some(line) = output.recv().await {
+        let line = OutputLine {
+            text: mask.apply(&line.text),
+            ..line
+        };
         let _ = events.send(RunEvent::BeamOutput {
             id: id.clone(),
             line: line.clone(),

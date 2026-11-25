@@ -311,6 +311,27 @@ beam bundle {
 `env_inputs` requires `inputs`, and each entry must be a variable name
 (letters, digits and `_`, not starting with a digit).
 
+### Secrets
+
+A beam lists in `secrets` the variables whose values must never be shown.
+Each name is looked up in the beam's own `env` first, then in the
+environment Alba was started in (a CI token), and every occurrence of
+its value in the beam's output is replaced by `***`: in the terminal, the
+interface, the `--log-format json` stream, and the logs the cache stores
+and replays. Output is masked line by line, so a multi-line value (a
+private key) is masked one line at a time.
+
+```
+beam publish {
+  secrets ["NPM_TOKEN"]
+  run "npm publish"
+}
+```
+
+Masking covers what Alba shows and stores, not what the command does
+with the value: a command that writes it to a file, or sends it
+elsewhere, is not masked.
+
 The executor's fingerprint also covers what its declaration only names.
 For `executor docker`, that is the image a tag points at right now (so
 `docker pull alpine:3` fetching a new build reruns the beam), or, for a

@@ -1078,6 +1078,7 @@ mod tests {
             params: Vec::new(),
             inputs: inputs.iter().map(|input| (*input).to_string()).collect(),
             env_inputs: Vec::new(),
+            secrets: Vec::new(),
             outputs: Vec::new(),
             run: Vec::new(),
             env: Vec::new(),
