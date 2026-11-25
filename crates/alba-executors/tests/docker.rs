@@ -761,3 +761,83 @@ async fn an_image_beams_identity_follows_what_its_tag_points_at() {
     assert_ne!(absent, on_alpine);
     assert_ne!(on_alpine, on_busybox);
 }
+
+/// Every process's command line is world-readable on a shared host
+/// (`/proc/<pid>/cmdline`, `ps`): an environment value handed to
+/// `docker exec` as `-e NAME=VALUE` is exposed to every other user of the
+/// runner for as long as the command runs. The value must reach the
+/// command without appearing in any argument vector.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn an_environment_value_reaches_the_command_without_appearing_in_any_argv() {
+    let beam = beam_name("env-off-argv");
+    let _guard = ContainerGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"image": "alpine:3"}),
+    );
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let secret = format!("alba-argv-probe-{}", std::process::id());
+    let mut command = spec(r#"echo "$TOKEN"; sleep 2"#, project_root.path());
+    command.env = vec![("TOKEN".to_string(), secret.clone())];
+    let (ctx, mut rx) = exec_context();
+    let running = tokio::spawn(async move {
+        let result = session.execute(command, ctx).await;
+        (session, result)
+    });
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let exposed: Vec<String> = std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| std::fs::read(entry.ok()?.path().join("cmdline")).ok())
+        .map(|cmdline| String::from_utf8_lossy(&cmdline).replace('\0', " "))
+        .filter(|cmdline| cmdline.contains(&secret))
+        .collect();
+
+    let (session, result) = running.await.unwrap();
+    assert_eq!(result.unwrap().exit_code, 0);
+    assert!(
+        drain_text(&mut rx).await.contains(&secret),
+        "the command must still receive the value"
+    );
+    assert!(
+        exposed.is_empty(),
+        "the value was readable in these command lines: {exposed:?}"
+    );
+    session.close().await.unwrap();
+}
+
+/// Values travel to the container's shell inside a script, so every
+/// character must arrive as written: quotes, `$`, backslashes, and the
+/// newlines of a key or a certificate.
+#[tokio::test]
+#[ignore = "requires a running docker daemon"]
+async fn an_environment_value_arrives_byte_for_byte() {
+    let beam = beam_name("env-verbatim");
+    let _guard = ContainerGuard::new(&beam);
+
+    let project_root = tempfile::tempdir().unwrap();
+    let executor = DockerExecutor::new(project_root.path().to_path_buf());
+    let (beam_ctx, _output_rx) = beam_context(
+        &beam,
+        project_root.path(),
+        serde_json::json!({"image": "alpine:3"}),
+    );
+    let mut session = executor.open(beam_ctx).await.unwrap();
+
+    let value = "it's \"$HOME\" \\n `x`\nsecond line";
+    let mut command = spec(r#"printf '%s|' "$VALUE"; echo"#, project_root.path());
+    command.env = vec![("VALUE".to_string(), value.to_string())];
+    let (ctx, mut rx) = exec_context();
+    let result = session.execute(command, ctx).await.unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(drain_text(&mut rx).await.join("\n"), format!("{value}|"));
+    session.close().await.unwrap();
+}

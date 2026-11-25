@@ -43,6 +43,49 @@ const GRACE_PERIOD: Duration = Duration::from_secs(5);
 /// has exited.
 const DRAIN_PERIOD: Duration = Duration::from_secs(2);
 
+/// How long to wait before each new attempt at executing a file the
+/// kernel reports busy: about 1.3 seconds in all.
+const BUSY_RETRY_DELAYS: [Duration; 7] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(320),
+    Duration::from_millis(640),
+];
+
+/// Spawns `command`, retrying for a short while when the file it executes
+/// is still open for writing (`ETXTBSY`). A script a command has just
+/// written is in that state for a moment whenever another thread of this
+/// process forked in between: the child holds a copy of the write
+/// descriptor until its own `exec` closes it. Alba runs beams in parallel
+/// in one process, so that fork is routine, and failing the command for it
+/// would be a race the beam's author cannot see. A file that stays busy
+/// past the last delay fails as before.
+async fn spawn_when_not_busy(command: &mut Command) -> std::io::Result<Child> {
+    let mut delays = BUSY_RETRY_DELAYS.iter();
+    loop {
+        match command.spawn() {
+            Err(error) if is_busy(&error) => match delays.next() {
+                Some(delay) => tokio::time::sleep(*delay).await,
+                None => return Err(error),
+            },
+            spawned => return spawned,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(nix::errno::Errno::ETXTBSY as i32)
+}
+
+#[cfg(not(unix))]
+fn is_busy(_error: &std::io::Error) -> bool {
+    false
+}
+
 /// Runs `path` with `args` and `env` as its complete environment, cwd
 /// `cwd`, on the three streams `io` describes — the run's output channel
 /// line-by-line, a capture buffer, a redirected file, or a pipeline
@@ -84,7 +127,7 @@ pub(crate) async fn run_external(
         .stdin(stdin.into_stdio())
         .stdout(stdout_stdio)
         .stderr(stderr_stdio);
-    let spawned = command.spawn();
+    let spawned = spawn_when_not_busy(&mut command).await;
     // The `Command` still owns this process's copy of every handle it
     // was given, including the write end of a pipeline pipe and any
     // redirected file: dropping it here is what lets the next stage's
