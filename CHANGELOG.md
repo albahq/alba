@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/albahq/alba/compare/v0.5.1...v0.6.0) - 2026-11-25
+
+### Added
+
+- *(engine)* mask declared secrets in beam output
+- *(cache)* fingerprint declared ambient variables
+
+### Fixed
+
+- *(cache)* fingerprint what an executor runs on
+- *(engine)* distrust cache entries from another Alba
+- *(engine)* rerun a beam whose outputs changed
+- *(engine)* keep the cache readable by its owner only
+- *(executors)* keep env values off the docker argv
+- *(cli)* stop the run on SIGTERM and SIGHUP
+- *(shell)* refuse to remove the filesystem root
+- *(engine)* see changes outside the Beamfile directory
+- *(core)* hash a literal input even when ignored
+- *(shell)* retry a script the kernel reports busy
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/mask-secrets
+- Merge remote-tracking branch 'origin/main' into feat/cache-env-inputs
+- *(cli)* keep the pty open for the whole session
+- Merge branch 'feat/cache-env-inputs' into feat/mask-secrets
+- Merge branch 'fix/cache-trust' into feat/cache-env-inputs
+- Merge remote-tracking branch 'origin/main' into fix/cache-trust
+- Merge pull request #35 from albahq/fix/cli-terminate-on-sigterm
+- Merge pull request #34 from albahq/fix/shell-rm-refuses-root
+- Merge pull request #32 from albahq/fix/cache-ignored-literal-input
+- shield test repositories from global excludes
+- Merge pull request #36 from albahq/test/reliable-timing-guards
+- run wall-clock budgets alone on each platform
+- widen hang guards past machine load
+
 ## [0.5.1](https://github.com/albahq/alba/compare/v0.5.0...v0.5.1) - 2026-11-20
 
 ### Fixed
