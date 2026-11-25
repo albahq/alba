@@ -1,13 +1,12 @@
 ---
 source: crates/alba-tui/tests/render.rs
-assertion_line: 141
 expression: "drawn(&state, 30, 8)"
 ---
-"terminal too small (need at le"
 "                              "
+"             ALBA             "
 "                              "
-"                              "
-"                              "
-"                              "
+"      Terminal too small      "
+"   Resize to at least 40×12   "
+"           Now 30×8           "
 "                              "
 "                              "

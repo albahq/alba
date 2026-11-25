@@ -12,7 +12,7 @@
 //! for a reviewer who checks each line against the code it describes.
 //!
 //! Copy's, Graph's, and this overlay's own closing keys are *also* what
-//! `ui/mod.rs`'s `bottom_bar` shows for those same modes, character for
+//! the key hints row (`ui/keys.rs`) shows for those same modes, character for
 //! character — [`COPY_KEYS`], [`GRAPH_KEYS`], and [`HELP_KEYS`] are the
 //! one place that text is spelled out, so the two screens cannot drift
 //! apart the way a hand-copied second literal eventually would.
@@ -23,24 +23,24 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-/// Copy mode's keymap — shared verbatim with `ui/mod.rs`'s `bottom_bar`
+/// Copy mode's keymap, shared verbatim with `ui/keys.rs`'s `line`
 /// (its `Mode::Copy` arm reads this same constant), rather than the two
 /// screens each spelling it out on their own.
 pub(super) const COPY_KEYS: &str = "hjkl/arrows move · v anchor · y copy · Esc cancel";
 
 /// Graph mode's keymap — no `hjkl` here, unlike Copy; shared verbatim
-/// with `bottom_bar`'s `Mode::Graph` arm the same way `COPY_KEYS` is.
+/// with the key hints' `Mode::Graph` arm the same way `COPY_KEYS` is.
 pub(super) const GRAPH_KEYS: &str = "↑↓←→ move · Enter select · Esc back";
 
-/// How to close the overlay itself — shared verbatim with `bottom_bar`'s
-/// `Mode::Help` arm.
+/// How to close the overlay itself, shared verbatim with the key
+/// hints' `Mode::Help` arm.
 pub(super) const HELP_KEYS: &str = "Esc or ? close";
 
 /// The full keymap, one line per group of related bindings, blank lines
 /// separating the four groups (Normal / Search / Copy / Graph) the
 /// interactive tasks built, plus this overlay's own closing keys.
-/// Phrased to match the wording the bottom bar already uses for the
-/// bindings it has room to show (`ui/mod.rs`'s `bottom_bar`), so the
+/// Phrased to match the wording the key hints row already uses for the
+/// bindings it has room to show (`ui/keys.rs`), so the
 /// overlay never contradicts what the reader has already half-learned
 /// from the corner of their eye — Copy, Graph, and Help go further and
 /// share the exact same constant (see the module doc comment).
@@ -85,7 +85,7 @@ fn keymap_lines() -> Vec<String> {
 /// A no-op on a degenerate (zero-sized) area; `draw` only ever reaches
 /// this once the too-small-screen floor has already been cleared, but
 /// nothing here needs that guarantee to hold.
-pub fn draw(frame: &mut Frame, area: Rect) {
+pub fn draw(frame: &mut Frame, area: Rect, surface: Style) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -102,6 +102,9 @@ pub fn draw(frame: &mut Frame, area: Rect) {
     // `Clear` first: the popup's own content must read clearly against
     // a plain background, not the dimmed characters now sitting under it.
     frame.render_widget(Clear, popup);
+    // `Clear` resets the cells, the frame's surface included: paint it
+    // back so the box reads on the same background as the rest.
+    frame.buffer_mut().set_style(popup, surface);
     let lines: Vec<Line> = content
         .iter()
         .map(|line| Line::from(line.as_str()))
@@ -147,7 +150,9 @@ mod tests {
 
     fn draw_at(width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| draw(frame, frame.area())).unwrap();
+        terminal
+            .draw(|frame| draw(frame, frame.area(), Style::default()))
+            .unwrap();
         terminal.backend().to_string()
     }
 
@@ -182,7 +187,7 @@ mod tests {
     fn a_zero_sized_body_does_not_panic() {
         let mut terminal = Terminal::new(TestBackend::new(10, 10)).unwrap();
         terminal
-            .draw(|frame| draw(frame, Rect::new(0, 0, 0, 0)))
+            .draw(|frame| draw(frame, Rect::new(0, 0, 0, 0), Style::default()))
             .unwrap();
     }
 
@@ -199,9 +204,9 @@ mod tests {
 
     /// `keymap_lines` must build its Copy/Graph/Help entries from
     /// `COPY_KEYS`/`GRAPH_KEYS`/`HELP_KEYS`, not a hand-copied literal of
-    /// its own — `ui/mod.rs`'s own covering test
-    /// (`copy_graph_and_help_bars_match_their_shared_keymap_constants`)
-    /// checks the same constants from `bottom_bar`'s side; between the
+    /// its own: `ui/keys.rs`'s own covering test
+    /// (`copy_graph_and_help_rows_come_from_the_shared_constants`)
+    /// checks the same constants from the key hints' side; between the
     /// two, neither file can silently drift from the other without one
     /// of these breaking.
     #[test]

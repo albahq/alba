@@ -1,5 +1,5 @@
-//! Snapshot tests for `alba_tui::ui::draw`: the header, tree pane, log
-//! pane, and bottom bar as they render for a handful of representative
+//! Snapshot tests for `alba_tui::ui::draw`: the header, progress row,
+//! tree pane, log pane, and key hints as they render for a handful of representative
 //! states. `TestBackend::to_string()` drops styles, so these pin layout
 //! and text, not colour — see the spec's Layout section for what each
 //! region is supposed to show.
@@ -151,7 +151,7 @@ fn a_parked_session_renders_the_diagnostic() {
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
 
-/// Below the floor, only the message renders.
+/// Below the floor, only the too-small screen renders.
 #[test]
 fn a_tiny_terminal_gets_the_too_small_screen() {
     let state = AppState::new("build", false);
@@ -159,8 +159,8 @@ fn a_tiny_terminal_gets_the_too_small_screen() {
 }
 
 /// The real frame at the declared floor, a run in progress: the
-/// narrowest width the layout still has to draw a tree, a log pane, a
-/// junction, and a footer on, rather than the too-small message.
+/// narrowest width the layout still has to draw every band and both
+/// panes on, rather than the too-small screen.
 #[test]
 fn a_run_in_flight_renders_at_the_forty_column_floor() {
     let mut state = AppState::new("build", false);
@@ -189,9 +189,9 @@ fn a_run_in_flight_renders_at_the_forty_column_floor() {
     insta::assert_snapshot!(drawn(&state, 40, 12));
 }
 
-/// The floor's other exercise: a parked project, whose session title
-/// (`parked · waiting for a valid Beamfile`) is the longest text the
-/// top edge ever has to share with the identity title.
+/// The floor's other exercise: a parked project, whose banner has to
+/// give up its right half and whose header keeps the badge and the
+/// state whole.
 #[test]
 fn a_parked_session_renders_at_the_forty_column_floor() {
     let mut state = AppState::new("build", true);
@@ -205,7 +205,7 @@ fn a_parked_session_renders_at_the_forty_column_floor() {
     insta::assert_snapshot!(drawn(&state, 40, 12));
 }
 
-/// Search mode: the bottom bar shows the query and the match counter,
+/// Search mode: the key hints row shows the query and the match counter,
 /// and the pane has scrolled so the current match (the earliest one, of
 /// two) is on screen even though it sits well above the tail.
 #[test]
@@ -246,9 +246,9 @@ fn a_search_highlights_and_counts_matches() {
 /// Once `Enter` commits the query, the session is back in `Mode::Normal`
 /// — a distinct state the user spends real time in — but the highlights
 /// and the scroll position it left behind stay exactly as they were:
-/// `last_search` is what keeps them alive, and the bottom bar goes back
-/// to Normal mode's own (now advertising `n`/`N`, the keys that step the
-/// committed search).
+/// `last_search` is what keeps them alive, and the key hints go back
+/// to Normal mode's own (offering `G follow`, since the search left the
+/// pane scrolled away from the end).
 #[test]
 fn a_committed_search_keeps_its_highlights_in_normal_mode() {
     let mut state = AppState::new("build", false);
@@ -286,7 +286,7 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
 }
 
 /// Copy mode's selection renders as part of the frame. `TestBackend`
-/// drops styles, so this pins layout and the bottom bar's own keymap
+/// drops styles, so this pins layout and the key hints' own keymap
 /// text — the reversed span itself is pinned by the unit test over
 /// `logpane::copy_selected_line` instead (`TestBackend::to_string()`
 /// cannot see it either way).

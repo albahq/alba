@@ -5,7 +5,6 @@
 
 use alba_engine::BeamStatus;
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::text::{Line, Span};
 
 use crate::state::BeamState;
 
@@ -21,9 +20,7 @@ pub enum ColourMode {
     Monochrome,
 }
 
-/// The palette's eleven colours, named as the spec names them. Some are
-/// not drawn yet: the bands that use them arrive with the layout work.
-#[allow(dead_code)]
+/// The palette's eleven colours, named as the spec names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     Surface,
@@ -36,6 +33,9 @@ pub enum Token {
     Success,
     Cached,
     Error,
+    // Drawn by the search matches and the copy selection, restyled in
+    // a later change; until then only the tests name it.
+    #[allow(dead_code)]
     Selection,
 }
 
@@ -96,9 +96,7 @@ pub fn style(token: Token, mode: ColourMode) -> Style {
     }
 }
 
-/// The token as a background; monochrome paints none. Unused until the
-/// bands paint their surface.
-#[allow(dead_code)]
+/// The token as a background; monochrome paints none.
 pub fn fill(token: Token, mode: ColourMode) -> Style {
     match colour(token, mode) {
         Some(colour) => Style::new().bg(colour),
@@ -157,38 +155,6 @@ pub fn status_token(state: &BeamState) -> Token {
             BeamStatus::Cancelled => Token::TextMuted,
         },
     }
-}
-
-/// A bottom-bar text (`q quit · r rerun`) as a line whose first word of
-/// every ` · `-separated item is a key, drawn bold. In monochrome it is
-/// one plain span, the text unchanged.
-///
-/// "First word of the item" is a heuristic for "the key", not a rule
-/// `bottom_bar`'s callers are held to, and it has two known misfires
-/// left as cosmetic: an item with no space at all bolds whole, not just
-/// a first word (the Search bar's `1/5` match counter), and an item
-/// whose first word is not the key (`copied (OSC 52) · q quit` bolds
-/// `copied`) bolds the wrong word. Neither is worth restructuring
-/// `bottom_bar` to fix.
-pub fn bar_line(text: &str, mode: ColourMode) -> Line<'static> {
-    if mode == ColourMode::Monochrome {
-        return Line::from(text.to_string());
-    }
-    let key = Style::new().bold();
-    let mut spans = Vec::new();
-    for (index, item) in text.split(" · ").enumerate() {
-        if index > 0 {
-            spans.push(Span::raw(" · "));
-        }
-        match item.split_once(' ') {
-            Some((word, label)) => {
-                spans.push(Span::styled(word.to_string(), key));
-                spans.push(Span::raw(format!(" {label}")));
-            }
-            None => spans.push(Span::styled(item.to_string(), key)),
-        }
-    }
-    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -437,28 +403,5 @@ mod tests {
         );
         assert_eq!(status_token(&BeamState::Pending), Token::TextMuted);
         assert_eq!(status_token(&done(BeamStatus::Cancelled)), Token::TextMuted);
-    }
-
-    /// `q quit · r rerun` becomes bold keys and plain labels, separated
-    /// by the same ` · ` the plain text had.
-    #[test]
-    fn bar_line_bolds_the_keys() {
-        let line = bar_line("q quit · Esc cancel", ColourMode::Indexed);
-        let spans: Vec<(String, Style)> = line
-            .spans
-            .iter()
-            .map(|span| (span.content.to_string(), span.style))
-            .collect();
-        assert_eq!(
-            spans,
-            vec![
-                ("q".to_string(), Style::new().bold()),
-                (" quit".to_string(), Style::default()),
-                (" · ".to_string(), Style::default()),
-                ("Esc".to_string(), Style::new().bold()),
-                (" cancel".to_string(), Style::default()),
-            ]
-        );
-        assert_eq!(bar_line("q quit", ColourMode::Monochrome).spans.len(), 1);
     }
 }

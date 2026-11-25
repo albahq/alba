@@ -1,7 +1,6 @@
 //! The left pane: one row per beam with a status glyph and a
 //! right-aligned duration, the selected row reversed. The counts by
-//! status that used to close this pane sit on the frame's footer now
-//! (see `ui/footer.rs`).
+//! status sit on the progress row (see `ui/progress.rs`).
 
 use std::time::Instant;
 
@@ -89,7 +88,7 @@ fn row_line(
 /// contain any Unicode alphanumeric character (`alba-syntax`'s
 /// `scan_ident` does not restrict them to ASCII), and a wide one paints
 /// two cells, so this budgets by display width rather than char count.
-fn fit_name(id: &str, width: usize) -> String {
+pub(super) fn fit_name(id: &str, width: usize) -> String {
     if id.width() <= width {
         return id.to_string();
     }

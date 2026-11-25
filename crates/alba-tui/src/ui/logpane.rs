@@ -404,7 +404,7 @@ mod tests {
     /// `TestBackend::to_string()` drops styles the same way it does for
     /// search: this unit test over `patch` is what actually pins the
     /// reversed style; the snapshot in `tests/render.rs` pins layout and
-    /// the bottom bar instead.
+    /// the key hints instead.
     #[test]
     fn patch_marks_the_covered_chars() {
         let spans = vec![Span::raw("Compiling api")];

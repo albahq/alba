@@ -139,7 +139,7 @@ pub struct AppState {
     /// would reach a real terminal/clipboard). Taken, not just read, by
     /// whoever drains it: it is a one-shot request, not standing state.
     pub pending_copy: Option<String>,
-    /// What that attempt reported, and until when the bottom bar keeps
+    /// What that attempt reported, and until when the key hints row keeps
     /// showing it (see `CopyResult::is_visible`).
     pub last_copy_result: Option<CopyResult>,
     pub last_summary: Option<RunSummary>,
@@ -177,7 +177,7 @@ pub struct AppState {
     pane_width: usize,
 }
 
-/// How long a copy result stays in the bottom bar once shown — long
+/// How long a copy result stays in the key hints row once shown: long
 /// enough to survive the several redraws that can land inside it (the
 /// 80ms tick, a beam still flooding its own output), rather than the
 /// single frame a literal reading of the brief's "for one draw" would
@@ -185,7 +185,7 @@ pub struct AppState {
 /// ambiguity.
 const COPY_RESULT_VISIBLE: Duration = Duration::from_secs(2);
 
-/// What the last copy attempt reported, and until when the bottom bar
+/// What the last copy attempt reported, and until when the key hints row
 /// keeps showing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CopyResult {
@@ -201,7 +201,7 @@ impl CopyResult {
         }
     }
 
-    /// Whether the bottom bar should still be showing this at `now`.
+    /// Whether the key hints row should still be showing this at `now`.
     pub fn is_visible(&self, now: Instant) -> bool {
         now < self.expires_at
     }
@@ -426,6 +426,13 @@ impl AppState {
         self.outcome
     }
 
+    /// Whether the user abandoned the run on screen (`c` or Ctrl-C): the
+    /// header reads `CANCELLED` rather than judging a summary made of
+    /// cancellations.
+    pub fn run_cancelled(&self) -> bool {
+        self.user_cancelled
+    }
+
     /// Ctrl-C with nothing running: the session is being interrupted,
     /// not concluded — `exit_outcome()` returns `None` from here on
     /// (spec: Ctrl-C when idle quits with 130, even after a green run).
@@ -480,7 +487,7 @@ impl AppState {
     /// (`lib::run`) has actually performed it — `AppState` never
     /// touches the clipboard itself; `pending_copy` is what `y` or a
     /// mouse release leaves behind to ask for that, and this is where
-    /// the answer comes back for the bottom bar to show.
+    /// the answer comes back for the key hints row to show.
     pub fn record_copy_result(&mut self, message: &'static str, now: Instant) {
         self.last_copy_result = Some(CopyResult::new(message, now));
     }
@@ -1700,7 +1707,7 @@ mod tests {
     /// `Esc` (the event loop's `leave_mode`) cancels: nothing is
     /// committed, the highlights go away, and the pane the search pinned
     /// while typing is released back to following — exactly what the
-    /// bottom bar, the help overlay and the README promise.
+    /// key hints row, the help overlay and the README promise.
     #[test]
     fn esc_cancels_the_search_it_leaves() {
         let mut state = AppState::new("build", false);
@@ -2893,7 +2900,7 @@ mod tests {
         assert!(state.pending_copy.is_none());
     }
 
-    /// `CopyResult` governs the bottom bar's own timing: visible right
+    /// `CopyResult` governs the key hints row's own timing: visible right
     /// away and partway through its window, expired well past it — the
     /// plan owner's two-second ruling on the brief's "for one draw".
     #[test]
