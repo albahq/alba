@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use alba_core::{BeamId, definitions, load_project, load_str};
+use alba_core::{BeamId, ExecutorKind, definitions, load_project, load_str};
 use alba_engine::{
-    BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, Targets, run,
+    BeamStatus, EngineError, ExecutorLabel, Executors, RunEvent, RunOptions, RunSummary, Targets,
+    run,
 };
 use alba_executors::{
     BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
@@ -1086,6 +1087,18 @@ beam all { needs [sys, built, composed] run "d" }
         label("composed"),
         ("compose".to_string(), Some("web".to_string()))
     );
+}
+
+/// A plugin beam is labelled with the plugin's name.
+#[test]
+fn a_plugin_executor_is_labelled_with_its_name() {
+    let label = ExecutorLabel::from(&ExecutorKind::Plugin {
+        name: "k8s".to_string(),
+        options: Vec::new(),
+    });
+
+    assert_eq!(label.kind, "plugin");
+    assert_eq!(label.detail.as_deref(), Some("k8s"));
 }
 
 /// Without definitions from the caller, nothing is invented.

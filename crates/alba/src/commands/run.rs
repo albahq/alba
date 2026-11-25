@@ -168,6 +168,7 @@ async fn execute(
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
+    let root = alba_engine::beamfile_dir(beamfile);
     let options = RunOptions {
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
@@ -177,11 +178,10 @@ async fn execute(
             force: flags.force,
         }),
         ambient_env: ambient_env(),
-        definitions: alba_core::definitions(project, sources, &alba_engine::beamfile_dir(beamfile)),
+        definitions: alba_core::definitions(project, sources, &root),
         extra_env: Vec::new(),
     };
 
-    let root = alba_engine::beamfile_dir(beamfile);
     let targets = match alba_engine::select(project, sources, &root, selection) {
         Ok(targets) => targets,
         Err(error) => {
