@@ -773,11 +773,16 @@ impl AppState {
             // line of offset at a time and re-checking the real window
             // gets this right under wrapping.
             //
-            // Bounded by `end - cursor_line` rather than `len`: by the
-            // time `end` (one past the window's newest line) reaches
-            // `cursor_line + 1`, `cursor_line` is the newest line in the
-            // window, so the window's start is certainly at or before
-            // it, well short of walking the whole buffer.
+            // Bounded by `len - cursor_line` rather than `len`: each
+            // `scroll_up(1)` moves the window's absolute end (`len -
+            // offset`) back by one buffer line, so once the offset
+            // reaches `len - cursor_line - 1` the window ends at
+            // `cursor_line` and its start is certainly at or before it,
+            // well short of walking the whole buffer. `end - cursor_line`
+            // (the window's visible end) cannot be the bound: lines the
+            // stream filter hides after the window's last visible line
+            // still cost one step each, so it would stop short of the
+            // cursor.
             let bound = len.saturating_sub(cursor_line);
             for _ in 0..bound {
                 buffer.scroll_up(1);
