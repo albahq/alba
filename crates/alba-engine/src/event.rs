@@ -70,7 +70,7 @@ pub enum NoticeLevel {
 /// `CommandStarted` followed by that command's `BeamOutput` lines, then
 /// `BeamFinished` — a beam that runs several commands still emits exactly
 /// one started/finished pair. Output produced while the beam's session is
-/// set up (a notice, an executor's start-up message) can precede the first
+/// set up (an executor's start-up message) can precede the first
 /// `CommandStarted` (as can a `BeamNotice`, which otherwise keeps its
 /// arrival order relative to the output). A cache hit follows the same
 /// shape with `BeamCached`

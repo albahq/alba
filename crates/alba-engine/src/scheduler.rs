@@ -1366,7 +1366,9 @@ type Announcement = (Marker, tokio::sync::oneshot::Sender<()>);
 /// Hands a marker to the forwarder and waits until it has emitted it, so
 /// it lands after everything already sent on the output channel and before
 /// anything sent once this returns. A forwarder that is gone has nothing
-/// left to order against; the marker is then dropped.
+/// left to order against; the marker is then dropped. A dead forwarder
+/// means the run's output is already lost and the notice goes with it, a
+/// loss accepted as before notices were events.
 async fn announce(announcements: &UnboundedSender<Announcement>, marker: Marker) {
     let (done, emitted) = tokio::sync::oneshot::channel();
     if announcements.send((marker, done)).is_ok() {

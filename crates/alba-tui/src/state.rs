@@ -2075,6 +2075,8 @@ mod tests {
                 ("failed to spawn".to_string(), false)
             ]
         );
+        let notice = state.logs["build"].lines().last().unwrap();
+        assert_eq!(notice.stream, alba_executors::Stream::Stderr);
     }
 
     fn replayed_output(beam: &str, text: &str) -> RunEvent {

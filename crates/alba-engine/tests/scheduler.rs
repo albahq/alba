@@ -381,7 +381,7 @@ beam lint { allow_failure true run ["fail first", "never second"] }
 /// environment variable that is deliberately deferred to that moment and
 /// turns out to be unset — is that beam's failure, not the run's. It gets
 /// the same treatment as a command that cannot be spawned: a started
-/// event, the message as stderr output, a failed status, and a run that
+/// event, the message as an error notice, a failed status, and a run that
 /// keeps going for everything that does not depend on it.
 #[tokio::test]
 async fn a_template_that_cannot_render_fails_only_its_own_beam() {
@@ -418,6 +418,13 @@ beam all { needs [broken, other] run "step all" }
                 if id.0 == "broken" && text.contains("ALBA_MISSING_VAR_XYZ"))
         }),
         "render failure reported as an error notice",
+    );
+    assert!(
+        !events.iter().any(
+            |event| matches!(event, RunEvent::BeamOutput { id, line, .. }
+            if id.0 == "broken" && line.stream == Stream::Stderr)
+        ),
+        "the message is a notice, not a stderr output line: {events:?}"
     );
     let finished = only(
         positions(
@@ -1493,7 +1500,7 @@ beam build { run ["one", "two"] }
 
 /// An executor that cannot even open a session for this beam — no runtime,
 /// a missing image — is that beam's own failure, reported exactly like a
-/// command that could not be spawned: a stderr line carrying the message,
+/// command that could not be spawned: an error notice carrying the message,
 /// then `Failed { exit_code: -1 }`. No command ever reaches a session that
 /// was never created, and there is nothing to close.
 #[tokio::test]
