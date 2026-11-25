@@ -6,17 +6,22 @@
 //! from its end and `s all streams` prepended when the output is
 //! filtered. When the row is too narrow, pairs drop from the end, except
 //! `? help` and `q quit`, which are always kept.
+//!
+//! Search, copy, graph and help replace the row entirely: search with
+//! its prompt (`search_prompt`), the others with their key hints from
+//! `help.rs`.
 
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::logs::{Scroll, StreamFilter};
+use crate::search::SearchState;
 use crate::state::{AppState, Mode, Phase};
 
 use super::beams::fit_name;
 use super::help;
-use super::theme::{ColourMode, Token, style};
+use super::theme::{ColourMode, Token, fill, style};
 
 const PAIR_GAP: &str = "   ";
 /// The pairs that never drop.
@@ -25,41 +30,77 @@ const KEPT: [&str; 2] = ["?", "q"];
 /// The key hints for a row `width` cells wide.
 pub fn line(state: &AppState, width: u16) -> Line<'static> {
     let width = width as usize;
-    // While searching, the first item is the query being typed: one
-    // item however many words it has, never dropped, cut last.
-    let searching = matches!(state.mode, Mode::Search(_));
     let mut pairs = match &state.mode {
         Mode::Normal => normal_pairs(state),
-        Mode::Search(search) => {
-            let total = search.matches.len();
-            let current = if total == 0 { 0 } else { search.current + 1 };
-            vec![
-                pair(&format!("/{}", search.query), ""),
-                pair(&format!("{current}/{total}"), ""),
-                pair("Enter", "commit"),
-                pair("Esc", "cancel"),
-            ]
-        }
+        Mode::Search(search) => return search_prompt(search, width, state.colour),
         Mode::Copy(_) => pairs_of(help::COPY_KEYS),
         Mode::Graph(_) => pairs_of(help::GRAPH_KEYS),
         Mode::Help => pairs_of(help::HELP_KEYS),
     };
-    let kept = |index: usize, key: &str| KEPT.contains(&key) || (searching && index == 0);
     while row_width(&pairs) > width {
         let Some(last) = pairs
             .iter()
-            .enumerate()
-            .rposition(|(index, (key, _))| !kept(index, key))
+            .rposition(|(key, _)| !KEPT.contains(&key.as_str()))
         else {
             break;
         };
         pairs.remove(last);
     }
-    if searching && row_width(&pairs) > width {
-        let others = row_width(&pairs) - pair_width(&pairs[0]);
-        pairs[0].0 = fit_name(&pairs[0].0, width.saturating_sub(others));
-    }
     render(&pairs, state.colour)
+}
+
+/// The search prompt: `/` in `accent` bold, the query bold, a block
+/// cursor, then `i/n` muted, `Enter commit` and `Esc cancel`. The query
+/// is what the reader is typing, so it is never dropped: the pairs after
+/// it drop from the end first, then the query is cut by display width.
+fn search_prompt(search: &SearchState, width: usize, mode: ColourMode) -> Line<'static> {
+    let total = search.matches.len();
+    let current = if total == 0 { 0 } else { search.current + 1 };
+    let counter = format!("{current}/{total}");
+    let mut pairs = vec![pair("Enter", "commit"), pair("Esc", "cancel")];
+    // `/`, the query, the cursor cell.
+    let prompt = 1 + search.query.width() + 1;
+    // The cells taken after the cursor by the counter and `pairs`.
+    let after = |pairs: &[(String, String)], with_counter: bool| {
+        let counter = if with_counter {
+            PAIR_GAP.len() + counter.width()
+        } else {
+            0
+        };
+        let pairs = if pairs.is_empty() {
+            0
+        } else {
+            PAIR_GAP.len() + row_width(pairs)
+        };
+        counter + pairs
+    };
+    while !pairs.is_empty() && prompt + after(&pairs, true) > width {
+        pairs.pop();
+    }
+    let with_counter = prompt + after(&pairs, true) <= width;
+    let query = fit_name(
+        &search.query,
+        width.saturating_sub(2 + after(&pairs, with_counter)),
+    );
+
+    let cursor = match mode {
+        ColourMode::Monochrome => Style::new().reversed(),
+        _ => fill(Token::Text, mode),
+    };
+    let mut spans = vec![
+        Span::styled("/", style(Token::Accent, mode).bold()),
+        Span::styled(query, style(Token::Text, mode).bold()),
+        Span::styled(" ", cursor),
+    ];
+    if with_counter {
+        spans.push(Span::raw(PAIR_GAP));
+        spans.push(Span::styled(counter, style(Token::TextMuted, mode)));
+    }
+    if !pairs.is_empty() {
+        spans.push(Span::raw(PAIR_GAP));
+        spans.extend(render(&pairs, mode).spans);
+    }
+    Line::from(spans)
 }
 
 /// A copy result taking the row over for its visible window: the
@@ -262,42 +303,73 @@ mod tests {
         state
     }
 
-    /// A query with a space is one item, styled as one key.
+    /// The prompt: `/` accent bold, the query bold, a block cursor,
+    /// then `i/n` muted, `Enter commit`, `Esc cancel`. A query with a
+    /// space is still one item.
     #[test]
-    fn a_search_query_with_spaces_stays_one_item() {
-        let state = searching("unused import");
+    fn the_search_prompt_reads_query_cursor_and_count() {
+        let mode = ColourMode::TrueColour;
+        let mut state = searching("unused import").with_colour(mode);
+        if let Mode::Search(search) = &mut state.mode {
+            search.matches = vec![3, 8];
+            search.current = 1;
+        }
         let hints = line(&state, 200);
         assert_eq!(
             hints.to_string(),
-            "/unused import   0/0   Enter commit   Esc cancel"
+            "/unused import    2/2   Enter commit   Esc cancel"
         );
-        assert_eq!(hints.spans[0].content, "/unused import");
+        let span = |content: &str| {
+            hints
+                .spans
+                .iter()
+                .find(|span| span.content == content)
+                .unwrap_or_else(|| panic!("no span {content:?} in {hints:?}"))
+                .style
+        };
+        assert_eq!(span("/"), style(Token::Accent, mode).bold());
+        assert_eq!(span("unused import"), style(Token::Text, mode).bold());
+        assert_eq!(hints.spans[2].content, " ");
+        assert_eq!(hints.spans[2].style, fill(Token::Text, mode));
+        assert_eq!(span("2/2"), style(Token::TextMuted, mode));
+        assert_eq!(span("Enter"), style(Token::Accent, mode).bold());
+
+        let mono = searching("x").with_colour(ColourMode::Monochrome);
+        let hints = line(&mono, 200);
+        assert_eq!(hints.spans[2].content, " ");
+        assert_eq!(hints.spans[2].style, Style::new().reversed());
     }
 
     /// The query is what the reader is typing: the other pairs give way
-    /// first, then the query is cut by display width, never dropped.
+    /// first, then the query is cut by display width, never dropped;
+    /// `/` and the cursor stay.
     #[test]
     fn a_long_search_query_is_cut_not_dropped() {
-        let state = searching(&"国".repeat(30));
+        let query = "国".repeat(30);
+        let state = searching(&query);
+        assert_eq!(
+            line(&state, 96).to_string(),
+            format!("/{query}    0/0   Enter commit   Esc cancel")
+        );
         assert_eq!(
             line(&state, 95).to_string(),
-            format!("/{}   0/0   Enter commit   Esc cancel", "国".repeat(30))
+            format!("/{query}    0/0   Enter commit")
         );
-        assert_eq!(
-            line(&state, 67).to_string(),
-            format!("/{}   0/0", "国".repeat(30))
-        );
-        assert_eq!(
-            line(&state, 66).to_string(),
-            format!("/{}", "国".repeat(30))
-        );
+        assert_eq!(line(&state, 82).to_string(), format!("/{query}    0/0"));
+        assert_eq!(line(&state, 67).to_string(), format!("/{query} "));
         let cut = line(&state, 20).to_string();
-        assert_eq!(cut, format!("/{}…", "国".repeat(9)));
+        assert_eq!(cut, format!("/{}… ", "国".repeat(8)));
         assert!(cut.width() <= 20);
     }
 
-    /// Copy's, Graph's and Help's rows are `help.rs`'s shared constants,
-    /// so the overlay and this row cannot drift apart.
+    #[test]
+    fn the_help_row_closes_help() {
+        let mut state = started(false);
+        state.mode = Mode::Help;
+        assert_eq!(row(&state), "Esc close help");
+    }
+
+    /// Copy's, Graph's and Help's rows are `help.rs`'s shared constants.
     #[test]
     fn copy_graph_and_help_rows_come_from_the_shared_constants() {
         use crate::copy::CopyState;

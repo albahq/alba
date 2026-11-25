@@ -4,7 +4,8 @@
 //! divider, output pane or graph), row `H-3` the bottom separator, row
 //! `H-2` the key hints; rows 0, 2 and `H-1` stay empty. There is no
 //! outer border: content runs from column 2 to `W-3`, separators from
-//! column 1 to `W-2`, with `┬`/`┴` where the divider meets them.
+//! column 1 to `W-2`, with `┬`/`┴` where the divider meets them. The
+//! help page replaces the body and drops the divider and its junctions.
 //!
 //! The whole frame is painted with the surface first, so every cell the
 //! interface draws, uncoloured command output included, reads on Alba's
@@ -102,6 +103,12 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     draw_separator(frame, area, top, mode);
     draw_separator(frame, area, bottom, mode);
 
+    // The help page replaces the whole body: no panes, no divider.
+    if matches!(state.mode, Mode::Help) {
+        help::draw(frame, body, mode);
+        return;
+    }
+
     let (tree_pane, output_pane) = panes(body, state, area.width);
     let divider = Block::new()
         .borders(Borders::RIGHT)
@@ -122,11 +129,6 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     match &state.mode {
         Mode::Graph(graph) => graphpane::draw(frame, output_pane, state, graph),
         _ => output::draw(frame, output_pane, state),
-    }
-
-    // Help is still an overlay over the body, the panes dimmed under it.
-    if matches!(state.mode, Mode::Help) {
-        help::draw(frame, body, surface);
     }
 }
 
@@ -396,8 +398,7 @@ mod tests {
         let mut help = running(now).with_colour(ColourMode::TrueColour);
         help.mode = Mode::Help;
         assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&state, 104, 23, now), true);
-        // The help overlay does not yet repaint the first cells of the
-        // beams pane's selected row (a later change gives it the whole body).
+        // The help page replaces the body: no selected beam's bar.
         assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&help, 104, 23, now), false);
         let buffer = drawn(&state, 104, 23, now);
         assert_eq!(buffer[(40, 12)].fg, Color::Rgb(0xE3, 0xE4, 0xDC));
@@ -412,9 +413,7 @@ mod tests {
                 }
                 let badge = y == 1 && (2..8).contains(&x);
                 // The selected beam's row is the accent bar, 40 cells here.
-                // Under help the overlay leaves the bar only in the cells it does not repaint.
-                let bar_end = if with_bar { 42 } else { 15 };
-                let bar = y == 6 && (2..bar_end).contains(&x);
+                let bar = with_bar && y == 6 && (2..42).contains(&x);
                 let expected = if badge || bar {
                     Some(Color::Rgb(0xF3, 0xC2, 0x80))
                 } else {

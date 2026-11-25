@@ -325,10 +325,9 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
 }
 
 /// Copy mode's selection renders as part of the frame. `TestBackend`
-/// drops styles, so this pins layout and the key hints' own keymap
-/// text — the reversed span itself is pinned by the unit test
-/// `output::draw_marks_only_the_rows_the_selection_actually_covers`
-/// instead (`TestBackend::to_string()` cannot see it either way).
+/// drops styles, so this pins layout, the title's line count and the
+/// key hints; the selection's colours are pinned by `ui/output.rs`'s
+/// `the_copy_title_counts_selected_lines`.
 #[test]
 fn a_copy_selection_highlights_the_span() {
     let mut state = AppState::new("build", false);
@@ -398,13 +397,21 @@ fn the_graph_view_draws_layers_and_edges() {
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
 
-/// The help overlay: a centred bordered box over the dimmed body,
-/// listing every binding the interactive modes actually implement (see
-/// `ui/help.rs`'s own `KEYMAP` for the source of truth this is checked
-/// against). `TestBackend` drops styles, so this pins the overlay's
-/// text and its placement, not the dimming itself.
+/// The help page replaces the body: no beams pane, no divider, the
+/// groups in two columns where the body is wide enough.
 #[test]
-fn the_help_overlay_lists_the_full_keymap() {
+fn the_help_page_lists_the_full_keymap() {
+    insta::assert_snapshot!(drawn(&helping(), 100, 24));
+}
+
+/// At 80 columns the two columns do not fit: the groups stack in one,
+/// cut at the bottom.
+#[test]
+fn a_narrow_help_page_stacks_its_groups() {
+    insta::assert_snapshot!(drawn(&helping(), 80, 24));
+}
+
+fn helping() -> AppState {
     let mut state = AppState::new("build", false);
     state.apply(
         &RunEvent::RunStarted {
@@ -417,8 +424,7 @@ fn the_help_overlay_lists_the_full_keymap() {
         Instant::now(),
     );
     state.enter_help();
-
-    insta::assert_snapshot!(drawn(&state, 80, 24));
+    state
 }
 
 /// Arrow keys move the graph's focus (`GraphState::navigate`, reached

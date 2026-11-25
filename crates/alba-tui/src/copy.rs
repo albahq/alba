@@ -86,32 +86,6 @@ impl CopyState {
         parts.join("\n")
     }
 
-    /// The inclusive character-column range this selection covers on
-    /// `line`, given that line's own char count — or `None` when `line`
-    /// falls outside the (normalized) span altogether, or is empty.
-    /// Used by `ui/output.rs` to style the covered spans; kept here
-    /// rather than there because it is the same normalize-then-clip
-    /// logic `selected_text` already does, just answering "which
-    /// columns" instead of "which text".
-    pub fn covers_line(&self, line: usize, line_char_len: usize) -> Option<(usize, usize)> {
-        if line_char_len == 0 {
-            return None;
-        }
-        let (start, end) = self.normalized();
-        if line < start.0 || line > end.0 {
-            return None;
-        }
-        let from = if line == start.0 { start.1 } else { 0 };
-        let to = if line == end.0 {
-            end.1
-        } else {
-            line_char_len - 1
-        };
-        let from = from.min(line_char_len - 1);
-        let to = to.min(line_char_len - 1);
-        (from <= to).then_some((from, to))
-    }
-
     /// `anchor`/`cursor` in `(line, column)` order rather than in
     /// drag order — the same normalization every method here needs
     /// before it can clip against a span, since the user may have
@@ -354,30 +328,6 @@ mod tests {
         let mut copy = CopyState::new_at(0);
         copy.move_cursor(3, 3, &buffer, StreamFilter::All);
         assert_eq!(copy.cursor, (0, 0));
-    }
-
-    #[test]
-    fn covers_line_is_none_outside_the_span() {
-        let mut copy = CopyState::new_at(1);
-        copy.cursor = (2, 2);
-        assert_eq!(copy.covers_line(0, 5), None, "before the span");
-        assert_eq!(copy.covers_line(3, 5), None, "after the span");
-        assert_eq!(
-            copy.covers_line(1, 5),
-            Some((0, 4)),
-            "first line: to its end"
-        );
-        assert_eq!(
-            copy.covers_line(2, 5),
-            Some((0, 2)),
-            "last line: up to the end column"
-        );
-    }
-
-    #[test]
-    fn covers_line_on_an_empty_line_is_none() {
-        let copy = CopyState::new_at(0);
-        assert_eq!(copy.covers_line(0, 0), None);
     }
 
     #[test]

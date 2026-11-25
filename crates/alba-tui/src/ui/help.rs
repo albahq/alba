@@ -1,219 +1,336 @@
-//! The help overlay: a centred bordered box listing every binding the
-//! interactive modes actually implement, drawn over the rest of the body
-//! (the tree and log panes, already painted by `draw` before this runs)
-//! dimmed rather than hidden — the reader is still looking at their run,
-//! just through a reference card.
+//! The help page: `?` replaces the body with every binding of normal
+//! mode, grouped, one binding per line. The page has no divider and no
+//! beams pane; its title row reads `HELP / keyboard`, then the groups in
+//! two columns, then a muted note that copy and graph modes list their
+//! own keys in the key hints row.
 //!
-//! [`keymap_lines`] is transcribed by hand from `input.rs`'s keymap and
-//! `state.rs`'s modal handlers (`handle_search_key`, `handle_copy_key`,
-//! `handle_graph_key`) rather than generated from them, so it is only as
-//! honest as whoever last read those two files kept it — the render
-//! snapshot in `tests/render.rs` is what actually catches drift, but only
-//! for a reviewer who checks each line against the code it describes.
+//! When the body is too narrow for two columns the groups stack in one,
+//! in reading order; whatever still does not fit is cut at the bottom
+//! and the right edge, never wrapped.
 //!
-//! Copy's, Graph's, and this overlay's own closing keys are *also* what
-//! the key hints row (`ui/keys.rs`) shows for those same modes, character for
-//! character — [`COPY_KEYS`], [`GRAPH_KEYS`], and [`HELP_KEYS`] are the
-//! one place that text is spelled out, so the two screens cannot drift
-//! apart the way a hand-copied second literal eventually would.
+//! [`COPY_KEYS`], [`GRAPH_KEYS`] and [`HELP_KEYS`] are the key hints of
+//! those modes (`ui/keys.rs`), spelled out once here beside the page
+//! that sends the reader to them.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::style::Stylize;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
-/// Copy mode's keymap, shared verbatim with `ui/keys.rs`'s `line`
-/// (its `Mode::Copy` arm reads this same constant), rather than the two
-/// screens each spelling it out on their own.
+use super::theme::{ColourMode, Token, style};
+
+/// Copy mode's key hints.
 pub(super) const COPY_KEYS: &str = "hjkl/arrows move · v anchor · y copy · Esc cancel";
 
-/// Graph mode's keymap — no `hjkl` here, unlike Copy; shared verbatim
-/// with the key hints' `Mode::Graph` arm the same way `COPY_KEYS` is.
+/// Graph mode's key hints.
 pub(super) const GRAPH_KEYS: &str = "↑↓←→ move · Enter open output · Esc back";
 
-/// How to close the overlay itself, shared verbatim with the key
-/// hints' `Mode::Help` arm.
-pub(super) const HELP_KEYS: &str = "Esc or ? close";
+/// The help page's own key hints; `?` also closes it.
+pub(super) const HELP_KEYS: &str = "Esc close help";
 
-/// The full keymap, one line per group of related bindings, blank lines
-/// separating the four groups (Normal / Search / Copy / Graph) the
-/// interactive tasks built, plus this overlay's own closing keys.
-/// Phrased to match the wording the key hints row already uses for the
-/// bindings it has room to show (`ui/keys.rs`), so the
-/// overlay never contradicts what the reader has already half-learned
-/// from the corner of their eye — Copy, Graph, and Help go further and
-/// share the exact same constant (see the module doc comment).
-///
-/// A few entries are worth flagging for whoever next edits this list:
-/// - `n`/`N` are Normal-mode bindings on the *committed* search, not
-///   something typed while composing one — while a query is being typed
-///   every character, `n`/`N` included, just edits it.
-/// - `f` reruns the same as `r`, but bypassing the cache.
-/// - `t` is the way back from either: `r`/`f` retarget the session for
-///   good, so without `t` a rerun of one beam would be a one-way door.
-/// - Graph mode only answers the four arrow keys, not `hjkl` — copy mode
-///   is the one that answers both.
-/// - `Ctrl-C` fires the same in every mode (cancel if a run is in
-///   flight, else quit) — listed once, under Normal, rather than
-///   repeated in each group.
-fn keymap_lines() -> Vec<String> {
-    vec![
-        "Normal".to_string(),
-        "  q quit · r rerun · f force (bypass cache) · c cancel · w watch".to_string(),
-        "  t run the target the session was started for".to_string(),
-        "  j/k, ↑/↓ move · n next match · N previous match · G tail".to_string(),
-        "  PgUp/PgDn, Ctrl-u/Ctrl-d scroll the log pane by half a page".to_string(),
-        "  / search · v copy · g graph · ? help · Ctrl-C cancel/quit (any mode)".to_string(),
-        String::new(),
-        "Search (composing a query)".to_string(),
-        "  typing edits the query · Backspace erase · Enter commit · Esc cancel".to_string(),
-        String::new(),
-        "Copy".to_string(),
-        format!("  {COPY_KEYS}"),
-        String::new(),
-        "Graph".to_string(),
-        format!("  {GRAPH_KEYS}"),
-        String::new(),
-        "Help".to_string(),
-        format!("  {HELP_KEYS}"),
-    ]
-}
+/// A group of bindings: its title, then `(key, action)` pairs.
+type Group = (&'static str, &'static [(&'static str, &'static str)]);
 
-/// Draws the overlay into `area`, the body rectangle, dimmed and given a
-/// centred box on top.
-/// A no-op on a degenerate (zero-sized) area; `draw` only ever reaches
-/// this once the too-small-screen floor has already been cleared, but
-/// nothing here needs that guarantee to hold.
-pub fn draw(frame: &mut Frame, area: Rect, surface: Style) {
-    if area.width == 0 || area.height == 0 {
+const RUN: Group = (
+    "RUN",
+    &[
+        ("r", "rerun"),
+        ("f", "rerun without the cache"),
+        ("c", "cancel the run"),
+        ("t", "back to the session target"),
+        ("w", "start or stop watching"),
+    ],
+);
+
+const MOVE: Group = (
+    "MOVE",
+    &[
+        ("↑↓  j k", "select a beam"),
+        ("PgUp PgDn", "scroll the output"),
+        ("G", "follow the output again"),
+    ],
+);
+
+const FIND_AND_COPY: Group = (
+    "FIND AND COPY",
+    &[
+        ("/", "search the output"),
+        ("n  N", "next or previous match"),
+        ("v", "select lines to copy"),
+        ("y", "copy the selection"),
+        ("s", "show stdout, stderr or both"),
+    ],
+);
+
+const VIEWS: Group = (
+    "VIEWS",
+    &[
+        ("g", "dependency graph"),
+        ("?", "this help"),
+        ("q", "quit"),
+        ("Ctrl-C", "cancel, or quit when idle"),
+    ],
+);
+
+const NOTE: &str = "Copy and graph modes list their own keys in the footer.";
+
+/// The cells the key column takes, key and padding.
+const KEY_COLUMN: usize = 12;
+/// The groups' indent from the content column.
+const INDENT: u16 = 2;
+/// The least room between the two columns.
+const COLUMN_GAP: u16 = 3;
+/// Rows above the groups: the title row and a blank row.
+const TITLE_ROWS: u16 = 2;
+
+/// Draws the page into `body`, the frame's body rectangle.
+pub fn draw(frame: &mut Frame, body: Rect, mode: ColourMode) {
+    if body.width == 0 || body.height == 0 {
         return;
     }
-
-    // Dim what is already drawn there (the tree and log panes) rather
-    // than blanking it: the reader is consulting a reference card, not
-    // leaving the screen they were just reading.
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().add_modifier(Modifier::DIM));
-
-    let content = keymap_lines();
-    let popup = centered_box(area, box_width(&content), box_height(&content));
-    // `Clear` first: the popup's own content must read clearly against
-    // a plain background, not the dimmed characters now sitting under it.
-    frame.render_widget(Clear, popup);
-    // `Clear` resets the cells, the frame's surface included: paint it
-    // back so the box reads on the same background as the rest.
-    frame.buffer_mut().set_style(popup, surface);
-    let lines: Vec<Line> = content
-        .iter()
-        .map(|line| Line::from(line.as_str()))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" help ")),
-        popup,
+    frame.render_widget(Paragraph::new(title(mode)), Rect { height: 1, ..body });
+    if body.height <= TITLE_ROWS || body.width <= INDENT {
+        return;
+    }
+    let area = Rect::new(
+        body.x + INDENT,
+        body.y + TITLE_ROWS,
+        body.width - INDENT,
+        body.height - TITLE_ROWS,
     );
+    let left = column(&[RUN, MOVE], mode);
+    let right = column(&[FIND_AND_COPY, VIEWS], mode);
+    let note = Line::styled(NOTE, style(Token::TextMuted, mode));
+
+    // Two columns when the left one and the gap fit before the middle of
+    // the body and the right one fits after it.
+    let middle = body.width / 2;
+    let fits_two =
+        INDENT + width(&left) + COLUMN_GAP <= middle && middle + width(&right) <= body.width;
+    if fits_two {
+        let rows = left.len().max(right.len()) as u16;
+        let left_width = middle - INDENT;
+        frame.render_widget(
+            Paragraph::new(left),
+            Rect {
+                width: left_width,
+                ..area
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(right),
+            Rect::new(body.x + middle, area.y, body.width - middle, area.height),
+        );
+        if rows < area.height {
+            frame.render_widget(
+                Paragraph::new(note),
+                Rect::new(area.x, area.y + rows, area.width, 1),
+            );
+        }
+    } else {
+        let mut lines = left;
+        lines.push(Line::default());
+        lines.extend(right);
+        lines.push(note);
+        frame.render_widget(Paragraph::new(lines), area);
+    }
 }
 
-fn box_width(lines: &[String]) -> u16 {
+/// `HELP / keyboard`: the head bold, the slash in `line`, the page name
+/// muted.
+fn title(mode: ColourMode) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("HELP", style(Token::Text, mode).bold()),
+        Span::styled(" / ", style(Token::Line, mode)),
+        Span::styled("keyboard", style(Token::TextMuted, mode)),
+    ])
+}
+
+/// `groups` one under the other, a blank line between two: the title
+/// muted bold, then one line per binding, the key in `accent` bold in a
+/// 12-cell column and the action in `text`.
+fn column(groups: &[Group], mode: ColourMode) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (index, (title, bindings)) in groups.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(*title, style(Token::TextMuted, mode).bold()));
+        for (key, action) in *bindings {
+            let pad = KEY_COLUMN.saturating_sub(key.width());
+            lines.push(Line::from(vec![
+                Span::styled(*key, style(Token::Accent, mode).bold()),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(*action, style(Token::Text, mode)),
+            ]));
+        }
+    }
     lines
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0) as u16
-        + 4
 }
 
-fn box_height(lines: &[String]) -> u16 {
-    lines.len() as u16 + 2
-}
-
-/// `width`x`height` centred inside `area`, clamped to `area`'s own
-/// bounds — a body too small to hold the box at its natural size gets
-/// the box shrunk to fit rather than a rectangle asked for outside
-/// `area`; `ratatui`'s own `Paragraph` then clips whatever content no
-/// longer fits, the same way `ui/graphpane.rs`'s node labels clip
-/// against a layer wider than the terminal.
-fn centered_box(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    let x = area.x + (area.width - width) / 2;
-    let y = area.y + (area.height - height) / 2;
-    Rect::new(x, y, width, height)
+fn width(lines: &[Line]) -> u16 {
+    lines.iter().map(Line::width).max().unwrap_or(0) as u16
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::state::{AppState, Mode};
+    use alba_core::BeamId;
+    use alba_engine::RunEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::{Color, Modifier};
+    use std::time::Instant;
 
-    fn draw_at(width: u16, height: u16) -> String {
+    const ACCENT: Color = Color::Rgb(0xF3, 0xC2, 0x80);
+    const MUTED: Color = Color::Rgb(0xA1, 0xA7, 0xA4);
+    const TEXT: Color = Color::Rgb(0xE3, 0xE4, 0xDC);
+
+    fn helping() -> AppState {
+        let mut state =
+            AppState::new("build", false).with_colour(super::super::theme::ColourMode::TrueColour);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![BeamId("build".to_string())],
+                affected_by: None,
+                beams: vec![BeamId("build".to_string())],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            Instant::now(),
+        );
+        state.enter_help();
+        assert_eq!(state.mode, Mode::Help);
+        state
+    }
+
+    fn drawn(state: &AppState, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(frame, frame.area(), Style::default()))
+            .draw(|frame| super::super::draw(frame, state, Instant::now()))
             .unwrap();
-        terminal.backend().to_string()
+        terminal.backend().buffer().clone()
     }
 
-    /// The box centres with room to spare in a generously sized body,
-    /// and every group's own line is on screen.
+    fn row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    fn screen(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| row(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The column of `needle` on row `y`, in cells.
+    fn column(buffer: &Buffer, y: u16, needle: &str) -> Option<u16> {
+        (0..buffer.area.width).find(|&x| {
+            let rest: String = (x..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            rest.starts_with(needle)
+        })
+    }
+
+    const BINDINGS: [(&str, &str); 17] = [
+        ("r", "rerun"),
+        ("f", "rerun without the cache"),
+        ("c", "cancel the run"),
+        ("t", "back to the session target"),
+        ("w", "start or stop watching"),
+        ("↑↓  j k", "select a beam"),
+        ("PgUp PgDn", "scroll the output"),
+        ("G", "follow the output again"),
+        ("/", "search the output"),
+        ("n  N", "next or previous match"),
+        ("v", "select lines to copy"),
+        ("y", "copy the selection"),
+        ("s", "show stdout, stderr or both"),
+        ("g", "dependency graph"),
+        ("?", "this help"),
+        ("q", "quit"),
+        ("Ctrl-C", "cancel, or quit when idle"),
+    ];
+
+    /// Wide enough for two columns: every binding is one line, key in a
+    /// 12-cell column (accent bold), action in `text`; the page replaces
+    /// the body, so there is no beams pane, divider or junction.
     #[test]
-    fn the_box_centres_and_shows_every_group() {
-        let rendered = draw_at(80, 22);
-        for group in ["Normal", "Search", "Copy", "Graph"] {
-            assert!(rendered.contains(group), "missing group {group:?}");
+    fn the_help_page_lists_every_binding_once() {
+        let buffer = drawn(&helping(), 100, 24);
+        let page = screen(&buffer);
+        assert!(row(&buffer, 5).starts_with("  HELP / keyboard"), "{page}");
+        assert_eq!(buffer[(2, 5)].fg, TEXT);
+        assert!(buffer[(2, 5)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(9, 5)].fg, MUTED, "the page name");
+        for (key, action) in BINDINGS {
+            let entry = format!("{key}{}{action}", " ".repeat(12 - key.chars().count()));
+            assert_eq!(page.matches(&entry).count(), 1, "{entry:?} once in\n{page}");
+            let y = (5..19).find(|&y| row(&buffer, y).contains(&entry)).unwrap();
+            let x = column(&buffer, y, &entry).unwrap();
+            assert_eq!(buffer[(x, y)].fg, ACCENT, "{key:?}");
+            assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "{key:?}");
+            assert_eq!(buffer[(x + 12, y)].fg, TEXT, "{action:?}");
         }
-        assert!(rendered.contains("help"));
+        // Two columns: RUN and FIND AND COPY open on the same row.
+        let groups = row(&buffer, 7);
+        assert!(
+            groups.contains("RUN") && groups.contains("FIND AND COPY"),
+            "{page}"
+        );
+        let x = column(&buffer, 7, "RUN").unwrap();
+        assert_eq!(x, 4);
+        assert_eq!(buffer[(x, 7)].fg, MUTED);
+        assert!(buffer[(x, 7)].modifier.contains(Modifier::BOLD));
+        assert!(row(&buffer, 14).contains("MOVE") && row(&buffer, 14).contains("VIEWS"));
+        let last = "Copy and graph modes list their own keys in the footer.";
+        let y = (5..21)
+            .find(|&y| row(&buffer, y).contains(last))
+            .expect(&page);
+        assert_eq!(y, 19, "under the taller column\n{page}");
+        assert_eq!(buffer[(column(&buffer, y, last).unwrap(), y)].fg, MUTED);
+        assert_eq!(
+            row(&buffer, 4),
+            format!(" {} ", "─".repeat(98)),
+            "no junction"
+        );
+        assert_eq!(
+            row(&buffer, 21),
+            format!(" {} ", "─".repeat(98)),
+            "no junction"
+        );
+        assert!(!page.contains('│') && !page.contains("BEAMS"), "{page}");
+        assert!(row(&buffer, 22).starts_with("  Esc close help"));
     }
 
-    /// A body too small to hold the box at its natural size must not
-    /// panic — `centered_box` shrinks to fit instead of asking `ratatui`
-    /// to draw outside `area`.
+    /// Too narrow for two columns: the groups stack in one column, in
+    /// reading order, and whatever does not fit is cut at the bottom.
     #[test]
-    fn a_body_too_small_for_the_box_does_not_panic() {
-        let rendered = draw_at(10, 4);
-        assert!(!rendered.trim().is_empty());
-    }
+    fn a_narrow_page_stacks_the_groups_then_cuts() {
+        let buffer = drawn(&helping(), 80, 30);
+        let page = screen(&buffer);
+        let rows: Vec<u16> = ["RUN", "MOVE", "FIND AND COPY", "VIEWS"]
+            .iter()
+            .map(|title| {
+                (5..27)
+                    .find(|&y| row(&buffer, y).trim() == *title)
+                    .unwrap_or_else(|| panic!("{title} alone on a row\n{page}"))
+            })
+            .collect();
+        assert!(rows.windows(2).all(|pair| pair[0] < pair[1]), "{page}");
 
-    /// A degenerate, zero-sized body draws nothing rather than dividing
-    /// by (or subtracting into) a size that was never there. A
-    /// `TestBackend` itself cannot be zero-sized (`ratatui` panics
-    /// constructing one), so this drives `draw` at a real terminal's
-    /// zero-sized *sub*-rectangle instead — the only way this area can
-    /// actually arise, since `ui::draw` never calls here below its own
-    /// too-small-screen floor.
-    #[test]
-    fn a_zero_sized_body_does_not_panic() {
-        let mut terminal = Terminal::new(TestBackend::new(10, 10)).unwrap();
-        terminal
-            .draw(|frame| draw(frame, Rect::new(0, 0, 0, 0), Style::default()))
-            .unwrap();
-    }
-
-    /// The box never exceeds the area it is asked to centre inside,
-    /// whatever its natural size would otherwise be.
-    #[test]
-    fn centered_box_never_exceeds_the_area() {
-        let area = Rect::new(0, 0, 6, 3);
-        let lines = keymap_lines();
-        let popup = centered_box(area, box_width(&lines), box_height(&lines));
-        assert!(popup.width <= area.width);
-        assert!(popup.height <= area.height);
-    }
-
-    /// `keymap_lines` must build its Copy/Graph/Help entries from
-    /// `COPY_KEYS`/`GRAPH_KEYS`/`HELP_KEYS`, not a hand-copied literal of
-    /// its own: `ui/keys.rs`'s own covering test
-    /// (`copy_graph_and_help_rows_come_from_the_shared_constants`)
-    /// checks the same constants from the key hints' side; between the
-    /// two, neither file can silently drift from the other without one
-    /// of these breaking.
-    #[test]
-    fn keymap_lines_build_copy_graph_and_help_from_the_shared_constants() {
-        let lines = keymap_lines();
-        assert!(lines.contains(&format!("  {COPY_KEYS}")));
-        assert!(lines.contains(&format!("  {GRAPH_KEYS}")));
-        assert!(lines.contains(&format!("  {HELP_KEYS}")));
+        for (width, height) in [(40, 12), (40, 24), (60, 12), (85, 16)] {
+            let small = drawn(&helping(), width, height);
+            let page = screen(&small);
+            assert!(row(&small, 5).contains("HELP / keyboard"), "{page}");
+            assert!(row(&small, 7).contains("RUN"), "{page}");
+            assert!(row(&small, height - 2).contains("Esc close help"), "{page}");
+        }
     }
 }

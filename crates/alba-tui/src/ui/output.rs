@@ -203,17 +203,22 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     };
     let filter = state.effective_filter();
     let (height, width) = (parts.text.height as usize, parts.text.width as usize);
-    // The query that should still be marked in the pane: the one being
-    // typed while search is active, or the last completed one, kept
-    // highlighted until a new search session replaces it (see
-    // `AppState::last_search`).
-    let query = match &state.mode {
-        Mode::Search(search) => Some(search.query.as_str()),
+    // The search whose matches are marked: the one being typed, or the
+    // last committed one while its own beam is on screen (see
+    // `AppState::last_search`), the same rule `pane_state` counts by.
+    let key = state.displayed_log_key();
+    let search = match &state.mode {
+        Mode::Search(search) => Some(search),
         _ => state
             .last_search
             .as_ref()
-            .map(|committed| committed.search.query.as_str()),
+            .filter(|committed| committed.beam == key)
+            .map(|committed| &committed.search),
     };
+    let marks = search.map(|search| Marks {
+        query: &search.query,
+        current: search.current_line(),
+    });
     let rows = buffer.view(height, width, filter);
     let gutter: Vec<Line> = rows
         .iter()
@@ -223,10 +228,23 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         .iter()
         .map(|row| {
             let line = full_line(buffer, row.line);
-            let text = styled_line(row, buffer, &state.mode, query, mode);
+            let text = styled_line(row, buffer, &state.mode, marks, mode);
             decorated(row, line, text, width, mode)
         })
         .collect();
+    // Copy mode's selected lines are painted first, from the text column
+    // to the pane's edge, so the text, the cursor cell and the scrollbar
+    // drawn next keep the background.
+    if let Mode::Copy(copy) = &state.mode {
+        let selected = copy.anchor.0.min(copy.cursor.0)..=copy.anchor.0.max(copy.cursor.0);
+        for (index, row) in rows.iter().enumerate() {
+            if row.line.is_some_and(|line| selected.contains(&line)) {
+                let y = parts.text.y + index as u16;
+                let edge = Rect::new(parts.text.x, y, parts.text.width + parts.rail.width, 1);
+                frame.buffer_mut().set_style(edge, selection_style(mode));
+            }
+        }
+    }
     frame.render_widget(Paragraph::new(gutter), parts.gutter);
     frame.render_widget(Paragraph::new(lines), parts.text);
 
@@ -459,32 +477,70 @@ fn within(row: &Row, from: usize, to: usize) -> Option<(usize, usize)> {
     Some((from.max(start) - start, to.min(end - 1) - start))
 }
 
-/// The style a single rendered row gets: copy mode's selection highlight
-/// when the row's own buffer-absolute line (`row.line`, `None` for the
-/// truncation marker) falls inside the selection's covered span
-/// (`covers_line`), the committed search's highlight otherwise. Copy
-/// mode takes priority on whichever rows it covers: the two are not
-/// meant to be shown blended. Both spans are computed over the whole
-/// logical line (`full_line`) and clipped to this row by `within`, so a
-/// match or a selection that crosses a wrap boundary still lights up
-/// correctly on each of the rows it spans.
+/// A search to mark in the pane: its query, and the line of its
+/// current match. `matches` holds lines, and `match i/n` counts them, so
+/// every occurrence on the current line is drawn as the current match.
+#[derive(Debug, Clone, Copy)]
+struct Marks<'a> {
+    query: &'a str,
+    current: Option<usize>,
+}
+
+/// The background of copy mode's selected lines: `selection`, reversed
+/// in monochrome.
+fn selection_style(mode: ColourMode) -> Style {
+    match mode {
+        ColourMode::Monochrome => Style::new().reversed(),
+        _ => fill(Token::Selection, mode),
+    }
+}
+
+/// The cursor cell in copy mode: `on-accent` on `accent`; in
+/// monochrome, the one cell of its reversed row not reversed, and bold.
+fn copy_cursor_style(mode: ColourMode) -> Style {
+    match mode {
+        ColourMode::Monochrome => Style::new().not_reversed().bold(),
+        _ => fill(Token::Accent, mode).patch(style(Token::OnAccent, mode)),
+    }
+}
+
+/// The current search match: `on-accent` bold on `accent`; reversed
+/// bold in monochrome.
+fn current_match_style(mode: ColourMode) -> Style {
+    match mode {
+        ColourMode::Monochrome => Style::new().reversed().bold(),
+        _ => fill(Token::Accent, mode)
+            .patch(style(Token::OnAccent, mode))
+            .bold(),
+    }
+}
+
+/// Any other search match: the `selection` background under the text's
+/// own colour; bold in monochrome, where there is no background and
+/// reversed already marks the current match.
+fn other_match_style(mode: ColourMode) -> Style {
+    match mode {
+        ColourMode::Monochrome => Style::new().bold(),
+        _ => fill(Token::Selection, mode),
+    }
+}
+
+/// A rendered row's text, styled. In copy mode a row of a selected line
+/// is drawn in `text` (its background is painted by `draw`), the cursor
+/// cell on `accent`; otherwise the search's matches are marked. Copy
+/// mode takes priority: the two are not shown blended.
 ///
-/// Starts from the row's own spans, carrying whatever colour ANSI
-/// parsing already gave the line, and patches a reversed style over
-/// the covered or matched range on top, so a search hit inside a
-/// coloured `error` stays red as well as reversed.
-///
-/// Pulled out of `draw` so this composition can be tested directly over
-/// the styled spans it produces. `draw` itself is only ever exercised
-/// through `TestBackend::to_string()` in the snapshot tests, which drops
-/// styles entirely and so cannot tell a covered, dimmed, or coloured row
-/// from a plain one; an off-by-one in this wiring would pass every
-/// existing snapshot silently.
+/// Starts from the row's own spans, carrying the colour ANSI parsing
+/// gave the line, and patches the highlight over the covered range, so
+/// a match inside a coloured `error` keeps its red on `selection`.
+/// Matches and the cursor are found over the whole logical line
+/// (`full_line`) and clipped to this row by `within`, so one that
+/// crosses a wrap boundary lights up on each row it spans.
 fn styled_line(
     row: &Row,
     buffer: &LogBuffer,
     mode: &Mode,
-    query: Option<&str>,
+    marks: Option<Marks>,
     colour: ColourMode,
 ) -> Line<'static> {
     let line_ref = full_line(buffer, row.line);
@@ -505,22 +561,57 @@ fn styled_line(
     }
     let full_text = line_ref.map(|line| line.text.as_str()).unwrap_or(&row.text);
 
-    if let (Mode::Copy(selection), Some(line)) = (mode, row.line) {
-        let covered = selection
-            .covers_line(line, full_text.chars().count())
-            .and_then(|(from, to)| within(row, from, to));
-        if let Some((from, to)) = covered {
-            return Line::from(patch(spans, from, to, Style::new().reversed()));
+    if let (Mode::Copy(copy), Some(line)) = (mode, row.line) {
+        let first = copy.anchor.0.min(copy.cursor.0);
+        let last = copy.anchor.0.max(copy.cursor.0);
+        if (first..=last).contains(&line) {
+            let text = style(Token::Text, colour);
+            spans = spans
+                .into_iter()
+                .map(|span| {
+                    let style = span.style.patch(text);
+                    span.style(style)
+                })
+                .collect();
+            if line == copy.cursor.0 {
+                spans = with_cursor(spans, row, copy.cursor.1, colour);
+            }
+            return Line::from(spans);
         }
     }
-    if let Some(query) = query.filter(|query| !query.is_empty()) {
-        for (from, to) in match_ranges(full_text, query) {
+    if let Some(marks) = marks.filter(|marks| !marks.query.is_empty()) {
+        let highlight = if row.line.is_some() && row.line == marks.current {
+            current_match_style(colour)
+        } else {
+            other_match_style(colour)
+        };
+        for (from, to) in match_ranges(full_text, marks.query) {
             if let Some((from, to)) = within(row, from, to) {
-                spans = patch(spans, from, to, Style::new().reversed());
+                spans = patch(spans, from, to, highlight);
             }
         }
     }
     Line::from(spans)
+}
+
+/// `spans` with the copy cursor's cell at `column` of the line, when
+/// that column is on this row. An empty line has no character to mark:
+/// its one row gets a blank cursor cell instead.
+fn with_cursor(
+    spans: Vec<Span<'static>>,
+    row: &Row,
+    column: usize,
+    colour: ColourMode,
+) -> Vec<Span<'static>> {
+    if row.chars.is_empty() && row.chars.start == 0 {
+        let mut spans = spans;
+        spans.push(Span::styled(" ", copy_cursor_style(colour)));
+        return spans;
+    }
+    match within(row, column, column) {
+        Some((from, to)) => patch(spans, from, to, copy_cursor_style(colour)),
+        None => spans,
+    }
 }
 
 /// Every case-insensitive occurrence of `query` in `text`, as inclusive
@@ -857,6 +948,166 @@ mod tests {
         assert!(title_row(&state).ends_with("end of output"));
     }
 
+    const ON_ACCENT: Color = Color::Rgb(0x24, 0x22, 0x1E);
+    const TEXT_FG: Color = Color::Rgb(0xE3, 0xE4, 0xDC);
+    const SURFACE: Color = Color::Rgb(0x15, 0x17, 0x19);
+
+    fn searching(state: &mut AppState, query: &str) {
+        let mut search = SearchState::new();
+        search.query = query.to_string();
+        search.update(&state.logs["test"], StreamFilter::All);
+        state.mode = Mode::Search(search);
+    }
+
+    /// The current match is `on-accent` bold on `accent`; every other
+    /// match only gets the `selection` background, its colour kept.
+    #[test]
+    fn the_current_match_stands_out() {
+        let mut state = started("test");
+        write(&mut state, Stream::Stdout, "alpha err");
+        write(&mut state, Stream::Stdout, "beta");
+        write(&mut state, Stream::Stdout, "\u{1b}[31merr\u{1b}[0m gamma");
+        searching(&mut state, "err");
+        let buffer = drawn(&state, 80, 24);
+        for x in TEXT + 6..TEXT + 9 {
+            assert_eq!(buffer[(x, FIRST)].bg, ACCENT, "current, column {x}");
+            assert_eq!(buffer[(x, FIRST)].fg, ON_ACCENT);
+            assert!(buffer[(x, FIRST)].modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buffer[(TEXT + 5, FIRST)].bg, SURFACE, "before the match");
+        for x in TEXT..TEXT + 3 {
+            assert_eq!(buffer[(x, FIRST + 2)].bg, SELECTION, "other, column {x}");
+            assert_eq!(buffer[(x, FIRST + 2)].fg, ERROR, "its colour kept");
+            assert!(!buffer[(x, FIRST + 2)].modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buffer[(TEXT + 3, FIRST + 2)].bg, SURFACE, "after the match");
+
+        if let Mode::Search(search) = &mut state.mode {
+            search.next();
+        }
+        let buffer = drawn(&state, 80, 24);
+        assert_eq!(buffer[(TEXT + 6, FIRST)].bg, SELECTION);
+        assert_eq!(buffer[(TEXT, FIRST + 2)].bg, ACCENT);
+        assert_eq!(buffer[(TEXT, FIRST + 2)].fg, ON_ACCENT);
+    }
+
+    /// Monochrome has no background: the current match is reversed
+    /// bold, the others bold only.
+    #[test]
+    fn monochrome_matches_fall_back_to_attributes() {
+        let mut state = started("test").with_colour(ColourMode::Monochrome);
+        write(&mut state, Stream::Stdout, "err one");
+        write(&mut state, Stream::Stdout, "err two");
+        searching(&mut state, "err");
+        let buffer = drawn(&state, 80, 24);
+        let current = buffer[(TEXT, FIRST)].modifier;
+        assert!(current.contains(Modifier::REVERSED | Modifier::BOLD));
+        let other = buffer[(TEXT, FIRST + 1)].modifier;
+        assert!(other.contains(Modifier::BOLD) && !other.contains(Modifier::REVERSED));
+        assert!(buffer[(TEXT + 4, FIRST)].modifier.is_empty());
+    }
+
+    /// A search committed on one beam marks that beam's output only.
+    #[test]
+    fn a_committed_search_marks_only_its_own_beam() {
+        let mut state = AppState::new("test", false).with_colour(ColourMode::TrueColour);
+        let now = Instant::now();
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![id("test")],
+                affected_by: None,
+                beams: vec![id("test"), id("lint")],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            now,
+        );
+        for beam in ["test", "lint"] {
+            state.apply(&RunEvent::BeamStarted { id: id(beam) }, now);
+            state.apply(
+                &RunEvent::BeamOutput {
+                    id: id(beam),
+                    line: OutputLine {
+                        stream: Stream::Stdout,
+                        text: "err here".to_string(),
+                    },
+                    replayed: false,
+                },
+                now,
+            );
+        }
+        let mut search = SearchState::new();
+        search.query = "err".to_string();
+        search.update(&state.logs["test"], StreamFilter::All);
+        state.last_search = Some(crate::state::CommittedSearch {
+            beam: "test".to_string(),
+            search,
+        });
+        let index = |state: &AppState, name: &str| {
+            state
+                .beams
+                .iter()
+                .position(|row| row.id.as_str() == name)
+                .unwrap()
+        };
+        state.select(index(&state, "test"));
+        assert_eq!(state.displayed_log_key(), "test");
+        assert_eq!(drawn(&state, 80, 24)[(TEXT, FIRST)].bg, ACCENT);
+
+        state.select(index(&state, "lint"));
+        assert_eq!(state.displayed_log_key(), "lint");
+        let buffer = drawn(&state, 80, 24);
+        assert_eq!(text(&buffer, FIRST, TEXT..TEXT + 8), "err here");
+        for x in TEXT..TEXT + 3 {
+            assert_eq!(buffer[(x, FIRST)].bg, SURFACE, "column {x}");
+            assert!(buffer[(x, FIRST)].modifier.is_empty(), "column {x}");
+        }
+    }
+
+    /// Copy mode: the title counts the selected lines; those lines are
+    /// on `selection` from the text column to the pane's edge, text in
+    /// `text`, the cursor cell on `accent`; the stderr marker stays.
+    #[test]
+    fn the_copy_title_counts_selected_lines() {
+        let mut state = started("test");
+        write(&mut state, Stream::Stdout, "alpha");
+        write(&mut state, Stream::Stderr, "\u{1b}[31mbravo\u{1b}[0m");
+        write(&mut state, Stream::Stdout, "charlie");
+        write(&mut state, Stream::Stdout, "");
+        let mut copy = CopyState::new_at(1);
+        copy.cursor = (2, 2);
+        state.mode = Mode::Copy(copy);
+        assert!(title_row(&state).ends_with("COPY · 2 lines"));
+        let buffer = drawn(&state, 80, 24);
+        for y in [FIRST + 1, FIRST + 2] {
+            for x in TEXT..=RAIL {
+                if (x, y) != (TEXT + 2, FIRST + 2) {
+                    assert_eq!(buffer[(x, y)].bg, SELECTION, "({x}, {y})");
+                }
+            }
+            assert_eq!(buffer[(TEXT, y)].fg, TEXT_FG, "row {y}");
+        }
+        assert_eq!(buffer[(GUTTER, FIRST + 1)].symbol(), "▎");
+        assert_eq!(buffer[(GUTTER, FIRST + 1)].fg, LINE);
+        assert_eq!(buffer[(GUTTER, FIRST + 1)].bg, SURFACE);
+        assert_eq!(buffer[(TEXT + 2, FIRST + 2)].bg, ACCENT, "the cursor cell");
+        assert_eq!(buffer[(TEXT + 2, FIRST + 2)].fg, ON_ACCENT);
+        assert_eq!(buffer[(TEXT + 3, FIRST + 2)].bg, SELECTION);
+        for y in [FIRST, FIRST + 3] {
+            assert_eq!(buffer[(TEXT, y)].bg, SURFACE, "row {y}");
+            assert_eq!(buffer[(RAIL, y)].bg, SURFACE, "row {y}");
+        }
+
+        // A cursor on an empty line still shows its cell.
+        let mut copy = CopyState::new_at(3);
+        copy.cursor = (3, 0);
+        state.mode = Mode::Copy(copy);
+        assert!(title_row(&state).ends_with("COPY · 1 line"));
+        let buffer = drawn(&state, 80, 24);
+        assert_eq!(buffer[(TEXT, FIRST + 3)].bg, ACCENT);
+        assert_eq!(buffer[(TEXT + 1, FIRST + 3)].bg, SELECTION);
+    }
+
     /// Before the first run there is no beam whose output is followed,
     /// so the title says nothing about following.
     #[test]
@@ -1009,52 +1260,32 @@ mod tests {
             "following: the thumb at the end"
         );
     }
-    /// The composition `draw` actually relies on: each row already
-    /// names its own buffer-absolute line (`row.line`), and
-    /// `covers_line` decides whether the selection covers it. An
-    /// off-by-one in either step would not fail `TestBackend`'s
-    /// snapshot at all (styles are dropped), so this asserts on the
-    /// styled spans row by row instead.
+    /// In monochrome a selected line is reversed by `draw`; its text
+    /// keeps no colour of its own and the cursor cell is the one cell
+    /// left unreversed, in bold. Lines outside the selection stay plain.
     #[test]
-    fn draw_marks_only_the_rows_the_selection_actually_covers() {
-        let mut buffer = LogBuffer::new();
+    fn a_monochrome_selection_marks_its_lines_and_the_cursor() {
+        let mut state = started("test").with_colour(ColourMode::Monochrome);
         for text in ["alpha", "bravo", "charlie", "delta"] {
-            buffer.push_output(text, Stream::Stdout, false);
+            write(&mut state, Stream::Stdout, text);
         }
-        // A span from bravo's own start to charlie's third character,
-        // inclusive — the same shape `CopyState::selected_text` uses.
         let mut copy = CopyState::new_at(1);
         copy.cursor = (2, 2);
-        let mode = Mode::Copy(copy);
-        let body_height = 4; // all four lines fit: row index == line index
-
-        let rows: Vec<Line> = buffer
-            .view(body_height, 80, crate::logs::StreamFilter::All)
-            .iter()
-            .map(|row| styled_line(row, &buffer, &mode, None, ColourMode::Monochrome))
-            .collect();
-
-        assert_eq!(rows[0], Line::from("alpha"), "before the span: unstyled");
-        assert_eq!(
-            rows[1],
-            Line::from(vec![Span::styled("bravo", Style::new().reversed())]),
-            "the span's first row, covered whole"
-        );
-        assert_eq!(
-            rows[2],
-            Line::from(vec![
-                Span::styled("cha", Style::new().reversed()),
-                Span::raw("rlie"),
-            ]),
-            "the span's last row, up to its own end column"
-        );
-        assert_eq!(rows[3], Line::from("delta"), "after the span: unstyled");
+        state.mode = Mode::Copy(copy);
+        let buffer = drawn(&state, 80, 24);
+        for y in [FIRST + 1, FIRST + 2] {
+            assert!(buffer[(TEXT, y)].modifier.contains(Modifier::REVERSED));
+            assert!(buffer[(RAIL, y)].modifier.contains(Modifier::REVERSED));
+        }
+        let cursor = buffer[(TEXT + 2, FIRST + 2)].modifier;
+        assert!(cursor.contains(Modifier::BOLD) && !cursor.contains(Modifier::REVERSED));
+        for y in [FIRST, FIRST + 3] {
+            assert!(buffer[(TEXT, y)].modifier.is_empty(), "row {y}");
+        }
     }
 
-    /// Outside copy mode, the same composition falls through to the
-    /// search highlight — checked here so `styled_line`'s two paths
-    /// (copy vs. query) are both exercised through the one function
-    /// `draw` actually calls.
+    /// Outside copy mode, `styled_line` marks a search's matches; a row
+    /// of no line (the truncation marker) is never the current match.
     #[test]
     fn styled_line_falls_back_to_the_query_highlight_outside_copy_mode() {
         let row = Row {
@@ -1065,18 +1296,22 @@ mod tests {
             text: "Compiling api".to_string(),
         };
         let buffer = LogBuffer::new();
+        let marks = Marks {
+            query: "api",
+            current: None,
+        };
         let line = styled_line(
             &row,
             &buffer,
             &Mode::Normal,
-            Some("api"),
+            Some(marks),
             ColourMode::Monochrome,
         );
         assert_eq!(
             line,
             Line::from(vec![
                 Span::raw("Compiling "),
-                Span::styled("api", Style::new().reversed()),
+                Span::styled("api", Style::new().bold()),
             ])
         );
     }
