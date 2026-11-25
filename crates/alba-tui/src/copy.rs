@@ -88,10 +88,10 @@ impl CopyState {
 
     /// What of `line` (`len` characters long) `selected_text` copies,
     /// so the drawing can mark exactly that: nothing outside the span;
-    /// the whole line, its line break included, when the span runs
-    /// through it from its first character to its last on a span of
-    /// several lines; otherwise the inclusive character range it takes.
-    /// A single-line span is always its own range.
+    /// the whole line when, on a span of several lines, the span runs
+    /// through it from its first character to its last (an empty line
+    /// inside the span included); otherwise the inclusive character
+    /// range it takes. A single-line span is always its own range.
     pub fn coverage(&self, line: usize, len: usize) -> Coverage {
         let (start, end) = self.normalized();
         if line < start.0 || line > end.0 {

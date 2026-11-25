@@ -516,11 +516,12 @@ fn current_match_style(mode: ColourMode) -> Style {
 }
 
 /// Any other search match: the `selection` background under the text's
-/// own colour; bold in monochrome, where there is no background and
-/// reversed already marks the current match.
+/// own colour; underlined in monochrome, where there is no background,
+/// reversed already marks the current match and bold would not show on
+/// lines already bold (the command echo, error notices, end lines).
 fn other_match_style(mode: ColourMode) -> Style {
     match mode {
-        ColourMode::Monochrome => Style::new().bold(),
+        ColourMode::Monochrome => Style::new().underlined(),
         _ => fill(Token::Selection, mode),
     }
 }
@@ -567,12 +568,15 @@ fn styled_line(
         let coverage = copy_coverage(copy, buffer, row);
         match coverage {
             Coverage::Outside => {}
-            // The row's background is painted by `draw`.
+            // `draw` paints the rest of the row up to the pane's edge;
+            // the selection also goes over the text, so a command's own
+            // background does not hide it.
             Coverage::Whole => {
+                let selected = selection_style(colour).patch(text);
                 spans = spans
                     .into_iter()
                     .map(|span| {
-                        let style = span.style.patch(text);
+                        let style = span.style.patch(selected);
                         span.style(style)
                     })
                     .collect();
@@ -1013,7 +1017,7 @@ mod tests {
     }
 
     /// Monochrome has no background: the current match is reversed
-    /// bold, the others bold only.
+    /// bold, the others underlined, which still shows on a bold line.
     #[test]
     fn monochrome_matches_fall_back_to_attributes() {
         let mut state = started("test").with_colour(ColourMode::Monochrome);
@@ -1024,7 +1028,7 @@ mod tests {
         let current = buffer[(TEXT, FIRST)].modifier;
         assert!(current.contains(Modifier::REVERSED | Modifier::BOLD));
         let other = buffer[(TEXT, FIRST + 1)].modifier;
-        assert!(other.contains(Modifier::BOLD) && !other.contains(Modifier::REVERSED));
+        assert_eq!(other, Modifier::UNDERLINED);
         assert!(buffer[(TEXT + 4, FIRST)].modifier.is_empty());
     }
 
@@ -1173,6 +1177,22 @@ mod tests {
         assert_eq!(copied, "pha\nbravo\nchar");
         let seen = highlighted(&buffer, FIRST..=FIRST + 3);
         assert_eq!(seen.join("\n").trim_end_matches('\n'), copied);
+    }
+
+    /// A command's own background does not hide the selection on a line
+    /// copied whole, as it does not on a partly copied one.
+    #[test]
+    fn a_whole_copied_line_overrides_the_command_background() {
+        let mut state = started("test");
+        write(&mut state, Stream::Stdout, "\u{1b}[41mred\u{1b}[0m");
+        write(&mut state, Stream::Stdout, "\u{1b}[41mred\u{1b}[0m");
+        let mut copy = CopyState::new_at(0);
+        copy.cursor = (1, 1);
+        state.mode = Mode::Copy(copy);
+        let buffer = drawn(&state, 80, 24);
+        assert_eq!(buffer[(TEXT, FIRST)].bg, SELECTION, "the whole line");
+        assert_eq!(buffer[(TEXT + 2, FIRST)].bg, SELECTION, "the whole line");
+        assert_eq!(buffer[(TEXT, FIRST + 1)].bg, SELECTION, "the copied part");
     }
 
     /// A single line wrapped over two rows: the selection follows the
@@ -1406,7 +1426,7 @@ mod tests {
             line,
             Line::from(vec![
                 Span::raw("Compiling "),
-                Span::styled("api", Style::new().bold()),
+                Span::styled("api", Style::new().underlined()),
             ])
         );
     }
