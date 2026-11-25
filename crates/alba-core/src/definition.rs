@@ -74,12 +74,17 @@ fn as_written(source: &str, span: Span) -> String {
 /// `path` with `/` between its components on every platform, so the
 /// location reads the same everywhere.
 fn slash_separated(path: &Path) -> String {
-    let mut parts = Vec::new();
+    let mut out = String::new();
     for component in path.components() {
         match component {
-            Component::RootDir => parts.push(String::new()),
-            other => parts.push(other.as_os_str().to_string_lossy().into_owned()),
+            Component::RootDir => out.push('/'),
+            other => {
+                if !out.is_empty() && !out.ends_with('/') {
+                    out.push('/');
+                }
+                out.push_str(&other.as_os_str().to_string_lossy());
+            }
         }
     }
-    parts.join("/")
+    out
 }

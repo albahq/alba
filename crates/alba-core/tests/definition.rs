@@ -115,3 +115,17 @@ fn a_source_outside_the_root_keeps_its_full_path() {
     let expected = format!("{}:1", dir.path().join("Beamfile").display());
     assert_eq!(defs[&id("a")].location, expected);
 }
+
+#[test]
+fn an_absolute_path_outside_the_root_has_a_single_leading_slash() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(dir.path().join("Beamfile"), "beam a { run \"echo a\" }\n");
+    let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    let defs = definitions(&project, &sources, elsewhere.path());
+
+    let location = &defs[&id("a")].location;
+    assert!(location.starts_with('/') && !location.starts_with("//"));
+    assert!(location.ends_with("/Beamfile:1"));
+}
