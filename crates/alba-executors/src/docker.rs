@@ -26,7 +26,8 @@ use tokio::process::Command;
 use crate::container::{self, STOP_GRACE, container_name, run_quiet, spawn_error};
 use crate::shell::stream_lines;
 use crate::{
-    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor, Stream,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession,
+    Executor, Stream,
 };
 
 /// What the docker executor needs from the host, finishing the message of a
@@ -91,6 +92,32 @@ const HOST_USER: &str = "host";
 
 #[async_trait::async_trait]
 impl Executor for DockerExecutor {
+    /// A built beam runs on what its Dockerfile describes, an image beam on
+    /// the image its tag points at now: the Dockerfile's content hash, or
+    /// the image's id. The build context beyond the Dockerfile is not
+    /// read; a beam that depends on it declares it in `inputs`.
+    async fn identity(&self, beam: &BeamIdentity) -> Result<Option<String>, ExecError> {
+        let config: DockerConfig =
+            serde_json::from_value(beam.options.clone()).map_err(|error| ExecError {
+                message: format!("invalid docker options: {error}"),
+            })?;
+        match (&config.build, &config.image) {
+            (Some(context), _) => {
+                let dockerfile = beam
+                    .dir
+                    .join(context)
+                    .join(config.dockerfile.as_deref().unwrap_or("Dockerfile"));
+                let hash = container::content_hash(&dockerfile, "the Dockerfile").await?;
+                Ok(Some(format!("dockerfile:{hash}")))
+            }
+            (None, Some(image)) => {
+                let id = container::image_id(image, DOCKER_REQUIREMENT).await?;
+                Ok(Some(format!("image:{id}")))
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
         let config: DockerConfig =
             serde_json::from_value(beam.options.clone()).map_err(|error| ExecError {

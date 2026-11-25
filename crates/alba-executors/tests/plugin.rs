@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use alba_executors::{
-    BeamContext, CommandSpec, ExecContext, ExecError, ExecSession, Executor, OutputLine,
-    PluginExecutor, Stream,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, ExecError, ExecSession, Executor,
+    OutputLine, PluginExecutor, Stream,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -488,4 +488,34 @@ async fn a_dropped_session_does_not_leak_the_plugin_process() {
         !still_running,
         "the dropped plugin process is still running as our child 3s later"
     );
+}
+
+/// The cache must notice a plugin binary upgraded in place, under the same
+/// name and options: the identity follows the binary's content.
+#[tokio::test]
+async fn a_plugin_identity_follows_its_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("alba-executor-fake");
+    std::fs::copy(fake_plugin_path(), &binary).unwrap();
+    let request = BeamIdentity {
+        dir: dir.path().to_path_buf(),
+        options: serde_json::Value::Null,
+    };
+    let identity = || async {
+        PluginExecutor::new(binary.clone())
+            .identity(&request)
+            .await
+            .expect("a readable binary has an identity")
+    };
+
+    let first = identity().await;
+    let again = identity().await;
+    let mut content = std::fs::read(&binary).unwrap();
+    content.push(0);
+    std::fs::write(&binary, content).unwrap();
+    let upgraded = identity().await;
+
+    assert!(first.is_some());
+    assert_eq!(first, again);
+    assert_ne!(first, upgraded);
 }

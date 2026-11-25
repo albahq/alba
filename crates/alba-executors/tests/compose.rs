@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use alba_executors::{
-    BeamContext, CommandSpec, ComposeExecutor, ExecContext, Executor, OutputLine,
+    BeamContext, BeamIdentity, CommandSpec, ComposeExecutor, ExecContext, Executor, OutputLine,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -1667,4 +1667,78 @@ volumes:
 #[tokio::test]
 async fn shutdown_with_nothing_started_succeeds() {
     ComposeExecutor::new().shutdown().await.unwrap();
+}
+
+fn identity_request(project: &ComposeProject, service: &str) -> BeamIdentity {
+    BeamIdentity {
+        dir: project.path().to_path_buf(),
+        options: serde_json::json!({"service": service, "file": project.file}),
+    }
+}
+
+/// The service a beam runs in is described by the Compose file, which the
+/// beam's declaration (the service's name) does not show: editing the
+/// service changes the identity.
+#[tokio::test]
+#[ignore = "requires docker with the Compose plugin"]
+async fn a_compose_beams_identity_follows_its_service_definition() {
+    let project = ComposeProject::new(
+        "identity-definition",
+        "services:\n  tool:\n    image: alpine:3\n    environment:\n      MODE: one\n",
+    );
+    let executor = ComposeExecutor::new();
+
+    let first = executor
+        .identity(&identity_request(&project, "tool"))
+        .await
+        .unwrap();
+    let again = executor
+        .identity(&identity_request(&project, "tool"))
+        .await
+        .unwrap();
+    std::fs::write(
+        project.path().join("compose.yaml"),
+        format!(
+            "name: {}\nservices:\n  tool:\n    image: alpine:3\n    environment:\n      MODE: two\n",
+            project.name
+        ),
+    )
+    .unwrap();
+    let edited = executor
+        .identity(&identity_request(&project, "tool"))
+        .await
+        .unwrap();
+
+    assert!(first.is_some());
+    assert_eq!(first, again);
+    assert_ne!(first, edited);
+}
+
+/// A service built from a Dockerfile runs on whatever that file describes.
+#[tokio::test]
+#[ignore = "requires docker with the Compose plugin"]
+async fn a_compose_beams_identity_follows_the_services_dockerfile() {
+    let project = ComposeProject::new(
+        "identity-dockerfile",
+        "services:\n  tool:\n    build: ./ctx\n",
+    );
+    std::fs::create_dir_all(project.path().join("ctx")).unwrap();
+    std::fs::write(project.path().join("ctx/Dockerfile"), "FROM alpine:3\n").unwrap();
+    let executor = ComposeExecutor::new();
+
+    let first = executor
+        .identity(&identity_request(&project, "tool"))
+        .await
+        .unwrap();
+    std::fs::write(
+        project.path().join("ctx/Dockerfile"),
+        "FROM alpine:3\nRUN true\n",
+    )
+    .unwrap();
+    let edited = executor
+        .identity(&identity_request(&project, "tool"))
+        .await
+        .unwrap();
+
+    assert_ne!(first, edited);
 }

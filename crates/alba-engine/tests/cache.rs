@@ -392,6 +392,136 @@ beam gen {
     assert_eq!(without_output.executed().len(), 1, "outputs missing: rerun");
 }
 
+/// Runs `source`'s `gen` beam twice around `between`, returning whether
+/// the second run executed: the first run populates the cache, `between`
+/// stands for whatever touches the outputs after it.
+async fn reruns_after(source: &str, dir: &Path, between: impl FnOnce()) -> bool {
+    run_once(source, "gen", dir, options(dir, false), FakeExecutor::new()).await;
+    between();
+    let second = run_once(source, "gen", dir, options(dir, false), FakeExecutor::new()).await;
+    !second.executed().is_empty()
+}
+
+/// A cache entry stands in for the outputs the run left behind, not for
+/// any file that happens to sit at their path: an output rewritten since
+/// (by hand, by another tool) must not be replayed as if the beam had
+/// produced it.
+#[tokio::test]
+async fn a_modified_output_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "out.txt", "produced");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["out.txt"]
+  run "generate"
+}
+"#;
+
+    assert!(
+        reruns_after(SOURCE, dir.path(), || write(
+            dir.path(),
+            "out.txt",
+            "edited by hand"
+        ))
+        .await
+    );
+}
+
+#[tokio::test]
+async fn untouched_outputs_still_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "dist/a.js", "a");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["dist"]
+  run "generate"
+}
+"#;
+
+    assert!(!reruns_after(SOURCE, dir.path(), || {}).await);
+}
+
+/// A directory output is checked file by file, not by its own existence.
+#[tokio::test]
+async fn a_file_changed_inside_an_output_directory_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "dist/nested/a.js", "a");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["dist"]
+  run "generate"
+}
+"#;
+
+    assert!(
+        reruns_after(SOURCE, dir.path(), || {
+            write(dir.path(), "dist/nested/a.js", "rewritten")
+        })
+        .await
+    );
+}
+
+/// A glob output used to be satisfied by any single match: losing one of
+/// the files the run produced went unnoticed as long as another remained.
+#[tokio::test]
+async fn losing_one_of_the_files_a_glob_output_matched_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    write(dir.path(), "dist/a.js", "a");
+    write(dir.path(), "dist/b.js", "b");
+    const SOURCE: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  outputs ["dist/*.js"]
+  run "generate"
+}
+"#;
+
+    assert!(
+        reruns_after(SOURCE, dir.path(), || {
+            std::fs::remove_file(dir.path().join("dist/b.js")).unwrap()
+        })
+        .await
+    );
+}
+
+/// The cache replays a beam's logs, which hold whatever its commands
+/// printed: on a shared machine they must be readable by their owner only.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_cache_is_readable_by_its_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let cache = dir.path().join(".alba").join("cache");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&cache), 0o700, "the cache directory");
+    let entries: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        assert_eq!(mode(&entry), 0o600, "{}", entry.display());
+    }
+}
+
 #[tokio::test]
 async fn a_failed_beam_writes_no_manifest() {
     let dir = tempfile::tempdir().unwrap();
@@ -1233,4 +1363,64 @@ async fn extra_env_does_not_change_the_fingerprint() {
         "a hit runs nothing"
     );
     assert_eq!(ids(&second.summary.cached), vec!["gen"]);
+}
+
+/// The executor's identity stands for what the declaration does not pin:
+/// `docker pull` moving `alpine:3` to a new build, a plugin binary
+/// upgraded in place. A beam whose identity changed must rerun.
+#[tokio::test]
+async fn a_changed_executor_identity_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    let run_on = |identity: &'static str| {
+        run_once(
+            GEN,
+            "gen",
+            dir.path(),
+            options(dir.path(), false),
+            FakeExecutor::new().with_identity(identity),
+        )
+    };
+
+    run_on("image-a").await;
+    let unchanged = run_on("image-a").await;
+    let moved = run_on("image-b").await;
+
+    assert!(unchanged.executed().is_empty(), "same identity: hit");
+    assert_eq!(moved.executed(), vec!["generate"], "new identity: rerun");
+}
+
+/// An identity that cannot be read (a stopped docker daemon) cannot be
+/// compared with the stored one: the beam runs, uncached, and says why.
+#[tokio::test]
+async fn an_unreadable_executor_identity_runs_the_beam_uncached() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let blind = run_once(
+        GEN,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new().fail_identity("daemon unreachable"),
+    )
+    .await;
+
+    assert_eq!(blind.executed(), vec!["generate"]);
+    assert!(
+        blind
+            .stderr()
+            .iter()
+            .any(|line| line.contains("cache:") && line.contains("daemon unreachable")),
+        "{:?}",
+        blind.stderr()
+    );
 }

@@ -7,6 +7,10 @@
 //! entry, if any, stays in place. Writes are atomic (temporary file +
 //! rename) so a concurrent `alba run` in the same project can at worst
 //! overwrite an entry, never tear one.
+//!
+//! The logs hold whatever a beam's commands printed, secrets included when
+//! a command prints one, so on unix the directory is private to its owner
+//! (`0700`) and every entry is written `0600`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,12 +23,17 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever the manifest layout *or the fingerprint recipe*
 /// changes incompatibly: a manifest from another version is a miss, which
 /// re-runs the beam and rewrites the entry — no migration, ever.
-pub(crate) const FORMAT_VERSION: u32 = 2;
+pub(crate) const FORMAT_VERSION: u32 = 3;
+
+/// The Alba that writes and reads entries: an entry another version wrote
+/// is a miss, like one in another format.
+pub(crate) const ALBA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What the last successful run of a beam left behind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     pub version: u32,
+    pub alba_version: String,
     pub fingerprint: String,
     /// The rendered `outputs` patterns at the time of that run. Currently
     /// informational (the decision checks the beam's *current*
@@ -32,6 +41,47 @@ pub(crate) struct Manifest {
     pub outputs: Vec<String>,
     /// How long the run took, replayed as the cached beam's duration.
     pub duration_ms: u64,
+    /// Every file the run left under `outputs`, as it left it: a hit
+    /// requires the outputs on disk to still match, file for file.
+    pub output_files: Vec<OutputFile>,
+}
+
+/// One output file as a run left it. Size and modification time rather
+/// than a content hash: outputs are build artifacts, often large and
+/// numerous (`dist/`, a release binary), and reading them whole on every
+/// run would cost more than the beam the cache is skipping. Anything that
+/// rewrites a file moves its modification time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutputFile {
+    pub path: String,
+    pub size: u64,
+    /// Nanoseconds since the unix epoch; `None` on a filesystem that does
+    /// not report one, where the size alone is compared.
+    pub modified_ns: Option<u64>,
+}
+
+impl OutputFile {
+    /// What `outputs` name on disk right now under `dir`, in the form a
+    /// manifest stores. A file that vanishes while being listed is left
+    /// out, which can only turn a hit into a miss.
+    pub(crate) fn current(dir: &Path, outputs: &[String]) -> Vec<OutputFile> {
+        alba_core::output_files(dir, outputs)
+            .into_iter()
+            .filter_map(|(path, absolute)| {
+                let metadata = std::fs::metadata(absolute).ok()?;
+                let modified_ns = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|since| u64::try_from(since.as_nanos()).ok());
+                Some(OutputFile {
+                    path,
+                    size: metadata.len(),
+                    modified_ns,
+                })
+            })
+            .collect()
+    }
 }
 
 /// One stored log line. A type of this module's own rather than a serde
@@ -55,7 +105,8 @@ impl CacheStore {
     pub(crate) fn load(&self, id: &BeamId) -> Option<Manifest> {
         let bytes = std::fs::read(self.entry(id, "json")).ok()?;
         let manifest: Manifest = serde_json::from_slice(&bytes).ok()?;
-        (manifest.version == FORMAT_VERSION).then_some(manifest)
+        (manifest.version == FORMAT_VERSION && manifest.alba_version == ALBA_VERSION)
+            .then_some(manifest)
     }
 
     pub(crate) fn store(&self, id: &BeamId, manifest: &Manifest, logs: &[OutputLine]) {
@@ -85,7 +136,7 @@ impl CacheStore {
     }
 
     fn try_store(&self, id: &BeamId, manifest: &Manifest, logs: &[OutputLine]) -> io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        create_private_dir(&self.dir)?;
 
         let mut log_lines = String::new();
         for line in logs {
@@ -130,8 +181,35 @@ impl CacheStore {
 /// rename whatever the other had written into it half-way.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = temporary_path(path);
-    std::fs::write(&tmp, bytes)?;
+    write_private(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Creates `dir` if needed and makes it private to its owner, including a
+/// directory an earlier version created world-readable.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Writes a new file readable by its owner only, from its creation on:
+/// there is no window in which it exists with wider permissions.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// A temporary sibling of `path`, never the same one twice.
@@ -159,9 +237,15 @@ mod tests {
     fn manifest(fingerprint: &str) -> Manifest {
         Manifest {
             version: FORMAT_VERSION,
+            alba_version: ALBA_VERSION.to_string(),
             fingerprint: fingerprint.to_string(),
             outputs: vec!["out.txt".to_string()],
             duration_ms: 1234,
+            output_files: vec![OutputFile {
+                path: "out.txt".to_string(),
+                size: 8,
+                modified_ns: Some(1),
+            }],
         }
     }
 
@@ -238,6 +322,23 @@ mod tests {
             ..manifest("fp1")
         };
         store.store(&id, &old, &[]);
+
+        assert_eq!(store.load(&id), None);
+    }
+
+    /// Another Alba may run a beam differently (the embedded shell's
+    /// builtins, how commands are rendered): its entries are not trusted.
+    #[test]
+    fn a_manifest_written_by_another_alba_version_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let id = BeamId("build".to_string());
+
+        let other = Manifest {
+            alba_version: "0.0.0-other".to_string(),
+            ..manifest("fp1")
+        };
+        store.store(&id, &other, &[]);
 
         assert_eq!(store.load(&id), None);
     }

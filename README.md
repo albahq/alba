@@ -290,26 +290,30 @@ run. If so, the beam is skipped: it is reported as `cached` in the
 output, its stored logs are replayed in its place, and the run's summary
 counts it under `cached` rather than `succeeded`. Change any of those
 inputs, even a single character in one matched file, and the beam runs
-again.
+again. Upgrading Alba itself invalidates every entry.
 
-The executor's fingerprint is only as precise as what it hashes, though:
-for `executor docker`, it is the `image` field's own text, not the image
-digest it currently resolves to, so repointing a mutable tag (`docker
-pull alpine:3` fetching a new build of the same `alpine:3`) does *not*
-invalidate the cache — the tag text is unchanged, even though what it
-points at is not. The same applies to a plugin: an updated
-`alba-executor-<name>` binary reachable under the same name and options
-is invisible to the fingerprint. Pin an image by digest, or bump a
-version somewhere the fingerprint does see (the image tag itself, a
-plugin option), to force a rebuild when only the thing behind a mutable
-reference changed.
+The executor's fingerprint also covers what its declaration only names.
+For `executor docker`, that is the image a tag points at right now (so
+`docker pull alpine:3` fetching a new build reruns the beam), or, for a
+beam built from a context, the content of its Dockerfile. For `executor
+compose`, it is the service's configuration as `docker compose config`
+resolves it, plus the image or Dockerfile that configuration names. For
+a plugin, it is the content of the `alba-executor-<name>` binary, so
+upgrading it in place reruns its beams. An image not pulled yet counts
+as its own state: the run that pulls it is followed by one more run
+before the cache settles. When that state cannot be read (a stopped
+docker daemon), the beam runs uncached and says why. A build context's
+other files are not read: list whatever the Dockerfile copies in the
+beam's `inputs`.
 
 A beam without declared `inputs` is never cacheable and always runs. This
 is deliberate for beams whose own work is cheaper than hashing their
 inputs would be, such as an umbrella beam that only reports on the beams
-it needs. If a beam declares `outputs` and one of them is missing from
-disk, the beam also reruns even if its inputs are otherwise unchanged: a
-cache entry only stands in for work whose result is actually still there.
+it needs. If a beam declares `outputs`, the beam also reruns, even with
+unchanged inputs, when its outputs are no longer what its last run left:
+a file missing, removed from a glob's matches or a directory, or
+rewritten since (its size or modification time changed). A cache entry
+only stands in for work whose result is actually still there.
 Both `inputs` and `outputs` patterns resolve relative to the directory of
 the Beamfile that declares the beam, never to the beam's `cwd`, so a beam
 with `cwd "sub"` writing `out.txt` must declare it as `outputs
@@ -334,6 +338,9 @@ the previous entry untouched. Use it to force a rebuild without clearing
 history for every other beam.
 
 The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
+It replays the logs of each beam's last successful run, so on unix the
+directory is readable by its owner only, and each entry is written with
+`0600` permissions.
 `alba cache clean` removes it entirely; the next run of any beam starts
 from scratch and repopulates it. Alba never edits your `.gitignore`, so
 add `.alba/` to it yourself in any project that turns caching on.
@@ -963,9 +970,10 @@ actually runs: docker's own layer cache makes the repeat cheap, and a
 build that fails fails the beam with docker's build log on its output.
 Declaring `image` alongside `build` tags the built image with that name,
 for reuse outside Alba; at least one of the two is required. A cached
-beam is not rebuilt at all, and the cache does not look inside the build
-context: list the `Dockerfile`, and whatever else it copies, in the
-beam's `inputs` so that changing the image reruns the beam.
+beam is not rebuilt at all. The cache reads the Dockerfile (see
+[Caching](#caching)) but not the rest of the build context: list
+whatever the Dockerfile copies in the beam's `inputs` so that changing
+it reruns the beam.
 
 Without `user`, the commands run as the image's own default user,
 usually root, and so does every file they write into the project
@@ -1057,13 +1065,14 @@ When the service declares a `build`, Alba runs `docker compose build
 <service>` before the beam's commands, every time the beam actually runs:
 Compose's own layer cache keeps the repeat cheap, and a build that fails
 fails the beam with its log on the beam's output. The cache fingerprint
-only holds the text of the block, not the content of the Compose file or
-of the Dockerfiles the build copies from, so a beam whose result depends
-on them lists them in `inputs`:
+follows the service's resolved configuration and the Dockerfile it is
+built from (see [Caching](#caching)), but not the other files of the
+build context, so a beam whose result depends on them lists them in
+`inputs`:
 
 ```
 beam test {
-  inputs ["src/**", "../../compose.yaml", "../../docker/php/Dockerfile"]
+  inputs ["src/**", "../../docker/php/composer.json"]
   executor compose { service "php" }
   run "vendor/bin/phpunit"
 }

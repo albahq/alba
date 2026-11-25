@@ -24,6 +24,11 @@ pub(crate) struct BeamFacts<'a> {
     /// executor or configuration must not be mistaken for a hit computed
     /// under another one.
     pub executor: &'a str,
+    /// What the executor reports this beam runs on beyond its declaration
+    /// (see `alba_executors::Executor::identity`): an image digest, a
+    /// Dockerfile's content hash, a plugin binary's hash. Empty when the
+    /// declaration says everything.
+    pub executor_identity: &'a str,
 }
 
 /// The blake3 hex fingerprint of `facts`. Any change to how this feeds
@@ -44,6 +49,7 @@ pub(crate) fn fingerprint(facts: &BeamFacts<'_>) -> String {
     }
     item(&mut hasher, "executor");
     item(&mut hasher, facts.executor);
+    item(&mut hasher, facts.executor_identity);
     // Right after the commands and the executor that runs them: where
     // they run completes what runs, and the same command in another
     // directory is another invocation.
@@ -86,6 +92,7 @@ pub(crate) fn static_contribution(
         args,
         needs: &[],
         executor,
+        executor_identity: "",
     })
 }
 
@@ -125,6 +132,20 @@ mod tests {
         needs: &[&str],
         executor: &'static str,
     ) -> String {
+        identified_fingerprint(files, commands, cwd, env, args, needs, executor, "")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn identified_fingerprint(
+        files: &[(&str, &str)],
+        commands: &[&str],
+        cwd: &str,
+        env: &[(&str, &str)],
+        args: &[&str],
+        needs: &[&str],
+        executor: &'static str,
+        executor_identity: &'static str,
+    ) -> String {
         fingerprint(&BeamFacts {
             files: &pairs(files),
             commands: &strings(commands),
@@ -133,6 +154,7 @@ mod tests {
             args: &strings(args),
             needs: &strings(needs),
             executor,
+            executor_identity,
         })
     }
 
@@ -243,6 +265,16 @@ mod tests {
                 &["arg"],
                 &["n1"],
                 "system",
+            ),
+            identified_fingerprint(
+                &[("a", "h1")],
+                &["cmd"],
+                "/p",
+                &[("K", "v")],
+                &["arg"],
+                &["n1"],
+                "embedded",
+                "sha256:other",
             ),
         ];
         for variant in variants {

@@ -50,7 +50,8 @@ use alba_core::{
     outputs_satisfied, render_template,
 };
 use alba_executors::{
-    BeamContext, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor, Stream,
+    BeamContext, BeamIdentity, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor,
+    Stream,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -58,8 +59,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
 use crate::cache::{
-    BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, fingerprint, hash_file,
-    static_contribution,
+    ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
+    fingerprint, hash_file, static_contribution,
 };
 use crate::event::{BeamStatus, RunEvent, RunSummary};
 
@@ -823,16 +824,28 @@ async fn process(
     if status == BeamStatus::Succeeded
         && let (Some(assessment), Some(store)) = (&assessment, &task.cache)
     {
-        store.store(
-            &task.beam.id,
-            &Manifest {
-                version: FORMAT_VERSION,
-                fingerprint: assessment.fingerprint.clone(),
-                outputs: task.beam.outputs.clone(),
-                duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-            },
-            &lines,
-        );
+        let (dir, outputs) = (task.beam.dir.clone(), task.beam.outputs.clone());
+        // Off the worker threads for the same reason as the assessment: a
+        // directory output is walked and every file in it is stat'ed.
+        let output_files = tokio::task::spawn_blocking(move || OutputFile::current(&dir, &outputs))
+            .await
+            .ok();
+        // Without the outputs' state the entry could never be trusted, so
+        // none is written: the next run simply runs the beam again.
+        if let Some(output_files) = output_files {
+            store.store(
+                &task.beam.id,
+                &Manifest {
+                    version: FORMAT_VERSION,
+                    alba_version: ALBA_VERSION.to_string(),
+                    fingerprint: assessment.fingerprint.clone(),
+                    outputs: task.beam.outputs.clone(),
+                    duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                    output_files,
+                },
+                &lines,
+            );
+        }
     }
 
     (status, duration, contribution)
@@ -865,6 +878,25 @@ async fn assess(
         return (None, None);
     };
 
+    // Asked before the blocking half: the executor may have to consult
+    // something outside the process (the docker daemon) to answer.
+    let request = BeamIdentity {
+        dir: task.beam.dir.clone(),
+        options: executor_options(&task.beam.executor),
+    };
+    let executor_identity = match task.executor.identity(&request).await {
+        Ok(identity) => identity.unwrap_or_default(),
+        Err(error) => {
+            return (
+                None,
+                Some(format!(
+                    "cache: cannot tell what this beam runs on ({}); running without cache",
+                    error.message
+                )),
+            );
+        }
+    };
+
     let facts = CacheableBeam {
         store: Arc::clone(store),
         id: task.beam.id.clone(),
@@ -878,6 +910,7 @@ async fn assess(
         needs,
         force: task.force,
         executor: executor_label(&task.beam.executor),
+        executor_identity,
     };
     // Off the runtime's worker threads: `decide` walks a directory tree
     // and reads every input file whole through `std::fs`. Doing that in an
@@ -909,6 +942,7 @@ struct CacheableBeam {
     needs: Vec<String>,
     force: bool,
     executor: String,
+    executor_identity: String,
 }
 
 impl CacheableBeam {
@@ -956,13 +990,17 @@ impl CacheableBeam {
             args: &self.args,
             needs: &self.needs,
             executor: &self.executor,
+            executor_identity: &self.executor_identity,
         });
 
         let hit = (!self.force)
             .then(|| self.store.load(&self.id))
             .flatten()
             .filter(|manifest| manifest.fingerprint == fingerprint)
-            .filter(|_| outputs_satisfied(&self.dir, &self.outputs));
+            .filter(|_| outputs_satisfied(&self.dir, &self.outputs))
+            .filter(|manifest| {
+                manifest.output_files == OutputFile::current(&self.dir, &self.outputs)
+            });
 
         (Some(Assessment { fingerprint, hit }), None)
     }

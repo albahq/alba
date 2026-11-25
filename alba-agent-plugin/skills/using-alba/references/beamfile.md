@@ -32,7 +32,7 @@ that declares one, in import order. Each `*` matches exactly one level
 | `description` | string template | Shown in listings. |
 | `needs` | `[beam, api:beam, *:beam, ...]` | Prerequisites; all must succeed first. `*` stands for any one import alias. |
 | `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. A glob skips `.gitignore`d files; a literal path is always an input. Turns caching on, and drives `--watch` and `--affected`. |
-| `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. A missing output forces a rerun. |
+| `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. A missing or rewritten output file forces a rerun. |
 | `run` | `"cmd"` or `["cmd1", "cmd2"]` | String templates. Commands run in order on the same executor. |
 | `env` | `{ NAME = "value", OTHER = param }` | Values are string templates or a bare `let` / parameter name. |
 | `cwd` | string template | Working directory for the commands. |
@@ -120,9 +120,9 @@ literal.
     the directory alba runs from.
   - `build "docker/php"` builds the image from that context (relative to
     the declaring Beamfile's directory) before the beam runs, instead of
-    naming one; `image` is then optional and tags the result. List the
-    `Dockerfile` in `inputs`: the cache does not look inside the build
-    context.
+    naming one; `image` is then optional and tags the result. The cache
+    reads the Dockerfile but not the rest of the context: list what the
+    Dockerfile copies in `inputs`.
   - `dockerfile "Dockerfile.ci"` picks a file other than `Dockerfile`,
     relative to the build context; it requires `build`.
   - `user "host"` runs the commands as whoever runs Alba, so files
@@ -142,8 +142,9 @@ literal.
     user is passed. The image needs `sh`.
   - Dependencies (`depends_on`) are started when absent, honouring their
     conditions, left alone when running, and put back in their previous
-    state when the command ends. List `compose.yaml` and the Dockerfiles
-    in `inputs`: the cache only sees the block's text.
+    state when the command ends. The cache follows the service's
+    resolved configuration and the image or Dockerfile it names, not the
+    rest of a build context.
   - A `kill -9` of Alba, or a second Ctrl-C, skips that restore: the
     dependencies Alba started stay up.
 - **`<name> { option value ... }`**: an external `alba-executor-<name>`

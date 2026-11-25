@@ -57,6 +57,17 @@ pub use fake::{FakeBehavior, FakeEvent, FakeExecutor};
 pub trait Executor: Send + Sync {
     async fn open(&self, beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError>;
 
+    /// What a beam's commands will run on that its declaration alone does
+    /// not pin, for the cache to fingerprint: the image a mutable tag
+    /// currently points at, the content of a Dockerfile, a plugin binary.
+    /// Two runs of an unchanged beam must get the same answer exactly when
+    /// they would run on the same thing. `None`, the default, means the
+    /// declaration already says everything; an error means the identity
+    /// cannot be known right now, and the beam runs uncached.
+    async fn identity(&self, _beam: &BeamIdentity) -> Result<Option<String>, ExecError> {
+        Ok(None)
+    }
+
     /// Releases whatever this executor held for the whole run, once every
     /// session it opened has been closed. The engine calls it exactly once
     /// per distinct executor at the end of a run, in every case (success,
@@ -109,6 +120,13 @@ pub struct BeamContext {
     pub options: serde_json::Value,
     pub output: tokio::sync::mpsc::UnboundedSender<OutputLine>,
     pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// What [`Executor::identity`] is asked about: the beam's directory and its
+/// executor options, the same ones [`BeamContext`] carries.
+pub struct BeamIdentity {
+    pub dir: PathBuf,
+    pub options: serde_json::Value,
 }
 
 /// One already-rendered command line, ready to hand to a shell.

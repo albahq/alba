@@ -5,10 +5,10 @@
 //! different views of the disk. [`expand_globs`] resolves `inputs` for
 //! fingerprinting and is `.gitignore`-aware: hashing `src/**/*` must not
 //! aspirate build artifacts a `.gitignore` already declares uninteresting.
-//! [`outputs_satisfied`] checks `outputs` for presence and queries the raw
-//! disk: outputs typically live in exactly those ignored directories
-//! (`target/`, `dist/`), so filtering them would make their patterns never
-//! match.
+//! [`outputs_satisfied`] checks `outputs` for presence and [`output_files`]
+//! lists what they hold; both query the raw disk: outputs typically live in
+//! exactly those ignored directories (`target/`, `dist/`), so filtering
+//! them would make their patterns never match.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -226,6 +226,55 @@ pub fn outputs_satisfied(base: &Path, patterns: &[String]) -> bool {
             base.join(pattern).exists()
         }
     })
+}
+
+/// Every file the `outputs` patterns currently name, as sorted, deduplicated
+/// `(path relative to base, absolute path)` pairs. A pattern naming a
+/// directory, literally or through a glob, contributes every file beneath
+/// it, so the cache can tell a rewritten file inside `dist/` from an
+/// untouched one. Raw disk, like [`outputs_satisfied`]: no `.gitignore`.
+pub fn output_files(base: &Path, patterns: &[String]) -> Vec<(String, PathBuf)> {
+    let mut matched = Vec::new();
+    for pattern in patterns {
+        let joined = base.join(pattern);
+        if pattern.contains(['*', '?', '[']) {
+            if let Ok(entries) = glob::glob(&joined.to_string_lossy()) {
+                matched.extend(entries.flatten());
+            }
+        } else if joined.exists() {
+            matched.push(joined);
+        }
+    }
+
+    let base_components = lexical_components(base);
+    let mut files: Vec<(String, PathBuf)> = matched
+        .into_iter()
+        .flat_map(files_under)
+        .map(|path| (relative_name(&base_components, &path), path))
+        .collect();
+    files.sort();
+    files.dedup_by(|a, b| a.0 == b.0);
+    files
+}
+
+/// `path` itself when it is a file, every file beneath it when it is a
+/// directory, following symbolic links as the `inputs` walk does.
+fn files_under(path: PathBuf) -> Vec<PathBuf> {
+    if !path.is_dir() {
+        return if path.is_file() {
+            vec![path]
+        } else {
+            Vec::new()
+        };
+    }
+    ignore::WalkBuilder::new(&path)
+        .standard_filters(false)
+        .follow_links(true)
+        .build()
+        .flatten()
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(ignore::DirEntry::into_path)
+        .collect()
 }
 
 /// A beam's patterns, compiled: what a path is matched against, and which

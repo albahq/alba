@@ -47,6 +47,39 @@ pub(crate) fn spawn_error(error: std::io::Error, requirement: &str) -> ExecError
     }
 }
 
+/// The blake3 hash of a file's content, for an executor's identity: a
+/// Dockerfile, a plugin binary. `what` names the file in the error.
+pub(crate) async fn content_hash(path: &std::path::Path, what: &str) -> Result<String, ExecError> {
+    let content = tokio::fs::read(path).await.map_err(|error| ExecError {
+        message: format!("cannot read {what} `{}`: {error}", path.display()),
+    })?;
+    Ok(blake3::hash(&content).to_hex().to_string())
+}
+
+/// The id of the image `image` names on this host right now, or `absent`
+/// when it has not been pulled yet: the first run then pulls it, and the
+/// next one, seeing its id, runs once more before the cache settles. Any
+/// other failure (no `docker`, an unreachable daemon) leaves the identity
+/// unknown.
+pub(crate) async fn image_id(image: &str, requirement: &str) -> Result<String, ExecError> {
+    let output = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", "--", image])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| spawn_error(error, requirement))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.to_lowercase().contains("no such image") {
+        return Ok("absent".to_string());
+    }
+    Err(ExecError {
+        message: format!("cannot inspect the image `{image}`: {}", stderr.trim()),
+    })
+}
+
 /// Runs a `docker` subcommand to completion, discarding its output; used
 /// for cleanup steps (`stop`, `rm -f`) whose own failure is not worth
 /// surfacing since the caller has already decided the container is going
