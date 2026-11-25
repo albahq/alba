@@ -2,12 +2,12 @@
 //!
 //! This module is pure: no I/O, no terminal, no clock. It knows the
 //! query and the line indices it matches, nothing about how those
-//! indices get drawn or scrolled to — that is `ui/logpane.rs`'s job, and
+//! indices get drawn or scrolled to — that is `ui/output.rs`'s job, and
 //! the `AppState` methods that carry the buffer's `Paused` offset along
 //! with the search. Matching folds case with `to_ascii_lowercase`
 //! rather than full Unicode case folding: build output is overwhelmingly
 //! ASCII, and byte-length-preserving folding is also what lets
-//! `ui/logpane.rs` slice the original text at match boundaries without
+//! `ui/output.rs` slice the original text at match boundaries without
 //! ever landing off a char boundary.
 
 use crate::logs::{LogBuffer, StreamFilter};

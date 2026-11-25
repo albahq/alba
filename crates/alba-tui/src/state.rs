@@ -36,7 +36,7 @@ use crate::ui::theme::ColourMode;
 /// project could also declare: a beam id is one or more identifiers
 /// (letters, digits and underscores) joined by `:`, so no real id can
 /// ever contain a space and no project can collide with this key. The
-/// value is never shown — `ui/logpane.rs` titles the parked pane
+/// value is never shown — `ui/output.rs` titles the parked pane
 /// `diagnostic` — so it answers to nothing but that constraint.
 pub const DIAGNOSTIC_LOG: &str = "alba diagnostic";
 
@@ -463,7 +463,7 @@ impl AppState {
     /// The log key the pane actually shows right now: the diagnostic's
     /// pseudo-beam while `Phase::Parked` — the diagnostic is the only
     /// thing on screen then, and precisely what copy mode's `v`/`y` must
-    /// address — the selected beam otherwise. `ui/logpane.rs`'s `draw`
+    /// address — the selected beam otherwise. `ui/output.rs`'s `draw`
     /// and every copy-mode entry point resolve their buffer through this
     /// same method, so the highlight and what `y` actually copies can
     /// never disagree about what is on screen.
@@ -852,17 +852,17 @@ impl AppState {
         }
         let beam = self.displayed_log_key();
         let filter = self.effective_filter();
-        let Some((line, column_offset)) = self.logs.get(&beam).and_then(|buffer| {
-            crate::copy::row_at(buffer, pane_height, pane_width, pane_row, filter)
+        let Some((line, column)) = self.logs.get(&beam).and_then(|buffer| {
+            crate::copy::row_at(buffer, pane_height, pane_width, pane_row, pane_col, filter)
         }) else {
             return;
         };
         let Mode::Copy(mut copy) = std::mem::replace(&mut self.mode, Mode::Normal) else {
             unreachable!("checked above")
         };
-        copy.cursor = (line, column_offset + pane_col);
+        copy.cursor = (line, column);
         if matches!(kind, MouseEventKind::Down(_)) {
-            copy.anchor = (line, column_offset + pane_col);
+            copy.anchor = (line, column);
         }
         self.mode = Mode::Copy(copy);
     }
@@ -2757,7 +2757,7 @@ mod tests {
     }
 
     /// Parking the project makes the diagnostic the only thing on
-    /// screen (`ui/logpane.rs` renders it under `DIAGNOSTIC_LOG`); copy
+    /// screen (`ui/output.rs` renders it under `DIAGNOSTIC_LOG`); copy
     /// mode must resolve that very same buffer — not the selected
     /// beam's, which may not even hold the diagnostic at all — or the
     /// highlight and what `y` actually copies would disagree about what

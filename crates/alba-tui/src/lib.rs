@@ -848,11 +848,11 @@ mod tests {
 
         match &state.mode {
             state::Mode::Copy(copy) => {
-                // 80x24 gives the log pane a content height of 15 rows
+                // 80x24 gives the log pane a content height of 13 rows
                 // (see `ui::log_pane_content_area`); following a 30-line
-                // buffer, the top visible line is 30 - 15 = 15.
-                assert_eq!(copy.anchor, (15, 0));
-                assert_eq!(copy.cursor, (15, 0));
+                // buffer, the top visible line is 30 - 13 = 17.
+                assert_eq!(copy.anchor, (17, 0));
+                assert_eq!(copy.cursor, (17, 0));
             }
             other => panic!("expected Mode::Copy, got {other:?}"),
         }
@@ -873,15 +873,16 @@ mod tests {
         }
         dispatch(&mut state, &commands, Action::EnterCopy, size());
 
-        // The log pane's content area starts at (23, 6) for an 80x24
+        // The log pane's content area starts at (24, 8) for an 80x24
         // terminal (a single short beam name leaves the beams pane at
-        // its 20-cell floor) (see `ui::log_pane_content_area`); its 5 lines all
-        // fit inside the 15-row content height and follow the tail, so
-        // row 0 of the pane is buffer line 0 ("line 0").
+        // its 20-cell floor; the gutter, title, definition and blank
+        // rows come before the text) (see `ui::log_pane_content_area`);
+        // its 5 lines all fit inside the 13-row content height and
+        // follow the tail, so row 0 of the pane is buffer line 0.
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 25,
-            row: 6,
+            column: 26,
+            row: 8,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         dispatch(&mut state, &commands, Action::Mouse(down), size());
@@ -892,8 +893,8 @@ mod tests {
 
         let drag = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            column: 25,
-            row: 8,
+            column: 26,
+            row: 10,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         dispatch(&mut state, &commands, Action::Mouse(drag), size());
@@ -950,8 +951,8 @@ mod tests {
         // Drag once inside the pane so the selection covers something.
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 25,
-            row: 6,
+            column: 26,
+            row: 8,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         dispatch(&mut state, &commands, Action::Mouse(down), size());
@@ -1126,7 +1127,7 @@ mod tests {
 
     /// The log pane's keyboard scrolling, end to end through `dispatch`:
     /// half the pane's own content height per press, and back down to
-    /// following. At 80x24 the pane shows 15 rows, so half is 7.
+    /// following. At 80x24 the pane shows 13 rows, so half is 6.
     #[test]
     fn the_page_keys_scroll_the_selected_beams_buffer_by_half_a_pane() {
         let (commands, _receiver) = commands();
@@ -1141,21 +1142,21 @@ mod tests {
         assert!(
             matches!(
                 state.logs["build"].scroll(),
-                logs::Scroll::Paused { offset: 7 }
+                logs::Scroll::Paused { offset: 6 }
             ),
-            "half of the pane's 15 content rows"
+            "half of the pane's 13 content rows"
         );
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageUp, size());
         assert!(matches!(
             state.logs["build"].scroll(),
-            logs::Scroll::Paused { offset: 14 }
+            logs::Scroll::Paused { offset: 12 }
         ));
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageDown, size());
         assert!(matches!(
             state.logs["build"].scroll(),
-            logs::Scroll::Paused { offset: 7 }
+            logs::Scroll::Paused { offset: 6 }
         ));
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageDown, size());

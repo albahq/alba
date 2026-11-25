@@ -89,7 +89,7 @@ impl CopyState {
     /// The inclusive character-column range this selection covers on
     /// `line`, given that line's own char count — or `None` when `line`
     /// falls outside the (normalized) span altogether, or is empty.
-    /// Used by `ui/logpane.rs` to style the covered spans; kept here
+    /// Used by `ui/output.rs` to style the covered spans; kept here
     /// rather than there because it is the same normalize-then-clip
     /// logic `selected_text` already does, just answering "which
     /// columns" instead of "which text".
@@ -168,21 +168,26 @@ pub fn top_visible_line(
         .min(buffer.len().saturating_sub(1))
 }
 
-/// Translates a row of the log pane's content area into the buffer
-/// line it shows and the char index that row starts at, or `None` on
-/// the marker row or below the last rendered row. The mouse hit test
-/// and the highlights both go through this, so a click always lands
-/// on the line the highlight would mark.
+/// Translates a cell of the log pane's content area into the buffer
+/// line its row shows and the char index under `pane_col`, or `None` on
+/// the marker row or below the last rendered row. A click on the lead
+/// of an Alba line (its `── `) lands on the line's first char of that
+/// row. The mouse hit test and the highlights both go through this, so
+/// a click always lands on the line the highlight would mark.
 pub fn row_at(
     buffer: &LogBuffer,
     height: usize,
     width: usize,
     pane_row: usize,
+    pane_col: usize,
     filter: StreamFilter,
 ) -> Option<(usize, usize)> {
     let rows = buffer.view(height, width, filter);
     let row = rows.get(pane_row)?;
-    Some((row.line?, row.chars.start))
+    Some((
+        row.line?,
+        row.chars.start + pane_col.saturating_sub(row.lead),
+    ))
 }
 
 /// The `(start, end)` line window `LogBuffer::view` currently draws
@@ -446,10 +451,16 @@ mod tests {
             );
         }
         // Following, height 3: rows show lines 7, 8, 9.
-        assert_eq!(row_at(&buffer, 3, 80, 0, StreamFilter::All), Some((7, 0)));
-        assert_eq!(row_at(&buffer, 3, 80, 2, StreamFilter::All), Some((9, 0)));
         assert_eq!(
-            row_at(&buffer, 3, 80, 3, StreamFilter::All),
+            row_at(&buffer, 3, 80, 0, 0, StreamFilter::All),
+            Some((7, 0))
+        );
+        assert_eq!(
+            row_at(&buffer, 3, 80, 2, 0, StreamFilter::All),
+            Some((9, 0))
+        );
+        assert_eq!(
+            row_at(&buffer, 3, 80, 3, 0, StreamFilter::All),
             None,
             "past what the view actually rendered"
         );
@@ -470,7 +481,7 @@ mod tests {
         }
         buffer.scroll_up(crate::logs::MAX_LINES); // paused at the very top
         assert_eq!(
-            row_at(&buffer, 4, 80, 0, StreamFilter::All),
+            row_at(&buffer, 4, 80, 0, 0, StreamFilter::All),
             None,
             "row 0 is the marker, not a line"
         );
@@ -479,7 +490,7 @@ mod tests {
         // text, which is why this is 0 rather than 5 (`buffer.lines()`
         // itself starts over at 0 once the oldest 5 lines are dropped).
         assert_eq!(
-            row_at(&buffer, 4, 80, 1, StreamFilter::All),
+            row_at(&buffer, 4, 80, 1, 0, StreamFilter::All),
             Some((0, 0)),
             "the first surviving line"
         );
@@ -492,10 +503,27 @@ mod tests {
         let mut buffer = LogBuffer::new();
         buffer.push_output("abcdefgh", alba_executors::Stream::Stdout, false);
         buffer.push_output("x", alba_executors::Stream::Stdout, false);
-        assert_eq!(row_at(&buffer, 5, 4, 0, StreamFilter::All), Some((0, 0)));
-        assert_eq!(row_at(&buffer, 5, 4, 1, StreamFilter::All), Some((0, 4)));
-        assert_eq!(row_at(&buffer, 5, 4, 2, StreamFilter::All), Some((1, 0)));
-        assert_eq!(row_at(&buffer, 5, 4, 3, StreamFilter::All), None);
+        assert_eq!(row_at(&buffer, 5, 4, 0, 0, StreamFilter::All), Some((0, 0)));
+        assert_eq!(row_at(&buffer, 5, 4, 1, 0, StreamFilter::All), Some((0, 4)));
+        assert_eq!(row_at(&buffer, 5, 4, 2, 0, StreamFilter::All), Some((1, 0)));
+        assert_eq!(row_at(&buffer, 5, 4, 3, 0, StreamFilter::All), None);
+    }
+
+    /// The `── ` before a notice is not text: a click on it lands on
+    /// the notice's first char, and a click after it on the char under
+    /// the pointer.
+    #[test]
+    fn row_at_skips_the_lead_of_an_alba_line() {
+        let mut buffer = LogBuffer::new();
+        buffer.push_notice(alba_engine::NoticeLevel::Info, "cache bypassed");
+        assert_eq!(
+            row_at(&buffer, 5, 40, 0, 1, StreamFilter::All),
+            Some((0, 0))
+        );
+        assert_eq!(
+            row_at(&buffer, 5, 40, 0, 5, StreamFilter::All),
+            Some((0, 2))
+        );
     }
 
     /// A selection across a wrap boundary is the same text as unwrapped.

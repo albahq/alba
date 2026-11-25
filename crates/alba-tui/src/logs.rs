@@ -25,6 +25,11 @@ use unicode_width::UnicodeWidthChar;
 /// The memory bound a day-long watch session relies on.
 pub const MAX_LINES: usize = 10_000;
 
+/// The cells Alba's notices and end lines are set in by: the `── ` that
+/// opens their first row, and as much blank on every other row, so a
+/// wrapped notice stays aligned under its own text.
+pub const ALBA_LEAD: usize = 3;
+
 /// Who wrote a line: a process (on one of its streams), or Alba itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -118,6 +123,25 @@ impl LogLine {
             replayed: false,
         }
     }
+
+    /// The cells drawn before this line's text on each of its rows.
+    pub fn lead(&self) -> usize {
+        match self.kind {
+            LineKind::Notice(_) | LineKind::End(_) => ALBA_LEAD,
+            LineKind::Output(_) | LineKind::Command => 0,
+        }
+    }
+
+    /// The char ranges of this line's rows in a pane `width` cells wide,
+    /// its lead taken off every row (width 0 still means no wrapping).
+    fn ranges(&self, width: usize) -> Vec<Range<usize>> {
+        let width = if width == 0 {
+            0
+        } else {
+            width.saturating_sub(self.lead()).max(1)
+        };
+        wrap_ranges(&self.text, width)
+    }
 }
 
 /// One rendered row of the log pane: which buffer line it shows (`None`
@@ -132,6 +156,8 @@ pub struct Row {
     pub chars: Range<usize>,
     pub spans: Vec<(Style, String)>,
     pub text: String,
+    /// The cells drawn before the text (see [`LogLine::lead`]).
+    pub lead: usize,
 }
 
 impl Row {
@@ -142,6 +168,7 @@ impl Row {
             chars: 0..0,
             spans: vec![(Style::default(), text.clone())],
             text,
+            lead: 0,
         }
     }
 
@@ -177,6 +204,7 @@ impl Row {
             chars,
             spans,
             text,
+            lead: line.lead(),
         }
     }
 }
@@ -241,7 +269,7 @@ fn parse(raw: &str) -> (String, Vec<(Style, String)>) {
 /// actually rendered). Left alone, a fully reset span would carry a
 /// `Style` that renders identically to but does not `==`
 /// [`Style::default`], which would both surprise a test asserting
-/// equality and, later, confuse `logpane::patch`'s own use of
+/// equality and, later, confuse `output::patch`'s own use of
 /// `sub_modifier` when composing a search or selection highlight on
 /// top. Collapsing `Color::Reset` to `None` and clearing
 /// `sub_modifier` here makes every span carry the same canonical style
@@ -412,7 +440,7 @@ impl LogBuffer {
 
     /// The single line at `index`, or `None` past the end of the
     /// buffer. `VecDeque::get` is O(1), the natural home for the lookup
-    /// `copy::line_text` and `logpane::full_line` each used to spell out
+    /// `copy::line_text` and `output::full_line` each used to spell out
     /// by hand as `lines().nth(index)`.
     pub fn line(&self, index: usize) -> Option<&LogLine> {
         self.lines.get(index)
@@ -477,7 +505,7 @@ impl LogBuffer {
             if !filter.admits(text) {
                 continue;
             }
-            for range in wrap_ranges(&text.text, width).into_iter().rev() {
+            for range in text.ranges(width).into_iter().rev() {
                 if rows.len() == height {
                     break;
                 }
@@ -497,6 +525,33 @@ impl LogBuffer {
         rows.into()
     }
 
+    /// Where the rows `view` shows sit among all the rows the filtered
+    /// buffer renders as: the window's row range and the total, the
+    /// truncation marker counted as a row. Feeds the scrollbar.
+    pub fn row_window(
+        &self,
+        height: usize,
+        width: usize,
+        filter: StreamFilter,
+    ) -> (Range<usize>, usize) {
+        let offset = match self.scroll {
+            Scroll::Following => 0,
+            Scroll::Paused { offset } => offset,
+        };
+        let end = self.lines.len().saturating_sub(offset);
+        let rows = |range: Range<usize>| -> usize {
+            self.lines
+                .range(range)
+                .filter(|line| filter.admits(line))
+                .map(|line| line.ranges(width).len())
+                .sum()
+        };
+        let total = usize::from(self.truncated > 0) + rows(0..self.lines.len());
+        let window_end = total - rows(end..self.lines.len());
+        let shown = self.view(height, width, filter).len();
+        (window_end.saturating_sub(shown)..window_end, total)
+    }
+
     /// `PgUp`, `Ctrl-u`, the wheel: moves the window up by whole lines
     /// covering at least `rows` rendered rows, so a page never lands
     /// mid-line and always travels at least as far as asked.
@@ -512,7 +567,7 @@ impl LogBuffer {
             index -= 1;
             moved += 1;
             if filter.admits(&self.lines[index]) {
-                covered += wrap_ranges(&self.lines[index].text, width).len();
+                covered += self.lines[index].ranges(width).len();
             }
         }
         self.scroll_up(moved.max(1));
@@ -528,7 +583,7 @@ impl LogBuffer {
         let mut moved = 0;
         while index < self.lines.len() && covered < rows {
             if filter.admits(&self.lines[index]) {
-                covered += wrap_ranges(&self.lines[index].text, width).len();
+                covered += self.lines[index].ranges(width).len();
             }
             index += 1;
             moved += 1;
@@ -555,6 +610,20 @@ mod tests {
             buffer.push_output(format!("line {index}"), Stream::Stdout, false);
         }
         buffer
+    }
+
+    /// The scrollbar counts rows, not lines: a line wrapped in two rows
+    /// above the window moves it down by two.
+    #[test]
+    fn the_row_window_counts_wrapped_rows() {
+        let mut buffer = LogBuffer::new();
+        buffer.push_output("abcdefgh", Stream::Stdout, false);
+        for index in 1..10 {
+            buffer.push_output(format!("l{index}"), Stream::Stdout, false);
+        }
+        assert_eq!(buffer.row_window(4, 4, StreamFilter::All), (7..11, 11));
+        buffer.scroll_up(3);
+        assert_eq!(buffer.row_window(4, 4, StreamFilter::All), (4..8, 11));
     }
 
     fn texts(rows: &[Row]) -> Vec<&str> {

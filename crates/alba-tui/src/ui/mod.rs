@@ -31,7 +31,7 @@ mod graphpane;
 mod header;
 mod help;
 mod keys;
-mod logpane;
+mod output;
 mod progress;
 pub(crate) mod theme;
 
@@ -123,7 +123,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     }
 
     beams::draw(frame, tree_area, state, now);
-    logpane::draw(frame, output_pane, state);
+    output::draw(frame, output_pane, state);
 
     // Help is still an overlay over the body, the panes dimmed under it.
     if matches!(state.mode, Mode::Help) {
@@ -179,7 +179,8 @@ pub(crate) fn format_duration(duration: Duration) -> String {
     format!("{}m {}s", whole / 60, whole % 60)
 }
 
-/// The log pane's own content rectangle, below its title row, for a
+/// The log pane's own text rectangle, below its title and definition
+/// rows, past its gutter and short of its scrollbar column, for a
 /// terminal of `width` x `height` cells. `None` below the too-small
 /// floor, where there is no pane to hit-test against.
 ///
@@ -188,12 +189,7 @@ pub(crate) fn format_duration(duration: Duration) -> String {
 /// out of sync with what `draw` actually painted.
 pub fn log_pane_content_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
     let (_, output_pane) = panes(body_area(width, height)?, state, width);
-    let pane = Layout::vertical([
-        Constraint::Length(1), // title row
-        Constraint::Min(0),    // output
-    ])
-    .split(output_pane);
-    Some(pane[1])
+    Some(output::layout(output_pane).text)
 }
 
 #[cfg(test)]
@@ -273,18 +269,20 @@ mod tests {
     #[test]
     fn log_pane_content_area_sits_past_the_beams_and_their_title() {
         // Body from column 2; the beams pane (here the CJK name (14 wide
-        // characters, 28 cells) plus 12 is 40, capped to 32 at 80) and the divider take 33
-        // columns; the title row takes one line.
+        // characters, 28 cells) plus 12 is 40, capped to 32 at 80) and the
+        // divider take 33 columns; the gutter takes one more and the
+        // scrollbar the pane's last. The title, definition and blank rows
+        // take three lines.
         let now = Instant::now();
         assert_eq!(
             log_pane_content_area(&running(now), 80, 24),
-            Some(Rect::new(35, 6, 43, 15))
+            Some(Rect::new(36, 8, 41, 13))
         );
-        // No beams yet: the pane keeps its 20-cell floor.
+        // No beams yet: the beams pane keeps its 20-cell floor.
         let empty = AppState::new("build", false);
         assert_eq!(
             log_pane_content_area(&empty, 80, 24),
-            Some(Rect::new(23, 6, 55, 15))
+            Some(Rect::new(24, 8, 53, 13))
         );
         assert_eq!(log_pane_content_area(&empty, MIN_WIDTH - 1, 24), None);
     }

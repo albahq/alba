@@ -33,9 +33,6 @@ pub enum Token {
     Success,
     Cached,
     Error,
-    // Drawn by the search matches and the copy selection, restyled in
-    // a later change; until then only the tests name it.
-    #[allow(dead_code)]
     Selection,
 }
 

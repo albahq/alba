@@ -86,7 +86,7 @@ fn draw_node_row(
 /// of `draw_node_row` so it can be pinned by a unit test directly.
 /// `TestBackend::to_string()` drops styles entirely, so neither the
 /// colour nor the reversed span would move a render snapshot whether or
-/// not this ever actually fired; this is what `ui/logpane.rs`'s
+/// not this ever actually fired; this is what `ui/output.rs`'s
 /// `styled_line` does for the very same reason.
 fn node_style(state: &BeamState, beam: usize, focused: usize, colour: ColourMode) -> Style {
     let status = style(status_token(state), colour);
@@ -294,7 +294,7 @@ mod tests {
 
     /// `TestBackend::to_string()` drops styles, so the render snapshots
     /// cannot tell a focused node from any other, nor its status colour:
-    /// this is what actually pins both, the same reason `ui/logpane.rs`
+    /// this is what actually pins both, the same reason `ui/output.rs`
     /// has its own unit test over `styled_line` rather than trusting a
     /// snapshot.
     #[test]

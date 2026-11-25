@@ -288,7 +288,7 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
 /// Copy mode's selection renders as part of the frame. `TestBackend`
 /// drops styles, so this pins layout and the key hints' own keymap
 /// text — the reversed span itself is pinned by the unit test over
-/// `logpane::copy_selected_line` instead (`TestBackend::to_string()`
+/// `output::copy_selected_line` instead (`TestBackend::to_string()`
 /// cannot see it either way).
 #[test]
 fn a_copy_selection_highlights_the_span() {
