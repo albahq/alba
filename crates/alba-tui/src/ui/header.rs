@@ -13,9 +13,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::state::{AppState, Phase};
 
+use super::beams::fit_name;
 use super::format_duration;
 use super::theme::{ColourMode, Token, fill, style};
-use super::tree::fit_name;
 
 /// The fewest blank cells kept between the breadcrumb and the state.
 const GAP: usize = 2;

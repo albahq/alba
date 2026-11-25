@@ -21,8 +21,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::graph::{self, GraphState};
 use crate::state::{AppState, BeamState};
 
+use super::beams::glyph_for;
 use super::theme::{ColourMode, status_token, style};
-use super::tree::glyph_for;
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, graph_state: &GraphState) {
     let layers = graph::layers(state.beams.len(), &state.edges);

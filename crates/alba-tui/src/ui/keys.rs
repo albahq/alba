@@ -14,9 +14,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::logs::{Scroll, StreamFilter};
 use crate::state::{AppState, Mode, Phase};
 
+use super::beams::fit_name;
 use super::help;
 use super::theme::{ColourMode, Token, style};
-use super::tree::fit_name;
 
 const PAIR_GAP: &str = "   ";
 /// The pairs that never drop.

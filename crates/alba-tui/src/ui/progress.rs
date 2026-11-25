@@ -15,9 +15,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::state::{AppState, BeamState, Phase};
 
+use super::beams::fit_name;
 use super::format_duration;
 use super::theme::{ColourMode, Token, style};
-use super::tree::fit_name;
 
 /// Below this, the bar is dropped rather than squeezed: fewer cells stop
 /// reading as a bar.

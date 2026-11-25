@@ -26,6 +26,7 @@ use crate::state::{AppState, Mode};
 
 use theme::{ColourMode, Token, fill, style};
 
+mod beams;
 mod graphpane;
 mod header;
 mod help;
@@ -33,15 +34,11 @@ mod keys;
 mod logpane;
 mod progress;
 pub(crate) mod theme;
-mod tree;
 
 /// Below this floor the panes have no room left to mean anything, so the
 /// whole screen gives way to the too-small screen.
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 12;
-
-/// The tree pane's fixed content width, left of the divider.
-const TREE_WIDTH: u16 = 30;
 
 /// Rows above the body (empty, header, empty, progress, separator) and
 /// below it (separator, key hints, empty).
@@ -63,12 +60,14 @@ pub fn body_area(width: u16, height: u16) -> Option<Rect> {
     ))
 }
 
-/// The body split into the tree pane (with the divider as its right
-/// border) and the output pane. `draw` and `log_pane_content_area` both
-/// go through here, so a click never drifts from what was painted.
-fn panes(body: Rect) -> (Rect, Rect) {
-    let panes =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(body);
+/// The body split into the beams pane (with the divider as its right
+/// border) and the output pane. The beams pane follows the beam names
+/// (`beams::beams_width`). `draw` and `log_pane_content_area` both go
+/// through here, so a click never drifts from what was painted.
+fn panes(body: Rect, state: &AppState, frame_width: u16) -> (Rect, Rect) {
+    let names: Vec<&str> = state.beams.iter().map(|row| row.id.as_str()).collect();
+    let beams = beams::beams_width(&names, frame_width);
+    let panes = Layout::horizontal([Constraint::Length(beams + 1), Constraint::Min(1)]).split(body);
     (panes[0], panes[1])
 }
 
@@ -108,7 +107,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
         return;
     }
 
-    let (tree_pane, output_pane) = panes(body);
+    let (tree_pane, output_pane) = panes(body, state, area.width);
     let divider = Block::new()
         .borders(Borders::RIGHT)
         .border_style(style(Token::Line, mode));
@@ -123,7 +122,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
         cell.set_symbol("┴");
     }
 
-    tree::draw(frame, tree_area, state, now);
+    beams::draw(frame, tree_area, state, now);
     logpane::draw(frame, output_pane, state);
 
     // Help is still an overlay over the body, the panes dimmed under it.
@@ -187,8 +186,8 @@ pub(crate) fn format_duration(duration: Duration) -> String {
 /// Copy mode's mouse handling (`lib::dispatch_mouse`) asks this rather
 /// than re-deriving the layout its own way, so a click can never drift
 /// out of sync with what `draw` actually painted.
-pub fn log_pane_content_area(width: u16, height: u16) -> Option<Rect> {
-    let (_, output_pane) = panes(body_area(width, height)?);
+pub fn log_pane_content_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
+    let (_, output_pane) = panes(body_area(width, height)?, state, width);
     let pane = Layout::vertical([
         Constraint::Length(1), // title row
         Constraint::Min(0),    // output
@@ -272,14 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn log_pane_content_area_sits_past_the_tree_and_its_title() {
-        // Body from column 2; the tree and the divider take 31 columns;
-        // the title row takes one line.
+    fn log_pane_content_area_sits_past_the_beams_and_their_title() {
+        // Body from column 2; the beams pane (here the 14-cell CJK name
+        // plus 12, capped at 40 percent of 80) and the divider take 33
+        // columns; the title row takes one line.
+        let now = Instant::now();
         assert_eq!(
-            log_pane_content_area(80, 24),
-            Some(Rect::new(33, 6, 45, 15))
+            log_pane_content_area(&running(now), 80, 24),
+            Some(Rect::new(35, 6, 43, 15))
         );
-        assert_eq!(log_pane_content_area(MIN_WIDTH - 1, 24), None);
+        // No beams yet: the pane keeps its 20-cell floor.
+        let empty = AppState::new("build", false);
+        assert_eq!(
+            log_pane_content_area(&empty, 80, 24),
+            Some(Rect::new(23, 6, 55, 15))
+        );
+        assert_eq!(log_pane_content_area(&empty, MIN_WIDTH - 1, 24), None);
     }
 
     #[test]
@@ -292,16 +299,16 @@ mod tests {
         assert!(row(&buffer, 3).contains("0/3 complete"));
         assert_eq!(
             row(&buffer, 4),
-            format!(" {}┬{} ", "─".repeat(31), "─".repeat(46))
+            format!(" {}┬{} ", "─".repeat(33), "─".repeat(44))
         );
         assert_eq!(
-            buffer[(32, 10)].symbol(),
+            buffer[(34, 10)].symbol(),
             "│",
             "the divider runs down the body"
         );
         assert_eq!(
             row(&buffer, 21),
-            format!(" {}┴{} ", "─".repeat(31), "─".repeat(46))
+            format!(" {}┴{} ", "─".repeat(33), "─".repeat(44))
         );
         assert!(row(&buffer, 22).starts_with("  ↑↓ beam"));
         assert_eq!(row(&buffer, 23).trim(), "");
@@ -391,14 +398,16 @@ mod tests {
         let state = running(now).with_colour(ColourMode::TrueColour);
         let mut help = running(now).with_colour(ColourMode::TrueColour);
         help.mode = Mode::Help;
-        for state in [&state, &help] {
-            assert_surface_everywhere_but_the_badge(&drawn(state, 104, 23, now));
-        }
+        assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&state, 104, 23, now), true);
+        // The help overlay only covers part of the beams pane for now (a
+        // later change gives it the whole body), so the bar's row is
+        // left unchecked under it.
+        assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&help, 104, 23, now), false);
         let buffer = drawn(&state, 104, 23, now);
         assert_eq!(buffer[(40, 12)].fg, Color::Rgb(0xE3, 0xE4, 0xDC));
     }
 
-    fn assert_surface_everywhere_but_the_badge(buffer: &Buffer) {
+    fn assert_surface_everywhere_but_the_badge_and_the_bar(buffer: &Buffer, with_bar: bool) {
         let surface = Some(Color::Rgb(0x15, 0x17, 0x19));
         for y in 0..23 {
             for x in 0..104 {
@@ -406,7 +415,12 @@ mod tests {
                     continue;
                 }
                 let badge = y == 1 && (2..8).contains(&x);
-                let expected = if badge {
+                // The selected beam's row is the accent bar, 40 cells here.
+                if !with_bar && y == 6 {
+                    continue;
+                }
+                let bar = y == 6 && (2..42).contains(&x);
+                let expected = if badge || bar {
                     Some(Color::Rgb(0xF3, 0xC2, 0x80))
                 } else {
                     surface
@@ -414,6 +428,66 @@ mod tests {
                 assert_eq!(Some(buffer[(x, y)].bg), expected, "cell ({x}, {y})");
             }
         }
+    }
+
+    /// 20 beams in a 7-row list: the divider turns into the scrollbar
+    /// (the thumb on the divider column, the junctions on the
+    /// separators untouched) and the window follows the selection.
+    #[test]
+    fn a_long_list_scrolls_and_the_divider_becomes_the_scrollbar() {
+        let now = Instant::now();
+        let names: Vec<BeamId> = (0..20).map(|n| id(&format!("beam{n:02}"))).collect();
+        let mut state = AppState::new("beam19", false);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![id("beam19")],
+                affected_by: None,
+                beams: names,
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            now,
+        );
+        state.selected = 10;
+        let buffer = drawn(&state, 80, 16, now);
+        assert!(
+            row(&buffer, 5).contains("BEAMS          11/20"),
+            "{}",
+            row(&buffer, 5)
+        );
+        let shown: Vec<String> = (6..13)
+            .map(|y| row(&buffer, y)[2..22].to_string())
+            .collect();
+        assert!(shown[0].contains("beam07"), "{shown:?}");
+        assert!(shown[3].contains("beam10"), "{shown:?}");
+        assert!(shown[6].contains("beam13"), "{shown:?}");
+        let divider: Vec<&str> = (4..14).map(|y| buffer[(22, y)].symbol()).collect();
+        assert_eq!(divider, ["┬", "│", "│", "│", "┃", "┃", "│", "│", "│", "┴"]);
+        // A list that fits draws no thumb.
+        let fits = drawn(&running(now), 80, 24, now);
+        assert!((5..21).all(|y| fits[(34, y)].symbol() != "┃"));
+    }
+
+    /// A wide (CJK) name keeps the duration against the divider, on
+    /// every row, whatever the pane's width.
+    #[test]
+    fn a_wide_name_keeps_the_duration_against_the_divider() {
+        let now = Instant::now();
+        let mut state = running(now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("国国国国国国国国国国国国国国"),
+            },
+            now,
+        );
+        let buffer = drawn(&state, 80, 24, now);
+        let line: String = (2..34).map(|x| buffer[(x, 7)].symbol()).collect();
+        assert!(line.contains("国"), "{line:?}");
+        assert!(
+            line.ends_with("s"),
+            "the duration ends at the divider: {line:?}"
+        );
+        assert_eq!(buffer[(34, 7)].symbol(), "│");
     }
 
     #[test]

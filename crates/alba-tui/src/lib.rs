@@ -248,7 +248,7 @@ fn dispatch(
     // mode's keyboard-driven scroll-follow both need to know the log
     // pane's current content geometry, and this is the one place that
     // reaches the terminal size to compute it.
-    let pane = ui::log_pane_content_area(terminal_size.width, terminal_size.height);
+    let pane = ui::log_pane_content_area(state, terminal_size.width, terminal_size.height);
     let (height, width) = pane
         .map(|area| (area.height as usize, area.width as usize))
         .unwrap_or((0, 0));
@@ -380,7 +380,8 @@ fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) 
         state.finish_copy();
         return;
     }
-    let Some(area) = ui::log_pane_content_area(terminal_size.width, terminal_size.height) else {
+    let Some(area) = ui::log_pane_content_area(state, terminal_size.width, terminal_size.height)
+    else {
         return;
     };
     if mouse.row < area.y
@@ -872,13 +873,14 @@ mod tests {
         }
         dispatch(&mut state, &commands, Action::EnterCopy, size());
 
-        // The log pane's content area starts at (33, 6) for an 80x24
-        // terminal (see `ui::log_pane_content_area`); its 5 lines all
+        // The log pane's content area starts at (23, 6) for an 80x24
+        // terminal (a single short beam name leaves the beams pane at
+        // its 20-cell floor) (see `ui::log_pane_content_area`); its 5 lines all
         // fit inside the 15-row content height and follow the tail, so
         // row 0 of the pane is buffer line 0 ("line 0").
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 35,
+            column: 25,
             row: 6,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
@@ -890,7 +892,7 @@ mod tests {
 
         let drag = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            column: 35,
+            column: 25,
             row: 8,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
@@ -948,7 +950,7 @@ mod tests {
         // Drag once inside the pane so the selection covers something.
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 35,
+            column: 25,
             row: 6,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
