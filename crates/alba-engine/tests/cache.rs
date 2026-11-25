@@ -59,6 +59,7 @@ fn options(dir: &Path, force: bool) -> RunOptions {
             force,
         }),
         extra_env: Vec::new(),
+        ambient_env: Vec::new(),
     }
 }
 
@@ -339,6 +340,7 @@ async fn no_cache_configuration_disables_caching() {
         params: Vec::new(),
         cache: None,
         extra_env: Vec::new(),
+        ambient_env: Vec::new(),
     };
 
     run_once(GEN, "gen", dir.path(), disabled(), FakeExecutor::new()).await;
@@ -1423,4 +1425,55 @@ async fn an_unreadable_executor_identity_runs_the_beam_uncached() {
         "{:?}",
         blind.stderr()
     );
+}
+
+const NODE_BUILD: &str = r#"
+beam gen {
+  inputs ["data.txt"]
+  env_inputs ["NODE_ENV"]
+  run "generate"
+}
+"#;
+
+/// [`options`] with the ambient environment the cache reads `env_inputs`
+/// from.
+fn options_in(dir: &Path, ambient: &[(&str, &str)]) -> RunOptions {
+    let mut options = options(dir, false);
+    options.ambient_env = ambient
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    options
+}
+
+/// A tool reads `NODE_ENV` from the environment it inherits, which the
+/// Beamfile never mentions: declaring it in `env_inputs` makes its value
+/// part of the fingerprint.
+#[tokio::test]
+async fn a_declared_ambient_variable_that_changed_reruns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+    let run_with = |ambient: &'static [(&'static str, &'static str)]| {
+        run_once(
+            NODE_BUILD,
+            "gen",
+            dir.path(),
+            options_in(dir.path(), ambient),
+            FakeExecutor::new(),
+        )
+    };
+
+    run_with(&[("NODE_ENV", "development"), ("TERM", "xterm")]).await;
+    let other_term = run_with(&[("NODE_ENV", "development"), ("TERM", "dumb")]).await;
+    let production = run_with(&[("NODE_ENV", "production"), ("TERM", "dumb")]).await;
+    let unset = run_with(&[("TERM", "dumb")]).await;
+    let empty = run_with(&[("NODE_ENV", ""), ("TERM", "dumb")]).await;
+
+    assert!(
+        other_term.executed().is_empty(),
+        "an undeclared variable is not part of the fingerprint"
+    );
+    assert_eq!(production.executed(), vec!["generate"]);
+    assert_eq!(unset.executed(), vec!["generate"], "unset is a value too");
+    assert_eq!(empty.executed(), vec!["generate"], "empty is not unset");
 }

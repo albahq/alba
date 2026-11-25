@@ -87,6 +87,11 @@ pub struct RunOptions {
     /// it to force colour, and a beam must hit the same cache entry
     /// whether a terminal or a pipe ran it.
     pub extra_env: Vec<(String, String)>,
+    /// The environment the run's commands inherit, as the caller sees it
+    /// (the CLI passes its own process environment): where a beam's
+    /// `env_inputs` read their values from. Given rather than read here, so
+    /// that what the engine sees is exactly what the caller decided.
+    pub ambient_env: Vec<(String, String)>,
 }
 
 /// The executors a run can dispatch to, chosen per beam.
@@ -390,6 +395,8 @@ async fn run_once(
         .as_ref()
         .map(|options| Arc::new(CacheStore::new(options.dir.clone())));
     let force = options.cache.as_ref().is_some_and(|options| options.force);
+    let ambient_env: Arc<HashMap<String, String>> =
+        Arc::new(options.ambient_env.iter().cloned().collect());
 
     // Both halves of every channel exist before the first task is spawned,
     // so no dependent can ever start waiting on a beam whose channel does
@@ -446,6 +453,7 @@ async fn run_once(
             keep_going: options.keep_going,
             cache: cache.clone(),
             force,
+            ambient_env: Arc::clone(&ambient_env),
             extra_env: options.extra_env.clone(),
         };
         tasks.push((beam.id.clone(), tokio::spawn(run_beam(task))));
@@ -650,6 +658,8 @@ struct BeamTask {
     cache: Option<Arc<CacheStore>>,
     /// Ignore any stored entry when reading, but still write one.
     force: bool,
+    /// What `env_inputs` read from: see [`RunOptions::ambient_env`].
+    ambient_env: Arc<HashMap<String, String>>,
     /// The run's ambient environment, added to every command under the
     /// beam's own `env`. Never reaches the cache fingerprint.
     extra_env: Vec<(String, String)>,
@@ -906,6 +916,12 @@ async fn assess(
         commands: plan.commands.clone(),
         cwd: plan.cwd.to_string_lossy().into_owned(),
         env: plan.env.clone(),
+        env_inputs: task
+            .beam
+            .env_inputs
+            .iter()
+            .map(|name| (name.clone(), task.ambient_env.get(name).cloned()))
+            .collect(),
         args: task.args.clone(),
         needs,
         force: task.force,
@@ -938,6 +954,7 @@ struct CacheableBeam {
     commands: Vec<String>,
     cwd: String,
     env: Vec<(String, String)>,
+    env_inputs: Vec<(String, Option<String>)>,
     args: Vec<String>,
     needs: Vec<String>,
     force: bool,
@@ -987,6 +1004,7 @@ impl CacheableBeam {
             commands: &self.commands,
             cwd: &self.cwd,
             env: &self.env,
+            env_inputs: &self.env_inputs,
             args: &self.args,
             needs: &self.needs,
             executor: &self.executor,

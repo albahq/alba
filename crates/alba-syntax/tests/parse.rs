@@ -16,6 +16,7 @@ beam build {
   description "Compile the workspace"
   needs [api:build, codegen]
   inputs ["src/**/*.rs", "Cargo.toml"]
+  env_inputs ["RUSTFLAGS"]
   outputs ["target/{profile}/app"]
   run "cargo build {if release then '--release' else ''}"
 }

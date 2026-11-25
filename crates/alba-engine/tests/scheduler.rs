@@ -51,6 +51,7 @@ fn options(jobs: usize, keep_going: bool) -> RunOptions {
         params: Vec::new(),
         cache: None,
         extra_env: Vec::new(),
+        ambient_env: Vec::new(),
     }
 }
 
@@ -847,6 +848,7 @@ beam deploy(target) {
         params: vec!["staging".to_string()],
         cache: None,
         extra_env: Vec::new(),
+        ambient_env: Vec::new(),
     };
     let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
 
@@ -873,6 +875,7 @@ async fn parameter_count_must_match_the_target() {
             params: vec!["extra".to_string()],
             cache: None,
             extra_env: Vec::new(),
+            ambient_env: Vec::new(),
         },
         Arc::new(FakeExecutor::new()),
     )

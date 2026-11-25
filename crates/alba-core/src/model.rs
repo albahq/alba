@@ -138,6 +138,11 @@ pub struct Beam {
     /// Evaluated but inert in this crate: the cache (out of scope here) is
     /// the only intended consumer.
     pub inputs: Vec<String>,
+    /// Ambient environment variables, by name, whose values join the cache
+    /// fingerprint: what a tool reads from the environment it inherits
+    /// rather than from the Beamfile. Only meaningful beside `inputs`,
+    /// which the loader enforces.
+    pub env_inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub run: Vec<StringTemplate>,
     pub env: Vec<(String, StringTemplate)>,

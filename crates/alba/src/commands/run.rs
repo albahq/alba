@@ -176,6 +176,7 @@ async fn execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        ambient_env: ambient_env(),
         extra_env: Vec::new(),
     };
 
@@ -282,6 +283,7 @@ async fn watch_execute(
             dir: cache_dir(beamfile),
             force: flags.force,
         }),
+        ambient_env: ambient_env(),
         extra_env: Vec::new(),
     };
 
@@ -394,6 +396,7 @@ async fn tui_execute(
         }),
         // The interface renders ANSI, and commands on a pipe emit none
         // unless told to; a monochrome interface asks for none.
+        ambient_env: ambient_env(),
         extra_env: if colour {
             vec![
                 ("FORCE_COLOR".to_string(), "1".to_string()),
@@ -963,6 +966,20 @@ async fn recv_break(signal: &mut Option<tokio::signal::windows::CtrlBreak>) -> O
     }
 }
 
+/// The environment Alba's commands inherit, as the cache reads it for a
+/// beam's `env_inputs`. A value that is not valid unicode is read lossily:
+/// it still compares equal to itself from one run to the next.
+fn ambient_env() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
 /// The cache directory for the project `beamfile` defines: `.alba/cache`
 /// next to the Beamfile. A bare `Beamfile` path has an empty parent,
 /// which means the current directory.
@@ -1060,6 +1077,7 @@ mod tests {
             needs: Vec::new(),
             params: Vec::new(),
             inputs: inputs.iter().map(|input| (*input).to_string()).collect(),
+            env_inputs: Vec::new(),
             outputs: Vec::new(),
             run: Vec::new(),
             env: Vec::new(),
