@@ -60,6 +60,7 @@ fn options(dir: &Path, force: bool) -> RunOptions {
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     }
 }
 
@@ -341,6 +342,7 @@ async fn no_cache_configuration_disables_caching() {
         cache: None,
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
 
     run_once(GEN, "gen", dir.path(), disabled(), FakeExecutor::new()).await;

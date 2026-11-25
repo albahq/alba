@@ -9,8 +9,51 @@
 
 use std::time::Duration;
 
-use alba_core::BeamId;
+use alba_core::{BeamId, ExecutorKind};
 use alba_executors::OutputLine;
+
+/// A beam's definition, for an interface that wants to show more than its
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeamDetails {
+    pub id: BeamId,
+    pub description: Option<String>,
+    /// `<file relative to the project root>:<line>`, when the caller
+    /// supplied the beam's definition (see [`crate::RunOptions::definitions`]).
+    pub location: Option<String>,
+    pub executor: ExecutorLabel,
+    /// The `run` templates as written, unrendered; empty when the caller
+    /// supplied no definition.
+    pub commands: Vec<String>,
+}
+
+/// How an interface names a beam's executor: a kind, then what
+/// distinguishes this beam's use of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorLabel {
+    pub kind: String,
+    pub detail: Option<String>,
+}
+
+impl From<&ExecutorKind> for ExecutorLabel {
+    fn from(executor: &ExecutorKind) -> Self {
+        let (kind, detail) = match executor {
+            ExecutorKind::Shell => ("shell", Some("(embedded)".to_string())),
+            ExecutorKind::SystemShell => ("system shell", None),
+            // `image` names the container; a beam with only `build` is
+            // known by its build context.
+            ExecutorKind::Docker { image, build, .. } => {
+                ("docker", image.clone().or_else(|| build.clone()))
+            }
+            ExecutorKind::Compose { service, .. } => ("compose", Some(service.clone())),
+            ExecutorKind::Plugin { name, .. } => ("plugin", Some(name.clone())),
+        };
+        Self {
+            kind: kind.to_string(),
+            detail,
+        }
+    }
+}
 
 /// One thing that happened during a run.
 ///
@@ -48,6 +91,10 @@ pub enum RunEvent {
         /// `(beam, dependency)`: the first needs the second. Both ends are
         /// always members of `beams` — the subgraph is transitively closed.
         edges: Vec<(BeamId, BeamId)>,
+        /// What each member of `beams` is, as the author wrote it: one
+        /// entry per beam, in the order of `beams`. A snapshot for the same
+        /// reason as the graph: a watch session reloads the Beamfile.
+        details: Vec<BeamDetails>,
     },
     BeamStarted {
         id: BeamId,

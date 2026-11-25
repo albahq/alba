@@ -46,8 +46,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{
-    Beam, BeamId, CoreError, ExecutorKind, OptionValue, Project, execution_subgraph, expand_globs,
-    outputs_satisfied, render_template,
+    Beam, BeamDefinition, BeamId, CoreError, ExecutorKind, OptionValue, Project,
+    execution_subgraph, expand_globs, outputs_satisfied, render_template,
 };
 use alba_executors::{
     BeamContext, BeamIdentity, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor,
@@ -62,7 +62,7 @@ use crate::cache::{
     ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
     fingerprint, hash_file, static_contribution,
 };
-use crate::event::{BeamStatus, RunEvent, RunSummary};
+use crate::event::{BeamDetails, BeamStatus, RunEvent, RunSummary};
 use crate::mask::Mask;
 
 /// How a run is parameterized: everything the caller chose, as opposed to
@@ -93,6 +93,12 @@ pub struct RunOptions {
     /// `env_inputs` read their values from. Given rather than read here, so
     /// that what the engine sees is exactly what the caller decided.
     pub ambient_env: Vec<(String, String)>,
+    /// Where each beam is written and the commands as written, for the
+    /// interface to show: computed by the caller, which holds the sources
+    /// the engine never sees (see [`alba_core::definitions`]). Display
+    /// only, never read by a run itself. A beam without an entry is
+    /// announced with no location and no commands.
+    pub definitions: HashMap<BeamId, BeamDefinition>,
 }
 
 /// The executors a run can dispatch to, chosen per beam.
@@ -383,6 +389,21 @@ async fn run_once(
                 beam.needs
                     .iter()
                     .map(|need| (beam.id.clone(), need.value.clone()))
+            })
+            .collect(),
+        details: beams
+            .iter()
+            .map(|beam| {
+                let definition = options.definitions.get(&beam.id);
+                BeamDetails {
+                    id: beam.id.clone(),
+                    description: beam.description.clone(),
+                    location: definition.map(|definition| definition.location.clone()),
+                    executor: (&beam.executor).into(),
+                    commands: definition
+                        .map(|definition| definition.commands.clone())
+                        .unwrap_or_default(),
+                }
             })
             .collect(),
     });

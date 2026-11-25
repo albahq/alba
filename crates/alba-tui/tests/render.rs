@@ -53,6 +53,7 @@ fn a_run_in_flight_renders_tree_bar_and_logs() {
                 .map(|name| id(name))
                 .collect(),
             edges: vec![(id("build"), id("codegen"))],
+            details: Vec::new(),
         },
         now,
     );
@@ -102,6 +103,7 @@ fn a_failed_run_renders_the_cross_and_summary_counts() {
             affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
+            details: Vec::new(),
         },
         now,
     );
@@ -168,6 +170,7 @@ fn a_run_in_flight_renders_at_the_forty_column_floor() {
             affected_by: None,
             beams: vec![id("codegen"), id("build")],
             edges: vec![(id("build"), id("codegen"))],
+            details: Vec::new(),
         },
         now,
     );
@@ -213,6 +216,7 @@ fn a_search_highlights_and_counts_matches() {
             affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
+            details: Vec::new(),
         },
         now,
     );
@@ -253,6 +257,7 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
             affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
+            details: Vec::new(),
         },
         now,
     );
@@ -293,6 +298,7 @@ fn a_copy_selection_highlights_the_span() {
             affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
+            details: Vec::new(),
         },
         now,
     );
@@ -319,6 +325,7 @@ fn three_beam_chain() -> AppState {
             affected_by: None,
             beams: vec![id("codegen"), id("build"), id("test")],
             edges: vec![(id("build"), id("codegen")), (id("test"), id("build"))],
+            details: Vec::new(),
         },
         now,
     );
@@ -364,6 +371,7 @@ fn the_help_overlay_lists_the_full_keymap() {
             affected_by: None,
             beams: vec![id("build")],
             edges: vec![],
+            details: Vec::new(),
         },
         Instant::now(),
     );
@@ -412,6 +420,7 @@ fn a_long_log_line_wraps_in_the_pane() {
             affected_by: None,
             beams: vec![id("build")],
             edges: Vec::new(),
+            details: Vec::new(),
         },
         now,
     );
@@ -432,6 +441,7 @@ fn a_long_beam_name_is_truncated_in_the_tree() {
             affected_by: None,
             beams: vec![id("services:payment:integration"), id("build")],
             edges: Vec::new(),
+            details: Vec::new(),
         },
         now,
     );

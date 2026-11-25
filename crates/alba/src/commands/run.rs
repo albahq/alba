@@ -177,6 +177,7 @@ async fn execute(
             force: flags.force,
         }),
         ambient_env: ambient_env(),
+        definitions: alba_core::definitions(project, sources, &alba_engine::beamfile_dir(beamfile)),
         extra_env: Vec::new(),
     };
 
@@ -284,6 +285,8 @@ async fn watch_execute(
             force: flags.force,
         }),
         ambient_env: ambient_env(),
+        // A session computes them for each run, from the project it just loaded.
+        definitions: Default::default(),
         extra_env: Vec::new(),
     };
 
@@ -397,6 +400,8 @@ async fn tui_execute(
         // The interface renders ANSI, and commands on a pipe emit none
         // unless told to; a monochrome interface asks for none.
         ambient_env: ambient_env(),
+        // A session computes them for each run, from the project it just loaded.
+        definitions: Default::default(),
         extra_env: if colour {
             vec![
                 ("FORCE_COLOR".to_string(), "1".to_string()),

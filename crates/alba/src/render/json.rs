@@ -139,6 +139,7 @@ impl<'a> From<&'a RunEvent> for WireEvent<'a> {
                 affected_by,
                 beams,
                 edges,
+                details: _,
             } => WireEvent::RunStarted {
                 targets: targets.iter().map(|id| id.0.as_str()).collect(),
                 affected_by: affected_by.as_deref(),
@@ -366,6 +367,7 @@ mod tests {
             affected_by: None,
             beams: vec![BeamId("codegen".to_string()), BeamId("build".to_string())],
             edges: vec![(BeamId("build".to_string()), BeamId("codegen".to_string()))],
+            details: Vec::new(),
         };
 
         let line = serde_json::to_string(&WireEvent::from(&event)).unwrap();

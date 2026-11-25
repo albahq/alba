@@ -227,6 +227,7 @@ fn spawn(
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
     let handle = tokio::spawn({
         let executor = Arc::clone(&executor);
@@ -655,6 +656,53 @@ async fn a_beamfile_change_reloads_and_reruns() {
     assert!(commands.iter().any(|c| c.contains("compile-v2")));
 
     session.finish().await;
+}
+
+/// The details a run announces describe the Beamfile as it is on disk
+/// now, not as it was when the session started.
+#[tokio::test]
+async fn a_reload_announces_the_new_definitions() {
+    let mut session = start(
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-v1\" }\n",
+        "build",
+        FakeExecutor::new(),
+        false,
+    );
+    let first = definition_of_build(session.event_matching(is_run_started).await);
+    assert_eq!(
+        first,
+        (
+            Some("Beamfile:1".to_string()),
+            vec!["echo compile-v1".to_string()]
+        )
+    );
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch(
+        "Beamfile",
+        "\nbeam build { inputs [\"src/**/*.rs\"] run \"echo compile-v2\" }\n",
+    );
+    session.send(vec![beamfile]);
+
+    let second = definition_of_build(session.event_matching(is_run_started).await);
+    assert_eq!(
+        second,
+        (
+            Some("Beamfile:2".to_string()),
+            vec!["echo compile-v2".to_string()]
+        )
+    );
+
+    session.finish().await;
+}
+
+/// The location and commands the `build` beam was announced with.
+fn definition_of_build(event: RunEvent) -> (Option<String>, Vec<String>) {
+    let RunEvent::RunStarted { details, .. } = event else {
+        unreachable!("not a RunStarted event")
+    };
+    let build = details.into_iter().find(|d| d.id.0 == "build").unwrap();
+    (build.location, build.commands)
 }
 
 /// A Beamfile that stops parsing is reported, nothing executes, and the
@@ -1284,6 +1332,7 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
         cache: None,
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
     let handle = tokio::spawn({
         let executor = Arc::clone(&executor);

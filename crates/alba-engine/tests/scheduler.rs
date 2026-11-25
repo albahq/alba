@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use alba_core::{BeamId, load_str};
+use alba_core::{BeamId, definitions, load_project, load_str};
 use alba_engine::{
     BeamStatus, EngineError, Executors, RunEvent, RunOptions, RunSummary, Targets, run,
 };
@@ -52,6 +52,7 @@ fn options(jobs: usize, keep_going: bool) -> RunOptions {
         cache: None,
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     }
 }
 
@@ -849,6 +850,7 @@ beam deploy(target) {
         cache: None,
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
     let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
 
@@ -876,6 +878,7 @@ async fn parameter_count_must_match_the_target() {
             cache: None,
             extra_env: Vec::new(),
             ambient_env: Vec::new(),
+            definitions: Default::default(),
         },
         Arc::new(FakeExecutor::new()),
     )
@@ -979,6 +982,7 @@ beam build { needs [codegen] run "step build" }
             affected_by,
             beams,
             edges,
+            ..
         } => {
             assert_eq!(ids(targets), ["build"]);
             assert!(affected_by.is_none());
@@ -991,6 +995,110 @@ beam build { needs [codegen] run "step build" }
         }
         other => panic!("first event must be RunStarted, got {other:?}"),
     }
+}
+
+/// The interface draws each beam's definition: what the author wrote
+/// (description, commands, where) and which executor runs it.
+#[tokio::test]
+async fn run_started_carries_each_beam_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let beamfile = dir.path().join("Beamfile");
+    std::fs::write(
+        &beamfile,
+        "beam build {\n  executor docker { image \"rust:1\" }\n  run \"cargo build\"\n}\n\
+         beam test {\n  description \"Run the tests\"\n  needs [build]\n  run \"cargo test\"\n}\n",
+    )
+    .unwrap();
+    let (project, sources) = load_project(&beamfile).unwrap();
+    let mut run_options = options(2, false);
+    run_options.definitions = definitions(&project, &sources, dir.path());
+
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    run(
+        &project,
+        &Targets::beam(BeamId("test".to_string())),
+        run_options,
+        Executors::uniform(Arc::new(FakeExecutor::new())),
+        events_tx,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let Some(RunEvent::RunStarted { beams, details, .. }) = events_rx.try_recv().ok() else {
+        panic!("first event must be RunStarted");
+    };
+
+    assert_eq!(
+        details.iter().map(|d| &d.id).collect::<Vec<_>>(),
+        beams.iter().collect::<Vec<_>>(),
+        "details follow the order of beams"
+    );
+    let test = details.iter().find(|d| d.id.0 == "test").unwrap();
+    assert_eq!(test.description.as_deref(), Some("Run the tests"));
+    assert_eq!(test.location.as_deref(), Some("Beamfile:5"));
+    assert_eq!(test.commands, ["cargo test"]);
+    assert_eq!(
+        (test.executor.kind.as_str(), test.executor.detail.as_deref()),
+        ("shell", Some("(embedded)"))
+    );
+    let build = details.iter().find(|d| d.id.0 == "build").unwrap();
+    assert_eq!(
+        (
+            build.executor.kind.as_str(),
+            build.executor.detail.as_deref()
+        ),
+        ("docker", Some("rust:1"))
+    );
+}
+
+/// The label names the executor kind, then what tells this beam's use of
+/// it apart: a container by its image or else its build context, a
+/// Compose beam by its service.
+#[tokio::test]
+async fn run_started_labels_every_executor_kind() {
+    const SOURCE: &str = r#"
+beam sys { executor system_shell run "a" }
+beam built { executor docker { build "ci" } run "b" }
+beam composed { executor compose { service "web" } run "c" }
+beam all { needs [sys, built, composed] run "d" }
+"#;
+    let outcome = run_target(
+        SOURCE,
+        "all",
+        options(1, false),
+        Arc::new(FakeExecutor::new()),
+    )
+    .await;
+    let Some(RunEvent::RunStarted { details, .. }) = outcome.events.first() else {
+        panic!("first event must be RunStarted");
+    };
+    let label = |beam: &str| {
+        let executor = &details.iter().find(|d| d.id.0 == beam).unwrap().executor;
+        (executor.kind.clone(), executor.detail.clone())
+    };
+
+    assert_eq!(label("sys"), ("system shell".to_string(), None));
+    assert_eq!(
+        label("built"),
+        ("docker".to_string(), Some("ci".to_string()))
+    );
+    assert_eq!(
+        label("composed"),
+        ("compose".to_string(), Some("web".to_string()))
+    );
+}
+
+/// Without definitions from the caller, nothing is invented.
+#[tokio::test]
+async fn run_started_without_definitions_has_no_location() {
+    let executor = Arc::new(FakeExecutor::new());
+    let outcome = run_target("beam a { run \"a\" }", "a", options(1, false), executor).await;
+    let Some(RunEvent::RunStarted { details, .. }) = outcome.events.first() else {
+        panic!("first event must be RunStarted");
+    };
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0].location, None);
+    assert!(details[0].commands.is_empty());
 }
 
 /// The helper for a run with several targets: the union of their

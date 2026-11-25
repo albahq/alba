@@ -450,6 +450,7 @@ mod tests {
             affected_by: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: Vec::new(),
+            details: Vec::new(),
         }
     }
 
@@ -1155,6 +1156,7 @@ mod tests {
                 affected_by: None,
                 beams: vec![id("codegen")],
                 edges: Vec::new(),
+                details: Vec::new(),
             },
             Instant::now(),
         );

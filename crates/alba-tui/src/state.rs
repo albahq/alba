@@ -259,6 +259,7 @@ impl AppState {
                 affected_by,
                 beams,
                 edges,
+                details: _,
             } => self.start_run(
                 run_label(targets, affected_by.as_deref()),
                 beams,
@@ -974,6 +975,7 @@ mod tests {
             affected_by: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: edges.iter().map(|(a, b)| (id(a), id(b))).collect(),
+            details: Vec::new(),
         }
     }
 

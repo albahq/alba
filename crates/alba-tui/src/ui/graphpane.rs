@@ -223,6 +223,7 @@ mod tests {
                     .iter()
                     .map(|(beam, dep)| (BeamId(beam.to_string()), BeamId(dep.to_string())))
                     .collect(),
+                details: Vec::new(),
             },
             Instant::now(),
         );

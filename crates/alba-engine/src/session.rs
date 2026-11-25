@@ -275,6 +275,9 @@ async fn drive(
             cache.force = force_next;
         }
         force_next = false;
+        // From this run's own project and sources: a reload may have moved
+        // or rewritten any beam.
+        run_options.definitions = alba_core::definitions(&project, &sources, &root);
 
         // A batch that lands while the run is in flight cancels it and is
         // held here, so the wait phase below starts the next run at once
