@@ -151,6 +151,45 @@ fn a_parked_session_renders_the_diagnostic() {
     insta::assert_snapshot!(drawn(&state, 80, 24));
 }
 
+/// A parked session whose failure points at a span draws the structured
+/// diagnostic: location title, message, snippet with its caret, help.
+#[test]
+fn a_parked_session_renders_the_structured_diagnostic() {
+    let mut state = AppState::new("build", true);
+    state.apply(
+        &RunEvent::ProjectBroken {
+            diagnostic: "error: unknown field `tset`\n".to_string(),
+            report: Some(alba_core::DiagnosticReport {
+                message: "unknown field `tset`".to_string(),
+                path: "Beamfile".to_string(),
+                line: 5,
+                column: 5,
+                snippet: vec![
+                    alba_core::SnippetLine {
+                        number: 4,
+                        text: "beam build {".to_string(),
+                        faulty: false,
+                    },
+                    alba_core::SnippetLine {
+                        number: 5,
+                        text: "    tset = \"cargo test\"".to_string(),
+                        faulty: true,
+                    },
+                    alba_core::SnippetLine {
+                        number: 6,
+                        text: "}".to_string(),
+                        faulty: false,
+                    },
+                ],
+                caret: 4..8,
+                help: Some("did you mean `test`?".to_string()),
+            }),
+        },
+        Instant::now(),
+    );
+    insta::assert_snapshot!(drawn(&state, 80, 24));
+}
+
 /// Below the floor, only the too-small screen renders.
 #[test]
 fn a_tiny_terminal_gets_the_too_small_screen() {

@@ -22,6 +22,7 @@ use crate::state::{AppState, BeamState, Mode, Phase};
 use alba_executors::Stream;
 
 use super::beams::{fit_name, scrollbar};
+use super::diagnostic;
 use super::theme::{ColourMode, Token, fill, remap_ansi, style};
 use super::{ROWS_ABOVE_BODY, ROWS_BELOW_BODY};
 
@@ -165,6 +166,12 @@ pub fn pane_state(state: &AppState) -> PaneState {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
+    // A parked session whose failure points at a span draws it as a
+    // structured diagnostic; without one the plain text below stays.
+    if let Some(report) = &state.diagnostic {
+        diagnostic::draw(frame, area, report, state.colour);
+        return;
+    }
     let parts = layout(area);
     let mode = state.colour;
     let pane_state = pane_state(state);

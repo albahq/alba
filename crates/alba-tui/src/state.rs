@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use alba_core::BeamId;
+use alba_core::{BeamId, DiagnosticReport};
 use alba_engine::{BeamDetails, BeamStatus, RunEvent, RunSummary};
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 
@@ -132,6 +132,12 @@ pub struct AppState {
     /// replaces it. `Esc` cancels instead and clears this (`leave_mode`),
     /// so `n`/`N` only ever step a query the reader committed.
     pub last_search: Option<CommittedSearch>,
+    /// The structured diagnostic the parked session is stopped on, when
+    /// the failure points at a span: drawn by `ui/diagnostic.rs` in place
+    /// of the log pane. Replaced by each `ProjectBroken` and cleared when
+    /// a run starts. Search and copy address logs, so neither opens while
+    /// it is set.
+    pub diagnostic: Option<DiagnosticReport>,
     /// The text `y` or a mouse release last selected, waiting for the
     /// composition root (`lib::run`) to actually attempt the clipboard
     /// write — `AppState` never performs that itself (it would make
@@ -259,6 +265,7 @@ impl AppState {
             colour: ColourMode::Monochrome,
             mode: Mode::Normal,
             last_search: None,
+            diagnostic: None,
             pending_copy: None,
             last_copy_result: None,
             last_summary: None,
@@ -399,9 +406,17 @@ impl AppState {
                 }
                 self.waiting_seen = false;
             }
-            RunEvent::ProjectBroken { diagnostic, .. } => {
+            RunEvent::ProjectBroken { diagnostic, report } => {
                 self.phase = Phase::Parked;
                 self.outcome = None;
+                self.diagnostic = report.clone();
+                if report.is_some() && matches!(self.mode, Mode::Search(_) | Mode::Copy(_)) {
+                    // The log they were working on is no longer on screen.
+                    self.leave_mode();
+                }
+                if report.is_some() {
+                    self.last_search = None;
+                }
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
                 for line in diagnostic.lines() {
                     buffer.push_output(line, alba_executors::Stream::Stdout, false);
@@ -555,6 +570,9 @@ impl AppState {
     /// is itself left, which is what keeps the log pane highlighted
     /// right up to the moment a new search replaces it.
     pub fn enter_search(&mut self) {
+        if self.diagnostic.is_some() {
+            return;
+        }
         self.mode = Mode::Search(SearchState::new());
     }
 
@@ -563,6 +581,9 @@ impl AppState {
     /// is actually on screen (`displayed_log_key`), the diagnostic's
     /// included, while the project is parked.
     pub fn enter_copy(&mut self) {
+        if self.diagnostic.is_some() {
+            return;
+        }
         let beam = self.displayed_log_key();
         let top_line = self
             .logs
@@ -1085,6 +1106,7 @@ impl AppState {
         if let Some(buffer) = self.logs.get_mut(DIAGNOSTIC_LOG) {
             buffer.clear();
         }
+        self.diagnostic = None;
     }
 
     fn index_of(&self, id: &str) -> Option<usize> {

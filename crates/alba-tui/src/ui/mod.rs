@@ -27,6 +27,7 @@ use crate::state::{AppState, Mode};
 use theme::{ColourMode, Token, fill, style};
 
 mod beams;
+mod diagnostic;
 mod graphpane;
 mod header;
 mod help;

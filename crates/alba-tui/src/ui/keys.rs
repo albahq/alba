@@ -84,12 +84,17 @@ fn normal_pairs(state: &AppState) -> Vec<(String, String)> {
     } else {
         "watch"
     };
-    let head = [
-        pair("↑↓", "beam"),
-        pair("/", "search"),
-        pair("g", "graph"),
-        pair("v", "copy"),
-    ];
+    // A structured diagnostic is not a log: nothing to search or copy.
+    let readable = state.diagnostic.is_none();
+    let head: Vec<(String, String)> = [
+        Some(pair("↑↓", "beam")),
+        readable.then(|| pair("/", "search")),
+        Some(pair("g", "graph")),
+        readable.then(|| pair("v", "copy")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let middle: Vec<(String, String)> = match &state.phase {
         Phase::Running { .. } => vec![pair("r", "rerun"), pair("c", "cancel"), pair("w", watch)],
         Phase::Finished => vec![pair("r", "rerun"), pair("f", "force"), pair("w", watch)],
