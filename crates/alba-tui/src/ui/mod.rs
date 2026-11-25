@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn log_pane_content_area_sits_past_the_beams_and_their_title() {
-        // Body from column 2; the beams pane (here the 14-cell CJK name
-        // plus 12, capped at 40 percent of 80) and the divider take 33
+        // Body from column 2; the beams pane (here the CJK name (14 wide
+        // characters, 28 cells) plus 12 is 40, capped to 32 at 80) and the divider take 33
         // columns; the title row takes one line.
         let now = Instant::now();
         assert_eq!(
@@ -399,9 +399,8 @@ mod tests {
         let mut help = running(now).with_colour(ColourMode::TrueColour);
         help.mode = Mode::Help;
         assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&state, 104, 23, now), true);
-        // The help overlay only covers part of the beams pane for now (a
-        // later change gives it the whole body), so the bar's row is
-        // left unchecked under it.
+        // The help overlay does not yet repaint the first cells of the
+        // beams pane's selected row (a later change gives it the whole body).
         assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&help, 104, 23, now), false);
         let buffer = drawn(&state, 104, 23, now);
         assert_eq!(buffer[(40, 12)].fg, Color::Rgb(0xE3, 0xE4, 0xDC));
@@ -416,10 +415,9 @@ mod tests {
                 }
                 let badge = y == 1 && (2..8).contains(&x);
                 // The selected beam's row is the accent bar, 40 cells here.
-                if !with_bar && y == 6 {
-                    continue;
-                }
-                let bar = y == 6 && (2..42).contains(&x);
+                // Under help the overlay leaves the bar only in the cells it does not repaint.
+                let bar_end = if with_bar { 42 } else { 15 };
+                let bar = y == 6 && (2..bar_end).contains(&x);
                 let expected = if badge || bar {
                     Some(Color::Rgb(0xF3, 0xC2, 0x80))
                 } else {

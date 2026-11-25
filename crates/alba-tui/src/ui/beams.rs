@@ -22,15 +22,18 @@ use crate::state::{AppState, BeamRow, BeamState, Phase};
 use super::format_duration;
 use super::theme::{ColourMode, Token, fill, status_token, style};
 
-/// The cells the longest name shares the pane with: the left margin (2),
-/// the glyph (1), a gap after it (1), a gap before the duration (1) and
+/// The cells around the name and the duration: the left margin (2), the
+/// glyph (1), a gap after it (1) and a gap before the duration (1).
+const FIXED_CHROME: usize = 5;
+
+/// The cells the longest name shares the pane with: `FIXED_CHROME` and
 /// the duration column (`DURATION_WIDTH`).
-const CHROME_WIDTH: usize = 5 + DURATION_WIDTH;
+const CHROME_WIDTH: usize = FIXED_CHROME + DURATION_WIDTH;
 
 /// The duration column, right-aligned. Seven cells hold every duration
-/// a run realistically reports (`4.1s`, `2m 14s`, `123m 4s`); a longer
-/// one (`1000m 0s`) takes the cells it needs from the name instead of
-/// overflowing, so the right edge never moves.
+/// up to `99m 59s` (`4.1s`, `2m 14s`); a longer one (`100m 10s` is
+/// eight cells) takes the extra cells from the name on that row instead
+/// of overflowing, so the right edge never moves.
 const DURATION_WIDTH: usize = 7;
 
 /// The pane never gets narrower than this.
@@ -52,7 +55,10 @@ pub fn beams_width(names: &[&str], frame_width: u16) -> u16 {
 
 /// The rows of a `len`-long list shown in `height` rows with `selected`
 /// in the middle, so it always has a row of context on each side except
-/// against the ends of the list.
+/// against the ends of the list. The window is a function of the
+/// selection alone: minimal-scroll behaviour (move only at the edges)
+/// would need a scroll offset kept in the state, which this interface
+/// does not carry.
 pub fn window(selected: usize, len: usize, height: usize) -> Range<usize> {
     if len == 0 || height == 0 {
         return 0..0;
@@ -66,8 +72,8 @@ pub fn window(selected: usize, len: usize, height: usize) -> Range<usize> {
 
 /// The rail rows (`0..height`) the thumb covers for `window` of `len`
 /// rows, `None` when everything fits. The thumb is proportional to the
-/// window and reaches the rail's end exactly when the window reaches
-/// the list's end.
+/// window; at the list's end it always reaches the rail's end, and
+/// rounding may bring it there a few rows earlier.
 pub fn scrollbar(window: Range<usize>, len: usize, height: usize) -> Option<Range<usize>> {
     if len <= height || height == 0 {
         return None;
@@ -189,7 +195,7 @@ fn row_line(
     let duration_width = duration.width().max(DURATION_WIDTH);
     // Budgeted by rendered width: a wide character paints two cells and
     // would otherwise push the duration out of its column.
-    let name_width = width.saturating_sub(5 + duration_width);
+    let name_width = width.saturating_sub(FIXED_CHROME + duration_width);
     let name = fit_name(&row.id, name_width);
     let pad = name_width.saturating_sub(name.width());
     let name_token = match &row.state {
@@ -437,7 +443,7 @@ mod tests {
 
     #[test]
     fn every_duration_fits_and_stays_right_aligned() {
-        for secs in [0, 59, 134, 6_000 + 4, 7_384, 60_000, 600_000] {
+        for secs in [0, 59, 134, 6_010, 7_384, 60_000, 600_000] {
             let row = names_row(
                 "build",
                 BeamState::Done {
