@@ -171,8 +171,8 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
 }
 
 /// The selection bar: `on-accent` bold on `accent`, reversed bold in
-/// monochrome.
-fn selection_style(mode: ColourMode) -> Style {
+/// monochrome. Shared with the graph's focused node.
+pub(super) fn selection_style(mode: ColourMode) -> Style {
     let bar = match mode {
         ColourMode::Monochrome => Style::new().add_modifier(Modifier::REVERSED),
         _ => fill(Token::Accent, mode).patch(style(Token::OnAccent, mode)),

@@ -1,10 +1,10 @@
 //! The whole frame, band by band, for a terminal of `W` x `H` cells:
 //! row 1 the header, row 3 the progress row (or the banner between watch
 //! runs), row 4 the top separator, rows 5 to `H-4` the body (beams pane,
-//! divider, output pane), row `H-3` the bottom separator, row `H-2` the
-//! key hints; rows 0, 2 and `H-1` stay empty. There is no outer border:
-//! content runs from column 2 to `W-3`, separators from column 1 to
-//! `W-2`, with `┬`/`┴` where the divider meets them.
+//! divider, output pane or graph), row `H-3` the bottom separator, row
+//! `H-2` the key hints; rows 0, 2 and `H-1` stay empty. There is no
+//! outer border: content runs from column 2 to `W-3`, separators from
+//! column 1 to `W-2`, with `┬`/`┴` where the divider meets them.
 //!
 //! The whole frame is painted with the surface first, so every cell the
 //! interface draws, uncoloured command output included, reads on Alba's
@@ -101,13 +101,6 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     draw_separator(frame, area, top, mode);
     draw_separator(frame, area, bottom, mode);
 
-    // Graph mode replaces the body entirely: no tree, no output pane,
-    // no divider, so no junctions on the separators either.
-    if let Mode::Graph(graph) = &state.mode {
-        graphpane::draw(frame, body, state, graph);
-        return;
-    }
-
     let (tree_pane, output_pane) = panes(body, state, area.width);
     let divider = Block::new()
         .borders(Borders::RIGHT)
@@ -124,7 +117,11 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
     }
 
     beams::draw(frame, tree_area, state, now);
-    output::draw(frame, output_pane, state);
+    // The graph takes the right pane; the beams stay on the left.
+    match &state.mode {
+        Mode::Graph(graph) => graphpane::draw(frame, output_pane, state, graph),
+        _ => output::draw(frame, output_pane, state),
+    }
 
     // Help is still an overlay over the body, the panes dimmed under it.
     if matches!(state.mode, Mode::Help) {
@@ -485,6 +482,31 @@ mod tests {
             "the duration ends at the divider: {line:?}"
         );
         assert_eq!(buffer[(34, 7)].symbol(), "│");
+    }
+
+    /// The graph keeps the beams pane on the left, the divider and its
+    /// junctions; the graph takes the right pane.
+    #[test]
+    fn the_graph_keeps_the_beams_pane_and_the_divider() {
+        use crate::graph::GraphState;
+
+        let now = Instant::now();
+        let mut state = running(now);
+        state.mode = Mode::Graph(GraphState::new(0));
+        let buffer = drawn(&state, 80, 24, now);
+        assert!(
+            row(&buffer, 5).starts_with("  BEAMS"),
+            "{:?}",
+            row(&buffer, 5)
+        );
+        assert!(
+            row(&buffer, 5).contains("│ GRAPH / build"),
+            "{:?}",
+            row(&buffer, 5)
+        );
+        assert_eq!(buffer[(34, 4)].symbol(), "┬");
+        assert_eq!(buffer[(34, 10)].symbol(), "│");
+        assert_eq!(buffer[(34, 21)].symbol(), "┴");
     }
 
     #[test]

@@ -111,6 +111,9 @@ pub struct AppState {
     pub beams: Vec<BeamRow>,
     /// (beam index, dependency index) into `beams`.
     pub edges: Vec<(usize, usize)>,
+    /// The run's targets, as indexes into `beams`: what the graph view's
+    /// focused path leads to. `target` is only their joined label.
+    pub targets: Vec<usize>,
     pub selected: usize,
     pub logs: HashMap<String, LogBuffer>,
     /// What each beam of the run on screen is and runs, from `RunStarted`.
@@ -253,6 +256,7 @@ impl AppState {
             session_target: target.to_string(),
             beams: Vec::new(),
             edges: Vec::new(),
+            targets: Vec::new(),
             selected: 0,
             logs: HashMap::new(),
             details: HashMap::new(),
@@ -305,6 +309,10 @@ impl AppState {
                     edges,
                     now,
                 );
+                self.targets = targets
+                    .iter()
+                    .filter_map(|target| self.index_of(&target.0))
+                    .collect();
                 self.details = details
                     .iter()
                     .map(|detail| (detail.id.0.clone(), detail.clone()))

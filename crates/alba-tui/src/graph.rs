@@ -7,6 +7,8 @@
 //! rows a renderer can draw top to bottom. `GraphState` is the one bit of
 //! state the graph view owns: which node currently has the focus.
 
+use std::collections::HashSet;
+
 use crossterm::event::KeyCode;
 
 /// Topological layering of the run's snapshot: layer 0 is the beams with
@@ -57,6 +59,53 @@ pub fn slot_center_fraction(index: usize, count: usize) -> f64 {
     } else {
         (index as f64 + 0.5) / count as f64
     }
+}
+
+/// The edges on a dependency path from `focused` down to any of
+/// `targets`, as `(beam, dependency)` pairs from `edges`. An edge is on
+/// such a path when its dependency is `focused` or one of its transitive
+/// dependents, and its beam is a target or leads to one. Empty when
+/// `focused` is itself a target.
+pub fn focused_path(
+    edges: &[(usize, usize)],
+    focused: usize,
+    targets: &[usize],
+) -> HashSet<(usize, usize)> {
+    if targets.contains(&focused) {
+        return HashSet::new();
+    }
+    // Everything that needs `focused`, directly or not, and everything a
+    // target needs, directly or not: an edge lies on a path from one to
+    // the other when its dependency is in the first set and its beam in
+    // the second.
+    let downstream = closure(edges, &[focused], |&(beam, dependency)| (dependency, beam));
+    let upstream = closure(edges, targets, |&(beam, dependency)| (beam, dependency));
+    edges
+        .iter()
+        .copied()
+        .filter(|(beam, dependency)| downstream.contains(dependency) && upstream.contains(beam))
+        .collect()
+}
+
+/// `start` and every beam reached from it by following `edges` in the
+/// direction `step` gives each one (`from` to `to`), to a fixpoint.
+fn closure(
+    edges: &[(usize, usize)],
+    start: &[usize],
+    step: impl Fn(&(usize, usize)) -> (usize, usize),
+) -> HashSet<usize> {
+    let mut reached: HashSet<usize> = start.iter().copied().collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for edge in edges {
+            let (from, to) = step(edge);
+            if reached.contains(&from) && reached.insert(to) {
+                changed = true;
+            }
+        }
+    }
+    reached
 }
 
 /// The graph view's own state: which beam (an index into `AppState.beams`,
@@ -191,6 +240,46 @@ mod tests {
     #[test]
     fn a_single_beam_with_no_edges_is_its_own_layer() {
         assert_eq!(layers(1, &[]), vec![vec![0]]);
+    }
+
+    fn path(edges: &[(usize, usize)], focused: usize, targets: &[usize]) -> Vec<(usize, usize)> {
+        let mut found: Vec<_> = focused_path(edges, focused, targets).into_iter().collect();
+        found.sort();
+        found
+    }
+
+    /// A diamond (0 under 1 and 2, both under the target 3) with an off
+    /// branch 4 that also needs 0: from 0 every edge up to 3 is on the
+    /// path, the off branch is not; from 1 only its own edge to 3 is.
+    #[test]
+    fn the_focused_path_follows_every_route_to_the_target() {
+        let edges = [(1, 0), (2, 0), (3, 1), (3, 2), (4, 0)];
+        assert_eq!(path(&edges, 0, &[3]), vec![(1, 0), (2, 0), (3, 1), (3, 2)]);
+        assert_eq!(path(&edges, 1, &[3]), vec![(3, 1)]);
+    }
+
+    /// An edge skipping a layer is on the path like any other.
+    #[test]
+    fn the_focused_path_takes_an_edge_that_skips_a_layer() {
+        // 3 needs 0 and 2; 2 needs 1; 1 needs 0.
+        let edges = [(3, 0), (3, 2), (2, 1), (1, 0)];
+        assert_eq!(path(&edges, 0, &[3]), vec![(1, 0), (2, 1), (3, 0), (3, 2)]);
+    }
+
+    /// With two targets, the routes to either of them are drawn.
+    #[test]
+    fn the_focused_path_reaches_every_target() {
+        // 1 and 2 both need 0; both are targets; 3 needs 0 but is none.
+        let edges = [(1, 0), (2, 0), (3, 0)];
+        assert_eq!(path(&edges, 0, &[1, 2]), vec![(1, 0), (2, 0)]);
+    }
+
+    /// A focused target has no path, even when another target needs it.
+    #[test]
+    fn a_focused_target_has_no_path() {
+        let edges = [(1, 0)];
+        assert_eq!(path(&edges, 0, &[0, 1]), Vec::new());
+        assert_eq!(path(&edges, 1, &[1]), Vec::new());
     }
 
     #[test]

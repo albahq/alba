@@ -385,10 +385,10 @@ fn three_beam_chain() -> AppState {
     state
 }
 
-/// Graph mode replaces the whole body with the run's DAG: `codegen` at
-/// the top (no dependencies), `build` beneath it, `test` at the bottom —
-/// each linked to the layer above by a straight connector, since every
-/// layer here holds exactly one node and so lines up in the same column.
+/// Graph mode draws the run's DAG in the right pane, the beams pane
+/// kept on the left: `codegen` at the top (no dependencies), `build`
+/// beneath it, `test` at the bottom, each linked to the layer above by a
+/// straight connector, then `COMMANDS` for the focused beam.
 #[test]
 fn the_graph_view_draws_layers_and_edges() {
     let mut state = three_beam_chain();
@@ -424,9 +424,10 @@ fn the_help_overlay_lists_the_full_keymap() {
 /// Arrow keys move the graph's focus (`GraphState::navigate`, reached
 /// through the same modal-key path every other mode uses); two `Down`
 /// presses from `codegen` (layer 0) cross to `build` and then to `test`.
-/// The focused node's reversed style is invisible to
-/// `TestBackend::to_string()` (see `ui/graphpane.rs`'s own
-/// `node_style_reverses_only_the_focused_beam` unit test for that), so
+/// The focused node's style is invisible to `TestBackend::to_string()`
+/// (see `ui/graphpane.rs`'s own
+/// `nodes_take_their_status_colour_and_the_focused_one_is_the_bar` unit
+/// test for that), so
 /// this asserts directly on `GraphState::focused` to confirm navigation
 /// actually landed where it should, and snapshots the resulting screen to
 /// pin that the layout survives a real key-driven navigation, not just a

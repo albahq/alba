@@ -315,6 +315,15 @@ mod tests {
     }
 
     #[test]
+    fn the_graph_row_offers_to_open_the_output() {
+        use crate::graph::GraphState;
+
+        let mut state = started(false);
+        state.mode = Mode::Graph(GraphState::new(0));
+        assert_eq!(row(&state), "↑↓←→ move   Enter open output   Esc back");
+    }
+
+    #[test]
     fn keys_are_accent_bold_and_labels_text() {
         let state = started(false).with_colour(ColourMode::Indexed);
         let hints = line(&state, 200);

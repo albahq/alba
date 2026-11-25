@@ -30,7 +30,7 @@ pub(super) const COPY_KEYS: &str = "hjkl/arrows move · v anchor · y copy · Es
 
 /// Graph mode's keymap — no `hjkl` here, unlike Copy; shared verbatim
 /// with the key hints' `Mode::Graph` arm the same way `COPY_KEYS` is.
-pub(super) const GRAPH_KEYS: &str = "↑↓←→ move · Enter select · Esc back";
+pub(super) const GRAPH_KEYS: &str = "↑↓←→ move · Enter open output · Esc back";
 
 /// How to close the overlay itself, shared verbatim with the key
 /// hints' `Mode::Help` arm.
@@ -80,8 +80,8 @@ fn keymap_lines() -> Vec<String> {
     ]
 }
 
-/// Draws the overlay into `area` — the same body rectangle `graph::draw`
-/// replaces entirely, here instead dimmed and given a centred box on top.
+/// Draws the overlay into `area`, the body rectangle, dimmed and given a
+/// centred box on top.
 /// A no-op on a degenerate (zero-sized) area; `draw` only ever reaches
 /// this once the too-small-screen floor has already been cleared, but
 /// nothing here needs that guarantee to hold.
