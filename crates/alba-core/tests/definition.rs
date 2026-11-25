@@ -91,3 +91,27 @@ fn a_beam_without_run_has_no_commands() {
     assert!(defs[&id("all")].commands.is_empty());
     assert_eq!(defs[&id("all")].location, "Beamfile:2");
 }
+
+#[test]
+fn a_beam_whose_source_is_not_in_the_map_has_no_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path().join("Beamfile"), "beam a { run \"echo a\" }\n");
+    let (project, _) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    let defs = definitions(&project, &alba_core::SourceMap::default(), dir.path());
+
+    assert!(defs.is_empty());
+}
+
+#[test]
+fn a_source_outside_the_root_keeps_its_full_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(dir.path().join("Beamfile"), "beam a { run \"echo a\" }\n");
+    let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+
+    let defs = definitions(&project, &sources, elsewhere.path());
+
+    let expected = format!("{}:1", dir.path().join("Beamfile").display());
+    assert_eq!(defs[&id("a")].location, expected);
+}
