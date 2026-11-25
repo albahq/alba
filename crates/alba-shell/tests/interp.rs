@@ -352,6 +352,35 @@ async fn an_absolute_path_bypasses_the_builtin_of_the_same_name() {
     );
 }
 
+/// A script whose write descriptor is still open somewhere cannot be
+/// executed (`ETXTBSY`). In Alba that somewhere is usually a child another
+/// thread forked while the script was being written, which holds a copy
+/// of the descriptor until its own `exec` a moment later: parallel beams
+/// fork from one process. The shell retries for a short while instead of
+/// failing the command. Here the descriptor is held by the test itself,
+/// and released after a delay.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_script_busy_for_a_moment_still_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("busy.sh");
+    let mut writer = std::fs::File::create(&script).unwrap();
+    std::io::Write::write_all(&mut writer, b"#!/bin/sh\necho ran\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(writer);
+    });
+
+    let (code, lines) = run(&script.display().to_string()).await;
+    release.join().unwrap();
+
+    assert_eq!(code, 0, "{lines:?}");
+    assert_eq!(stdout(&lines), vec!["ran"]);
+}
+
 #[tokio::test]
 async fn exit_rejects_a_non_numeric_argument() {
     // Falling back to the last command's code would silently turn a typo
