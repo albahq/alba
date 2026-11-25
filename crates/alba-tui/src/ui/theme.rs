@@ -66,9 +66,12 @@ impl Token {
 /// terminal draws differently. `indexed_tokens_use_the_pinned_table`
 /// recomputes it and fails if the two ever disagree.
 ///
-/// Known cost of "nearest": `Accent` and `Error` land on the same
-/// index (216) in 256-colour mode.
-const INDEXED: [u8; 11] = [233, 254, 248, 244, 241, 216, 235, 150, 152, 216, 237];
+/// One override: `Accent` and `Error` both land on 216 by distance, and
+/// a running beam must not look like a failed one, so `Accent` takes
+/// 222 (#FFD787), the next nearest choice that keeps its hue. Every other
+/// token keeps its nearest index; `indexed_tokens_are_pairwise_distinct`
+/// guards against any collision.
+const INDEXED: [u8; 11] = [233, 254, 248, 244, 241, 222, 235, 150, 152, 216, 237];
 
 fn colour(token: Token, mode: ColourMode) -> Option<Color> {
     match mode {
@@ -252,7 +255,7 @@ mod tests {
             (Token::TextMuted, 248),
             (Token::Track, 244),
             (Token::Line, 241),
-            (Token::Accent, 216),
+            (Token::Accent, 222),
             (Token::OnAccent, 235),
             (Token::Success, 150),
             (Token::Cached, 152),
@@ -272,7 +275,22 @@ mod tests {
             );
         }
         for (token, rgb) in ALL {
-            assert_eq!(token.index(), nearest_index(rgb), "{token:?}");
+            // Accent is the one documented override of "nearest".
+            let expected = if token == Token::Accent {
+                222
+            } else {
+                nearest_index(rgb)
+            };
+            assert_eq!(token.index(), expected, "{token:?}");
+        }
+    }
+
+    #[test]
+    fn indexed_tokens_are_pairwise_distinct() {
+        for (i, (first, _)) in ALL.iter().enumerate() {
+            for (second, _) in &ALL[i + 1..] {
+                assert_ne!(first.index(), second.index(), "{first:?} vs {second:?}");
+            }
         }
     }
 
