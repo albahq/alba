@@ -57,12 +57,15 @@ impl From<&ExecutorKind> for ExecutorLabel {
 
 /// One thing that happened during a run.
 ///
-/// Per beam, the order is `BeamStarted`, then every `BeamOutput`, then
+/// Per beam, the order is `BeamStarted`, then for each command a
+/// `CommandStarted` followed by that command's `BeamOutput` lines, then
 /// `BeamFinished` — a beam that runs several commands still emits exactly
-/// one started/finished pair, since the individual commands are an
-/// implementation detail of the beam. A cache hit follows the same shape
-/// with `BeamCached` in place of `BeamStarted`: the same replayed
-/// `BeamOutput` lines, then `BeamFinished` with [`BeamStatus::Cached`]. A
+/// one started/finished pair. Output produced while the beam's session is
+/// set up (a notice, an executor's start-up message) can precede the first
+/// `CommandStarted`. A cache hit follows the same shape with `BeamCached`
+/// in place of `BeamStarted` and no `CommandStarted`, since nothing runs:
+/// the replayed `BeamOutput` lines, then `BeamFinished` with
+/// [`BeamStatus::Cached`]. A
 /// beam that never ran (cancelled before it acquired a slot, or skipped
 /// because a dependency failed) emits only `BeamFinished` with
 /// [`BeamStatus::Cancelled`]. Events from different beams interleave

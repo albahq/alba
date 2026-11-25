@@ -22,7 +22,7 @@
 //! of the same facts for a consumer that by construction is parsing the
 //! first one.
 
-use std::io;
+use std::io::{self, Write};
 
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::Stream;
@@ -30,25 +30,31 @@ use serde::Serialize;
 
 use super::LineSink;
 
-pub struct JsonRenderer {
-    out: LineSink<io::Stdout>,
+pub struct JsonRenderer<O: Write = io::Stdout, E: Write = io::Stderr> {
+    out: LineSink<O>,
     /// Only ever written to for `ProjectBroken`: the diagnostic still goes
     /// to stderr in JSON mode too, exactly as it did before this event
     /// existed, for whoever is reading the process the old way rather than
     /// parsing the stream.
-    err: LineSink<io::Stderr>,
+    err: LineSink<E>,
 }
 
 impl JsonRenderer {
     pub fn new() -> Self {
+        Self::with_writers(io::stdout(), io::stderr())
+    }
+}
+
+impl<O: Write, E: Write> JsonRenderer<O, E> {
+    pub fn with_writers(out: O, err: E) -> Self {
         Self {
-            out: LineSink::stdout(),
-            err: LineSink::stderr(),
+            out: LineSink::new(out),
+            err: LineSink::new(err),
         }
     }
 }
 
-impl super::Renderer for JsonRenderer {
+impl<O: Write + Send, E: Write + Send> super::Renderer for JsonRenderer<O, E> {
     fn handle(&mut self, event: &RunEvent) {
         if let RunEvent::ProjectBroken { diagnostic } = event {
             self.err.line(diagnostic.trim_end());
@@ -246,7 +252,19 @@ mod tests {
             command: "cargo build".to_string(),
         };
 
-        assert!(WireEvent::of(&event).is_none());
+        let mut renderer = JsonRenderer::with_writers(Vec::new(), Vec::new());
+
+        super::super::Renderer::handle(&mut renderer, &event);
+        assert!(renderer.out.writer.is_empty(), "nothing is written");
+
+        // The sink itself works: another event does write a line.
+        super::super::Renderer::handle(
+            &mut renderer,
+            &RunEvent::BeamStarted {
+                id: BeamId("build".to_string()),
+            },
+        );
+        assert!(!renderer.out.writer.is_empty());
     }
 
     #[test]

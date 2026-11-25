@@ -1118,8 +1118,9 @@ async fn execute(
     //
     // Commands are announced on a channel of their own because executors
     // hold the output sender and only speak `OutputLine`; the forwarder
-    // merges the two so the announcement of a command always precedes its
-    // output (see `forward_output`).
+    // merges the two so the announcement of a command precedes the output
+    // an executor sends while running it (see `forward_output` for what
+    // that does and does not cover).
     let (lines, output) = tokio::sync::mpsc::unbounded_channel();
     let (announcements, announced) = tokio::sync::mpsc::unbounded_channel();
     let forwarder = tokio::spawn(forward_output(
@@ -1363,11 +1364,15 @@ type Announcement = (String, tokio::sync::oneshot::Sender<()>);
 /// masked the same way. Executors speak `OutputLine` on a channel of their
 /// own, so the order is made here: a sender announces a command and waits
 /// for the acknowledgement before running it, and the forwarder flushes the
-/// output already queued (all of the earlier commands', since an executor
-/// has sent every line by the time `execute` returns) before emitting the
-/// announcement. At most one announcement is ever pending, so the event
-/// order is exactly the execution order. Announcements are not part of the
-/// capture: a cache replay shows output only.
+/// output already queued (what an executor sent before `execute` returned
+/// for the earlier commands) before emitting the announcement. At most one
+/// announcement is ever pending, so announcements and that output keep
+/// their execution order. The guarantee stops there: output an executor
+/// sends from a task that outlives `execute` is best effort. The plugin
+/// executor relays a session-wide stderr from `open` on, so a plugin's
+/// stderr for one command can arrive after the next command's
+/// announcement. Announcements are not part of the capture: a cache replay
+/// shows output only.
 async fn forward_output(
     id: BeamId,
     mut output: UnboundedReceiver<OutputLine>,
