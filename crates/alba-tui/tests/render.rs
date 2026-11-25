@@ -488,3 +488,66 @@ fn a_pending_beam_is_dim_in_monochrome() {
     assert!(dim_of("○"), "pending glyph is dim");
     assert!(!dim_of("▶"), "running glyph is not dim");
 }
+
+/// The stream filter is applied by the drawing itself: hidden lines are
+/// absent, Alba's own lines stay.
+#[test]
+fn a_stream_filter_hides_the_other_stream_in_the_drawing() {
+    let mut state = AppState::new("build", false);
+    let now = Instant::now();
+    state.apply(
+        &RunEvent::RunStarted {
+            targets: vec![id("build")],
+            affected_by: None,
+            beams: vec![id("build")],
+            edges: vec![],
+            details: Vec::new(),
+        },
+        now,
+    );
+    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(
+        &RunEvent::CommandStarted {
+            id: id("build"),
+            command: "make".to_string(),
+        },
+        now,
+    );
+    state.apply(&output("build", "from stdout"), now);
+    state.apply(
+        &RunEvent::BeamOutput {
+            id: id("build"),
+            line: OutputLine {
+                stream: Stream::Stderr,
+                text: "from stderr".to_string(),
+            },
+            replayed: false,
+        },
+        now,
+    );
+    state.cycle_stream_filter(); // stdout only
+    let screen = drawn(&state, 80, 24);
+    assert!(screen.contains("from stdout"));
+    assert!(screen.contains("$ make"));
+    assert!(!screen.contains("from stderr"));
+    state.cycle_stream_filter(); // stderr only
+    let screen = drawn(&state, 80, 24);
+    assert!(screen.contains("from stderr"));
+    assert!(!screen.contains("from stdout"));
+}
+
+/// The parked diagnostic is not process output: no filter hides it.
+#[test]
+fn the_parked_diagnostic_stays_visible_under_a_stream_filter() {
+    let mut state = AppState::new("build", false);
+    state.apply(
+        &RunEvent::ProjectBroken {
+            diagnostic: "error: unknown target `nope`".to_string(),
+            report: None,
+        },
+        Instant::now(),
+    );
+    state.cycle_stream_filter();
+    state.cycle_stream_filter(); // stderr only
+    assert!(drawn(&state, 80, 24).contains("unknown target"));
+}

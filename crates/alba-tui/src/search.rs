@@ -34,11 +34,12 @@ impl SearchState {
     }
 
     /// Recomputes `matches` (line indices, case-insensitive substring)
-    /// against the lines of `buffer` that `filter` shows. Callers run this after every keystroke and
-    /// whenever the buffer gains lines — `SearchState` itself samples
-    /// neither the clock nor the buffer on its own. An empty query
-    /// matches nothing rather than every line: `"".contains("")` is
-    /// true, which would otherwise light up the whole pane.
+    /// against the lines of `buffer` that `filter` shows. Callers run
+    /// this after every keystroke and whenever the buffer gains lines —
+    /// `SearchState` itself samples neither the clock nor the buffer on
+    /// its own. An empty query matches nothing rather than every line:
+    /// `"".contains("")` is true, which would otherwise light up the
+    /// whole pane.
     pub fn update(&mut self, buffer: &LogBuffer, filter: StreamFilter) {
         self.matches.clear();
         if !self.query.is_empty() {

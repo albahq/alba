@@ -62,7 +62,11 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     // begin with (`rows_shown` is empty).
     let lines: Vec<Line> = match buffer {
         Some(buffer) => buffer
-            .view(body_height, rows[1].width as usize, state.stream_filter)
+            .view(
+                body_height,
+                rows[1].width as usize,
+                state.effective_filter(),
+            )
             .iter()
             .map(|row| styled_line(row, buffer, &state.mode, query, state.colour))
             .collect(),

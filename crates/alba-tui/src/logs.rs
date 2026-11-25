@@ -87,6 +87,9 @@ pub struct LogLine {
     pub text: String,
     pub spans: Vec<(Style, String)>,
     pub kind: LineKind,
+    /// The second or later physical line of a multi-line command or
+    /// notice: drawn as part of the first, without its own decoration.
+    pub continuation: bool,
     pub replayed: bool,
 }
 
@@ -98,18 +101,20 @@ impl LogLine {
             text,
             spans,
             kind: LineKind::Output(stream),
+            continuation: false,
             replayed,
         }
     }
 
     /// A line Alba wrote itself: its text is shown as given, never parsed
     /// for escape sequences.
-    fn alba(kind: LineKind, text: String) -> Self {
+    fn alba(kind: LineKind, text: String, continuation: bool) -> Self {
         Self {
             raw: text.clone(),
             spans: vec![(Style::default(), text.clone())],
             text,
             kind,
+            continuation,
             replayed: false,
         }
     }
@@ -335,20 +340,28 @@ impl LogBuffer {
     pub fn push_command(&mut self, command: &str) {
         for (index, line) in physical_lines(command).enumerate() {
             let prefix = if index == 0 { "$ " } else { "  " };
-            self.push_line(LogLine::alba(LineKind::Command, format!("{prefix}{line}")));
+            self.push_line(LogLine::alba(
+                LineKind::Command,
+                format!("{prefix}{line}"),
+                index > 0,
+            ));
         }
     }
 
     /// One of Alba's notices; a multi-line text becomes one line each.
     pub fn push_notice(&mut self, level: NoticeLevel, text: &str) {
-        for line in physical_lines(text) {
-            self.push_line(LogLine::alba(LineKind::Notice(level), line.to_string()));
+        for (index, line) in physical_lines(text).enumerate() {
+            self.push_line(LogLine::alba(
+                LineKind::Notice(level),
+                line.to_string(),
+                index > 0,
+            ));
         }
     }
 
     /// The line Alba writes when the beam ends.
     pub fn push_end(&mut self, tone: EndTone, text: &str) {
-        self.push_line(LogLine::alba(LineKind::End(tone), text.to_string()));
+        self.push_line(LogLine::alba(LineKind::End(tone), text.to_string(), false));
     }
 
     /// While paused, an append must not move the pinned view: the tail
@@ -441,12 +454,12 @@ impl LogBuffer {
 
     /// The rows a pane of `height` by `width` shows through `filter`
     /// (hidden lines have no rows; line indices stay buffer-absolute),
-    /// honoring the scroll
-    /// state: the last `height` rows of the lines up to the tail minus
-    /// the paused offset, the top line cut to its last rows when it does
-    /// not fit whole. When line 0's first row is in view and lines were
-    /// dropped past the cap, the marker `"… N older lines truncated"`
-    /// is prepended as a row of its own, displacing the bottom row.
+    /// honoring the scroll state: the last `height` rows of the lines up
+    /// to the tail minus the paused offset, the top line cut to its last
+    /// rows when it does not fit whole. When the first visible line's
+    /// first row is in view and lines were dropped past the cap, the
+    /// marker `"… N older lines truncated"` is prepended as a row of its
+    /// own, displacing the bottom row.
     pub fn view(&self, height: usize, width: usize, filter: StreamFilter) -> Vec<Row> {
         if height == 0 {
             return Vec::new();
@@ -880,17 +893,17 @@ mod tests {
         let mut buffer = LogBuffer::new();
         buffer.push_command("echo a\necho b");
         buffer.push_notice(NoticeLevel::Error, "first\r\nsecond");
-        let lines: Vec<(&str, LineKind)> = buffer
+        let lines: Vec<(&str, LineKind, bool)> = buffer
             .lines()
-            .map(|line| (line.text.as_str(), line.kind))
+            .map(|line| (line.text.as_str(), line.kind, line.continuation))
             .collect();
         assert_eq!(
             lines,
             vec![
-                ("$ echo a", LineKind::Command),
-                ("  echo b", LineKind::Command),
-                ("first", LineKind::Notice(NoticeLevel::Error)),
-                ("second", LineKind::Notice(NoticeLevel::Error)),
+                ("$ echo a", LineKind::Command, false),
+                ("  echo b", LineKind::Command, true),
+                ("first", LineKind::Notice(NoticeLevel::Error), false),
+                ("second", LineKind::Notice(NoticeLevel::Error), true),
             ]
         );
     }

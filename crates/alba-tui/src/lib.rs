@@ -307,27 +307,27 @@ fn dispatch(
         Action::SelectNext => state.select_next(),
         Action::SelectPrevious => state.select_previous(),
         Action::ScrollUp(rows) => {
-            let filter = state.stream_filter;
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
                 buffer.scroll_up_rows(rows, width, filter);
             }
         }
         Action::ScrollDown(rows) => {
-            let filter = state.stream_filter;
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
                 buffer.scroll_down_rows(rows, width, filter);
             }
         }
         Action::ScrollHalfPageUp => {
             let rows = half_pane(height);
-            let filter = state.stream_filter;
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
                 buffer.scroll_up_rows(rows, width, filter);
             }
         }
         Action::ScrollHalfPageDown => {
             let rows = half_pane(height);
-            let filter = state.stream_filter;
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
                 buffer.scroll_down_rows(rows, width, filter);
             }
