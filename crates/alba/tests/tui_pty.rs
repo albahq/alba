@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 /// A green, one-beam project: the fixture the original smoke test drives.
 const GREEN: &str = "version \"1\"\n\nbeam green {\n  run \"echo hello-from-the-beam\"\n}\n";
@@ -105,14 +105,23 @@ fn drive(
     drive_with_script(beamfile, beam, "", env)
 }
 
-/// Spawns `alba run <beam>` on a fresh pty in `project`, with `env` added,
-/// and returns the child, a channel of the raw chunks it writes, and the
-/// pty's writer for sending it keys.
-fn spawn_on_pty(
-    project: &std::path::Path,
-    beam: &str,
-    env: &[(&str, &str)],
-) -> (KillOnDrop, mpsc::Receiver<Vec<u8>>, Box<dyn Write + Send>) {
+/// A child running on a pty, with what it takes to drive it.
+struct PtySession {
+    child: KillOnDrop,
+    /// The raw chunks the child writes, read on a background thread.
+    chunks: mpsc::Receiver<Vec<u8>>,
+    /// The pty's input, for sending the child keys.
+    writer: Box<dyn Write + Send>,
+    /// Never read, but held for the whole session: on Windows the master
+    /// and the slave share one pseudo console, which is closed once both
+    /// are dropped, ending the child's output before it is read. On unix
+    /// the reader is a duplicated descriptor, so dropping it early went
+    /// unnoticed there.
+    _master: Box<dyn MasterPty + Send>,
+}
+
+/// Spawns `alba run <beam>` on a fresh pty in `project`, with `env` added.
+fn spawn_on_pty(project: &std::path::Path, beam: &str, env: &[(&str, &str)]) -> PtySession {
     let pty = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -132,8 +141,9 @@ fn spawn_on_pty(
     }
     let child = KillOnDrop(pty.slave.spawn_command(command).unwrap());
     // The slave's own handle is not needed once the child holds it; drop
-    // it so the master sees EOF once the child's copy closes too, rather
-    // than being kept alive by a slave reference this test never uses.
+    // it so, on unix, the master sees EOF once the child's copy closes
+    // too, rather than being kept alive by a slave reference this test
+    // never uses.
     drop(pty.slave);
 
     let mut reader = pty.master.try_clone_reader().unwrap();
@@ -159,7 +169,12 @@ fn spawn_on_pty(
         }
     });
 
-    (child, chunks_rx, writer)
+    PtySession {
+        child,
+        chunks: chunks_rx,
+        writer,
+        _master: pty.master,
+    }
 }
 
 /// Same as [`drive`], but also writes `script` to `red.sh` next to the
@@ -176,7 +191,12 @@ fn drive_with_script(
         std::fs::write(project.path().join("red.sh"), script).unwrap();
     }
 
-    let (mut child, chunks_rx, mut writer) = spawn_on_pty(project.path(), beam, env);
+    let PtySession {
+        mut child,
+        chunks: chunks_rx,
+        mut writer,
+        _master,
+    } = spawn_on_pty(project.path(), beam, env);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = String::new();
@@ -331,7 +351,12 @@ fn a_termination_signal_stops_the_interface_and_its_commands() {
             "beam slow { executor system_shell run \"echo $$ > shell.pid; sleep 30\" }\n",
         )
         .unwrap();
-        let (mut child, chunks_rx, mut writer) = spawn_on_pty(project.path(), "slow", &[]);
+        let PtySession {
+            mut child,
+            chunks: chunks_rx,
+            mut writer,
+            _master,
+        } = spawn_on_pty(project.path(), "slow", &[]);
         let pid_file = project.path().join("shell.pid");
 
         let deadline = Instant::now() + Duration::from_secs(30);
