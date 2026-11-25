@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, ExecutorKind, definitions, load_project, load_str};
 use alba_engine::{
-    BeamStatus, EngineError, ExecutorLabel, Executors, RunEvent, RunOptions, RunSummary, Targets,
-    run,
+    BeamStatus, EngineError, ExecutorLabel, Executors, NoticeLevel, RunEvent, RunOptions,
+    RunSummary, Targets, run,
 };
 use alba_executors::{
     BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
@@ -414,12 +414,10 @@ beam all { needs [broken, other] run "step all" }
     );
     let reported = only(
         positions(events, |event| {
-            matches!(event, RunEvent::BeamOutput { id, line, .. }
-                if id.0 == "broken"
-                    && line.stream == Stream::Stderr
-                    && line.text.contains("ALBA_MISSING_VAR_XYZ"))
+            matches!(event, RunEvent::BeamNotice { id, level: NoticeLevel::Error, text }
+                if id.0 == "broken" && text.contains("ALBA_MISSING_VAR_XYZ"))
         }),
-        "render failure reported as stderr output",
+        "render failure reported as an error notice",
     );
     let finished = only(
         positions(
@@ -511,9 +509,85 @@ impl ExecSession for SpawnFailureSession {
     async fn kill(self: Box<Self>) {}
 }
 
+/// Alba's own message about a beam keeps its place among the beam's
+/// output: a notice raised after a command printed something lands after
+/// that output, as the stderr line it replaced did.
+#[tokio::test]
+async fn a_notice_raised_mid_run_lands_after_the_output_before_it() {
+    const SOURCE: &str = r#"
+beam broken { run ["first", "broken command"] }
+"#;
+
+    let outcome = run_target(
+        SOURCE,
+        "broken",
+        options(1, false),
+        Arc::new(PrintingSpawnFailureExecutor),
+    )
+    .await;
+
+    let events = &outcome.events;
+    let printed = only(
+        positions(
+            events,
+            |event| matches!(event, RunEvent::BeamOutput { line, .. } if line.text == "first output"),
+        ),
+        "the first command's output",
+    );
+    let notice = only(
+        positions(events, |event| {
+            matches!(event, RunEvent::BeamNotice { level: NoticeLevel::Error, text, .. }
+                if text.contains("failed to spawn `broken command`"))
+        }),
+        "the spawn failure notice",
+    );
+    let finished = only(
+        positions(events, |event| {
+            matches!(event, RunEvent::BeamFinished { .. })
+        }),
+        "the finished event",
+    );
+    assert!(printed < notice && notice < finished, "{events:?}");
+}
+
+/// Prints a line on `first`, then cannot spawn `broken command`.
+struct PrintingSpawnFailureExecutor;
+
+#[async_trait::async_trait]
+impl Executor for PrintingSpawnFailureExecutor {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(PrintingSpawnFailureSession))
+    }
+}
+
+struct PrintingSpawnFailureSession;
+
+#[async_trait::async_trait]
+impl ExecSession for PrintingSpawnFailureSession {
+    async fn execute(
+        &mut self,
+        cmd: CommandSpec,
+        ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
+        if cmd.command.contains("broken") {
+            return Err(ExecError {
+                message: format!("failed to spawn `{}`", cmd.command),
+            });
+        }
+        let _ = ctx.output.send(stdout("first output"));
+        Ok(ExecResult { exit_code: 0 })
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Ok(())
+    }
+
+    async fn kill(self: Box<Self>) {}
+}
+
 /// A command that never produced an exit code is that beam's failure, not
 /// the run's: it is reported like any other failure, its message reaches
-/// the user as stderr output, and `--keep-going` still runs what does not
+/// the user as an error notice, and `--keep-going` still runs what does not
 /// depend on it.
 #[tokio::test]
 async fn a_command_that_cannot_be_spawned_fails_only_its_own_beam() {
@@ -544,12 +618,10 @@ beam all { needs [broken, other] run "step all" }
     let events = &outcome.events;
     let reported = only(
         positions(events, |event| {
-            matches!(event, RunEvent::BeamOutput { id, line, .. }
-                if id.0 == "broken"
-                    && line.stream == Stream::Stderr
-                    && line.text.contains("failed to spawn `broken command`"))
+            matches!(event, RunEvent::BeamNotice { id, level: NoticeLevel::Error, text }
+                if id.0 == "broken" && text.contains("failed to spawn `broken command`"))
         }),
-        "spawn failure reported as stderr output",
+        "spawn failure reported as an error notice",
     );
     let finished = only(
         positions(
@@ -1425,7 +1497,7 @@ beam build { run ["one", "two"] }
 /// then `Failed { exit_code: -1 }`. No command ever reaches a session that
 /// was never created, and there is nothing to close.
 #[tokio::test]
-async fn an_open_failure_is_the_beams_failure_with_the_message_on_stderr() {
+async fn an_open_failure_is_the_beams_failure_with_the_message_as_a_notice() {
     const SOURCE: &str = r#"
 beam build { run "echo a" }
 "#;
@@ -1449,12 +1521,10 @@ beam build { run "echo a" }
 
     assert!(
         events.iter().any(
-            |event| matches!(event, RunEvent::BeamOutput { id, line, .. }
-            if id.0 == "build"
-                && line.stream == Stream::Stderr
-                && line.text.contains("no runtime here"))
+            |event| matches!(event, RunEvent::BeamNotice { id, level: NoticeLevel::Error, text }
+            if id.0 == "build" && text.contains("no runtime here"))
         ),
-        "the open failure's message must reach the user as stderr output: {events:?}"
+        "the open failure's message must reach the user as an error notice: {events:?}"
     );
 
     let fake_events = executor.events();

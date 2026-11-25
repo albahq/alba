@@ -181,6 +181,13 @@ impl<'a> WireEvent<'a> {
                 duration_ms: millis(duration),
             },
             RunEvent::RunFinished { summary } => WireEvent::from_summary(summary),
+            // A notice keeps the wire shape it always had, a stderr line.
+            RunEvent::BeamNotice { id, text, .. } => WireEvent::BeamOutput {
+                beam: &id.0,
+                stream: WireStream::Stderr,
+                text,
+                replayed: false,
+            },
             // The stream keeps its event kinds: nothing is written for it.
             RunEvent::CommandStarted { .. } => return None,
             RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
@@ -265,6 +272,24 @@ mod tests {
             },
         );
         assert!(!renderer.out.writer.is_empty());
+    }
+
+    #[test]
+    fn a_notice_is_written_as_a_stderr_output_event() {
+        let event = RunEvent::BeamNotice {
+            id: BeamId("build".to_string()),
+            level: alba_engine::NoticeLevel::Error,
+            text: "failed to spawn".to_string(),
+        };
+
+        let mut renderer = JsonRenderer::with_writers(Vec::new(), Vec::new());
+        super::super::Renderer::handle(&mut renderer, &event);
+
+        let written = String::from_utf8(renderer.out.writer.clone()).unwrap();
+        assert_eq!(
+            written.trim_end(),
+            r#"{"event":"beam_output","beam":"build","stream":"stderr","text":"failed to spawn","replayed":false}"#
+        );
     }
 
     #[test]

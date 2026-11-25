@@ -289,18 +289,12 @@ impl AppState {
             // Echoed in the log pane by a later change; nothing to fold yet.
             RunEvent::CommandStarted { .. } => {}
             RunEvent::BeamOutput { id, line, replayed } => {
-                self.logs.entry(id.0.clone()).or_default().push(
-                    line.text.as_str(),
-                    line.stream,
-                    *replayed,
-                );
-                // A still-running beam's search must not go stale while
-                // the user is not typing: a keystroke is not the only
-                // way the match set can change, the buffer gaining a
-                // matching line is another.
-                if self.selected_beam().is_some_and(|row| row.id == id.0) {
-                    self.resync_active_search();
-                }
+                self.append_log_line(&id.0, line.text.as_str(), line.stream, *replayed);
+            }
+            // Drawn like a stderr line until notices get a look of their
+            // own, so nothing Alba says about a beam disappears.
+            RunEvent::BeamNotice { id, text, .. } => {
+                self.append_log_line(&id.0, text.as_str(), alba_executors::Stream::Stderr, false);
             }
             RunEvent::BeamFinished {
                 id,
@@ -834,6 +828,26 @@ impl AppState {
         step(&mut committed.search);
         self.sync_search_scroll(&committed.search);
         self.last_search = Some(committed);
+    }
+
+    /// Appends one line to a beam's log. A still-running beam's search must
+    /// not go stale while the user is not typing: a keystroke is not the
+    /// only way the match set can change, the buffer gaining a matching
+    /// line is another.
+    fn append_log_line(
+        &mut self,
+        beam: &str,
+        text: &str,
+        stream: alba_executors::Stream,
+        replayed: bool,
+    ) {
+        self.logs
+            .entry(beam.to_string())
+            .or_default()
+            .push(text, stream, replayed);
+        if self.selected_beam().is_some_and(|row| row.id == beam) {
+            self.resync_active_search();
+        }
     }
 
     /// Whenever the selected beam's buffer gains a line while a search is
@@ -2036,6 +2050,31 @@ mod tests {
             },
             replayed: false,
         }
+    }
+
+    #[test]
+    fn a_notice_is_appended_to_the_beams_log_in_arrival_order() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+
+        state.apply(&output("build", "compiling"), now);
+        state.apply(
+            &RunEvent::BeamNotice {
+                id: id("build"),
+                level: alba_engine::NoticeLevel::Error,
+                text: "failed to spawn".to_string(),
+            },
+            now,
+        );
+
+        assert_eq!(
+            lines(&state, "build"),
+            [
+                ("compiling".to_string(), false),
+                ("failed to spawn".to_string(), false)
+            ]
+        );
     }
 
     fn replayed_output(beam: &str, text: &str) -> RunEvent {

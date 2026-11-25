@@ -55,6 +55,15 @@ impl From<&ExecutorKind> for ExecutorLabel {
     }
 }
 
+/// How serious a [`RunEvent::BeamNotice`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeLevel {
+    /// Informational: the beam runs as usual (a cache bypass).
+    Info,
+    /// The beam could not run, or a step of it failed.
+    Error,
+}
+
 /// One thing that happened during a run.
 ///
 /// Per beam, the order is `BeamStarted`, then for each command a
@@ -62,7 +71,9 @@ impl From<&ExecutorKind> for ExecutorLabel {
 /// `BeamFinished` — a beam that runs several commands still emits exactly
 /// one started/finished pair. Output produced while the beam's session is
 /// set up (a notice, an executor's start-up message) can precede the first
-/// `CommandStarted`. A cache hit follows the same shape with `BeamCached`
+/// `CommandStarted` (as can a `BeamNotice`, which otherwise keeps its
+/// arrival order relative to the output). A cache hit follows the same
+/// shape with `BeamCached`
 /// in place of `BeamStarted` and no `CommandStarted`, since nothing runs:
 /// the replayed `BeamOutput` lines, then `BeamFinished` with
 /// [`BeamStatus::Cached`]. A
@@ -117,6 +128,14 @@ pub enum RunEvent {
     CommandStarted {
         id: BeamId,
         command: String,
+    },
+    /// Something Alba itself says about a beam (why it runs uncached, why
+    /// it could not run), as opposed to what the beam's commands print.
+    /// Emitted in order with the beam's output, never stored in the cache.
+    BeamNotice {
+        id: BeamId,
+        level: NoticeLevel,
+        text: String,
     },
     BeamOutput {
         id: BeamId,

@@ -75,6 +75,8 @@ impl Renderer for InterleavedRenderer {
             RunEvent::BeamStarted { id } => self.line(&id.0, "started"),
             RunEvent::BeamCached { id } => self.line(&id.0, "cached — replaying last output"),
             RunEvent::BeamOutput { id, line, .. } => self.line(&id.0, &line.text),
+            // Printed where the stderr line it replaced used to appear.
+            RunEvent::BeamNotice { id, text, .. } => self.line(&id.0, text),
             RunEvent::BeamFinished {
                 id,
                 status,

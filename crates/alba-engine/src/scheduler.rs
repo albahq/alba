@@ -51,7 +51,6 @@ use alba_core::{
 };
 use alba_executors::{
     BeamContext, BeamIdentity, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor,
-    Stream,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -62,7 +61,7 @@ use crate::cache::{
     ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
     fingerprint, hash_file, static_contribution,
 };
-use crate::event::{BeamDetails, BeamStatus, RunEvent, RunSummary};
+use crate::event::{BeamDetails, BeamStatus, NoticeLevel, RunEvent, RunSummary};
 use crate::mask::Mask;
 
 /// How a run is parameterized: everything the caller chose, as opposed to
@@ -895,7 +894,7 @@ async fn process(
 /// all, a template that will not render, a dependency with no stable
 /// contribution, or an input file that cannot be hashed. The last two
 /// filesystem cases carry a notice — they are the ones worth telling the
-/// user about, emitted as a stderr line once the beam starts.
+/// user about, emitted as an info notice once the beam starts.
 async fn assess(
     task: &BeamTask,
     plan: Option<&RenderedBeam>,
@@ -1134,10 +1133,7 @@ async fn execute(
     // Why this beam is running uncached, told where the user is already
     // looking rather than out of band.
     if let Some(notice) = notice {
-        let _ = lines.send(OutputLine {
-            stream: Stream::Stderr,
-            text: notice,
-        });
+        announce(&announcements, Marker::notice(NoticeLevel::Info, notice)).await;
     }
 
     // A template that will not render is this beam's failure, not the
@@ -1154,10 +1150,11 @@ async fn execute(
     let status = match plan.map_or_else(|| render(&task.beam, &task.args), Ok) {
         Ok(plan) => run_commands(task, &plan, &lines, &announcements).await,
         Err(error) => {
-            let _ = lines.send(OutputLine {
-                stream: Stream::Stderr,
-                text: error.to_string(),
-            });
+            announce(
+                &announcements,
+                Marker::notice(NoticeLevel::Error, error.to_string()),
+            )
+            .await;
             failure_status(task)
         }
     };
@@ -1251,8 +1248,8 @@ const NO_EXIT_CODE: i32 = -1;
 /// problem, which is exactly what `keep_going` and `allow_failure` are
 /// about. Likewise for a session that could not be opened at all — no
 /// runtime, a missing image. The executor's message would otherwise be
-/// lost, so it is emitted as a stderr line first — the CLI already renders
-/// those where the user is looking.
+/// lost, so it is emitted as an error notice first, in order with the
+/// beam's output, where the user is looking.
 async fn run_commands(
     task: &BeamTask,
     plan: &RenderedBeam,
@@ -1269,10 +1266,11 @@ async fn run_commands(
     let mut session = match task.executor.open(context).await {
         Ok(session) => session,
         Err(error) => {
-            let _ = output.send(OutputLine {
-                stream: Stream::Stderr,
-                text: error.to_string(),
-            });
+            announce(
+                announcements,
+                Marker::notice(NoticeLevel::Error, error.to_string()),
+            )
+            .await;
             return if task.cancel.is_cancelled() {
                 BeamStatus::Cancelled
             } else {
@@ -1298,10 +1296,7 @@ async fn run_commands(
 
         // Awaited, so the forwarder has emitted it, after everything the
         // previous command printed, before this command can print anything.
-        let (done, emitted) = tokio::sync::oneshot::channel();
-        if announcements.send((command.clone(), done)).is_ok() {
-            let _ = emitted.await;
-        }
+        announce(announcements, Marker::Command(command.clone())).await;
         let spec = CommandSpec {
             command: command.clone(),
             env: command_env(&task.extra_env, &plan.env),
@@ -1316,10 +1311,11 @@ async fn run_commands(
             Ok(result) if result.exit_code == 0 => continue,
             Ok(result) => result.exit_code,
             Err(error) => {
-                let _ = output.send(OutputLine {
-                    stream: Stream::Stderr,
-                    text: error.to_string(),
-                });
+                announce(
+                    announcements,
+                    Marker::notice(NoticeLevel::Error, error.to_string()),
+                )
+                .await;
                 NO_EXIT_CODE
             }
         };
@@ -1342,17 +1338,41 @@ async fn run_commands(
     // here. A close failure is a notice, never a verdict change — the
     // commands' own outcome is already decided.
     if let Err(error) = session.close().await {
-        let _ = output.send(OutputLine {
-            stream: Stream::Stderr,
-            text: format!("session close: {error}"),
-        });
+        announce(
+            announcements,
+            Marker::notice(NoticeLevel::Error, format!("session close: {error}")),
+        )
+        .await;
     }
     status
 }
 
-/// A command about to run, and the signal that its announcement has been
-/// emitted.
-type Announcement = (String, tokio::sync::oneshot::Sender<()>);
+/// Something Alba says about a beam that must keep its place among the
+/// beam's output: a command about to run, or a notice.
+enum Marker {
+    Command(String),
+    Notice { level: NoticeLevel, text: String },
+}
+
+impl Marker {
+    fn notice(level: NoticeLevel, text: String) -> Self {
+        Self::Notice { level, text }
+    }
+}
+
+/// A marker, and the signal that it has been emitted.
+type Announcement = (Marker, tokio::sync::oneshot::Sender<()>);
+
+/// Hands a marker to the forwarder and waits until it has emitted it, so
+/// it lands after everything already sent on the output channel and before
+/// anything sent once this returns. A forwarder that is gone has nothing
+/// left to order against; the marker is then dropped.
+async fn announce(announcements: &UnboundedSender<Announcement>, marker: Marker) {
+    let (done, emitted) = tokio::sync::oneshot::channel();
+    if announcements.send((marker, done)).is_ok() {
+        let _ = emitted.await;
+    }
+}
 
 /// Relabels an executor's output lines as this beam's output events until
 /// the executor drops the last sender, and returns everything it saw —
@@ -1360,8 +1380,10 @@ type Announcement = (String, tokio::sync::oneshot::Sender<()>);
 /// masked here, the one place all of a beam's output passes through
 /// before anything can show or store it.
 ///
-/// Each command announced on `announced` becomes a `CommandStarted` event,
-/// masked the same way. Executors speak `OutputLine` on a channel of their
+/// Each marker announced on `announced` becomes a `CommandStarted` or a
+/// `BeamNotice` event, masked the same way. A notice is Alba's own message,
+/// not the beam's output, so it is not part of the capture and is never
+/// stored. Executors speak `OutputLine` on a channel of their
 /// own, so the order is made here: a sender announces a command and waits
 /// for the acknowledgement before running it, and the forwarder flushes the
 /// output already queued (what an executor sent before `execute` returned
@@ -1371,8 +1393,8 @@ type Announcement = (String, tokio::sync::oneshot::Sender<()>);
 /// sends from a task that outlives `execute` is best effort. The plugin
 /// executor relays a session-wide stderr from `open` on, so a plugin's
 /// stderr for one command can arrive after the next command's
-/// announcement. Announcements are not part of the capture: a cache replay
-/// shows output only.
+/// announcement. Markers are not part of the capture: a cache replay shows
+/// output only.
 async fn forward_output(
     id: BeamId,
     mut output: UnboundedReceiver<OutputLine>,
@@ -1393,20 +1415,27 @@ async fn forward_output(
         });
         seen.push(line);
     };
-    let announce = |command: String| {
-        let _ = events.send(RunEvent::CommandStarted {
-            id: id.clone(),
-            command: mask.apply(&command),
+    let emit = |marker: Marker| {
+        let _ = events.send(match marker {
+            Marker::Command(command) => RunEvent::CommandStarted {
+                id: id.clone(),
+                command: mask.apply(&command),
+            },
+            Marker::Notice { level, text } => RunEvent::BeamNotice {
+                id: id.clone(),
+                level,
+                text: mask.apply(&text),
+            },
         });
     };
     loop {
         tokio::select! {
             biased;
-            Some((command, done)) = announced.recv() => {
+            Some((marker, done)) = announced.recv() => {
                 while let Ok(line) = output.try_recv() {
                     forward(line, &mut seen);
                 }
-                announce(command);
+                emit(marker);
                 let _ = done.send(());
             }
             line = output.recv() => match line {
