@@ -93,14 +93,20 @@ pub struct SnippetLine {
 /// in chars. An offset past the end maps to the last position; one inside
 /// a multi-byte char maps to that char.
 pub fn line_col(source: &str, offset: usize) -> (usize, usize) {
-    let mut end = offset.min(source.len());
-    while !source.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = floor_char_boundary(source, offset);
     let before = &source[..end];
     let line = before.matches('\n').count() + 1;
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
     (line, before[line_start..].chars().count() + 1)
+}
+
+/// Clamps `offset` to the source length and floors it to a char boundary.
+fn floor_char_boundary(source: &str, offset: usize) -> usize {
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 impl Diagnostic {
@@ -108,8 +114,8 @@ impl Diagnostic {
     /// (identified as `path`), or `None` when it has no span to point at.
     pub fn report(&self, source: &str, path: &str) -> Option<DiagnosticReport> {
         let span = self.span?;
-        let start = span.offset().min(source.len());
-        let end = (span.offset() + span.len()).min(source.len()).max(start);
+        let start = floor_char_boundary(source, span.offset());
+        let end = floor_char_boundary(source, span.offset() + span.len()).max(start);
         let (line, column) = line_col(source, start);
 
         let lines: Vec<&str> = source
@@ -373,5 +379,46 @@ mod tests {
                 .report("", "Beamfile")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_report_counts_the_caret_in_chars_after_multibyte_text() {
+        let source = "é→x";
+        let start = "é".len();
+        let d = Diagnostic::new(
+            "m",
+            Some(Span {
+                start,
+                end: start + "→".len(),
+            }),
+            None,
+        );
+        let r = d.report(source, "Beamfile").unwrap();
+        assert_eq!((r.line, r.column), (1, 2));
+        assert_eq!(r.caret, 1..2);
+    }
+
+    #[test]
+    fn a_report_floors_span_bounds_inside_a_multibyte_char() {
+        let d = Diagnostic::new("m", Some(Span { start: 1, end: 3 }), None);
+        let r = d.report("é→x", "Beamfile").unwrap();
+        assert_eq!((r.line, r.column), (1, 1));
+        assert_eq!(r.caret, 0..1);
+    }
+
+    #[test]
+    fn a_report_strips_carriage_returns_from_the_snippet() {
+        let source = "a\r\nbc\r\n";
+        let d = Diagnostic::new("m", Some(Span { start: 3, end: 5 }), None);
+        let r = d.report(source, "Beamfile").unwrap();
+        assert_eq!((r.line, r.column), (2, 1));
+        assert_eq!(r.caret, 0..2);
+        assert!(r.snippet.iter().all(|l| !l.text.contains('\r')));
+        assert_eq!(r.snippet[1].text, "bc");
+
+        let at_cr = Diagnostic::new("m", Some(Span { start: 5, end: 6 }), None);
+        let r = at_cr.report(source, "Beamfile").unwrap();
+        assert_eq!((r.line, r.column), (2, 3));
+        assert_eq!(r.caret, 2..2);
     }
 }
