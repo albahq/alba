@@ -114,7 +114,9 @@ impl Renderer for GroupedRenderer {
                 print_summary(&mut self.err, summary, self.affected_by.as_deref());
             }
             RunEvent::RunStarted { affected_by, .. } => self.affected_by = affected_by.clone(),
-            RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
+            RunEvent::WatchWaiting { .. }
+            | RunEvent::WatchTriggered { .. }
+            | RunEvent::CommandStarted { .. } => {}
             // Alba commentary, not the run's output — stderr, like every
             // other diagnostic this module prints (see the module doc).
             RunEvent::ProjectBroken { diagnostic } => {

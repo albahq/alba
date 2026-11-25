@@ -106,6 +106,15 @@ pub enum RunEvent {
     BeamCached {
         id: BeamId,
     },
+    /// A command of the beam is about to run: the command as rendered, with
+    /// the beam's secrets masked, so a consumer can echo it before the
+    /// output it produces. Emitted after `BeamStarted` and before any
+    /// `BeamOutput` of that command, once per command; a beam restored
+    /// from the cache runs nothing and emits none.
+    CommandStarted {
+        id: BeamId,
+        command: String,
+    },
     BeamOutput {
         id: BeamId,
         line: OutputLine,

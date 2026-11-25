@@ -1647,3 +1647,67 @@ beam build { run "one" }
         .expect("a RunFinished event");
     assert_eq!(finished.cleanup_errors, ["db would not stop"]);
 }
+
+/// What the consumer of one beam's events reads, in arrival order: each
+/// announced command as `$ command`, each output line as its text.
+fn events_for(events: &[RunEvent], beam: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::CommandStarted { id, command } if id.0 == beam => {
+                Some(format!("$ {command}"))
+            }
+            RunEvent::BeamOutput { id, line, .. } if id.0 == beam => Some(line.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_command_is_announced_before_its_output_and_masked() {
+    const SOURCE: &str = r#"
+beam b {
+  env { TOKEN = "s3cr3t" }
+  secrets ["TOKEN"]
+  run ["echo one", "echo s3cr3t"]
+}
+"#;
+    let with_output = |text: &str| FakeBehavior {
+        output_lines: vec![stdout(text)],
+        ..behavior(0, 0)
+    };
+    // Repeated so a lagging forwarder, not luck, would be what fails it.
+    for _ in 0..50 {
+        let executor = Arc::new(
+            FakeExecutor::new()
+                .on("echo one", with_output("one"))
+                .on("echo s3cr3t", with_output("s3cr3t")),
+        );
+
+        let outcome = run_target(SOURCE, "b", options(2, false), executor).await;
+
+        assert_eq!(
+            events_for(&outcome.events, "b"),
+            vec!["$ echo one", "one", "$ echo ***", "***"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_command_without_output_is_still_announced() {
+    const SOURCE: &str = r#"beam b { run ["true", "echo after"] }"#;
+    let executor = Arc::new(FakeExecutor::new().on(
+        "echo after",
+        FakeBehavior {
+            output_lines: vec![stdout("after")],
+            ..behavior(0, 0)
+        },
+    ));
+
+    let outcome = run_target(SOURCE, "b", options(1, false), executor).await;
+
+    assert_eq!(
+        events_for(&outcome.events, "b"),
+        vec!["$ true", "$ echo after", "after"]
+    );
+}

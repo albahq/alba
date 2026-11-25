@@ -286,6 +286,8 @@ impl AppState {
                     self.last_search = Some(committed);
                 }
             }
+            // Echoed in the log pane by a later change; nothing to fold yet.
+            RunEvent::CommandStarted { .. } => {}
             RunEvent::BeamOutput { id, line, replayed } => {
                 self.logs.entry(id.0.clone()).or_default().push(
                     line.text.as_str(),

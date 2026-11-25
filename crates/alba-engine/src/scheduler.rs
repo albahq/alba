@@ -1115,10 +1115,17 @@ async fn execute(
     // `BeamOutput` precedes this beam's `BeamFinished`; it ends when the
     // last sender is dropped, which an `Executor` does by the time
     // `execute` returns (the trait's contract).
+    //
+    // Commands are announced on a channel of their own because executors
+    // hold the output sender and only speak `OutputLine`; the forwarder
+    // merges the two so the announcement of a command always precedes its
+    // output (see `forward_output`).
     let (lines, output) = tokio::sync::mpsc::unbounded_channel();
+    let (announcements, announced) = tokio::sync::mpsc::unbounded_channel();
     let forwarder = tokio::spawn(forward_output(
         task.beam.id.clone(),
         output,
+        announced,
         task.events.clone(),
         mask,
     ));
@@ -1144,7 +1151,7 @@ async fn execute(
     // here is how a beam whose template does not render reaches the failure
     // path with its error message intact.
     let status = match plan.map_or_else(|| render(&task.beam, &task.args), Ok) {
-        Ok(plan) => run_commands(task, &plan, &lines).await,
+        Ok(plan) => run_commands(task, &plan, &lines, &announcements).await,
         Err(error) => {
             let _ = lines.send(OutputLine {
                 stream: Stream::Stderr,
@@ -1154,6 +1161,7 @@ async fn execute(
         }
     };
     drop(lines);
+    drop(announcements);
     let lines = forwarder.await.unwrap_or_default();
 
     (status, started_at.elapsed(), lines)
@@ -1248,6 +1256,7 @@ async fn run_commands(
     task: &BeamTask,
     plan: &RenderedBeam,
     output: &UnboundedSender<OutputLine>,
+    announcements: &UnboundedSender<Announcement>,
 ) -> BeamStatus {
     let context = BeamContext {
         beam: task.beam.id.0.clone(),
@@ -1286,6 +1295,12 @@ async fn run_commands(
             break;
         }
 
+        // Awaited, so the forwarder has emitted it, after everything the
+        // previous command printed, before this command can print anything.
+        let (done, emitted) = tokio::sync::oneshot::channel();
+        if announcements.send((command.clone(), done)).is_ok() {
+            let _ = emitted.await;
+        }
         let spec = CommandSpec {
             command: command.clone(),
             env: command_env(&task.extra_env, &plan.env),
@@ -1334,19 +1349,34 @@ async fn run_commands(
     status
 }
 
+/// A command about to run, and the signal that its announcement has been
+/// emitted.
+type Announcement = (String, tokio::sync::oneshot::Sender<()>);
+
 /// Relabels an executor's output lines as this beam's output events until
 /// the executor drops the last sender, and returns everything it saw —
 /// the capture a successful beam stores for future replay. Every line is
 /// masked here, the one place all of a beam's output passes through
 /// before anything can show or store it.
+///
+/// Each command announced on `announced` becomes a `CommandStarted` event,
+/// masked the same way. Executors speak `OutputLine` on a channel of their
+/// own, so the order is made here: a sender announces a command and waits
+/// for the acknowledgement before running it, and the forwarder flushes the
+/// output already queued (all of the earlier commands', since an executor
+/// has sent every line by the time `execute` returns) before emitting the
+/// announcement. At most one announcement is ever pending, so the event
+/// order is exactly the execution order. Announcements are not part of the
+/// capture: a cache replay shows output only.
 async fn forward_output(
     id: BeamId,
     mut output: UnboundedReceiver<OutputLine>,
+    mut announced: UnboundedReceiver<Announcement>,
     events: UnboundedSender<RunEvent>,
     mask: Mask,
 ) -> Vec<OutputLine> {
     let mut seen = Vec::new();
-    while let Some(line) = output.recv().await {
+    let forward = |line: OutputLine, seen: &mut Vec<OutputLine>| {
         let line = OutputLine {
             text: mask.apply(&line.text),
             ..line
@@ -1357,6 +1387,28 @@ async fn forward_output(
             replayed: false,
         });
         seen.push(line);
+    };
+    let announce = |command: String| {
+        let _ = events.send(RunEvent::CommandStarted {
+            id: id.clone(),
+            command: mask.apply(&command),
+        });
+    };
+    loop {
+        tokio::select! {
+            biased;
+            Some((command, done)) = announced.recv() => {
+                while let Ok(line) = output.try_recv() {
+                    forward(line, &mut seen);
+                }
+                announce(command);
+                let _ = done.send(());
+            }
+            line = output.recv() => match line {
+                Some(line) => forward(line, &mut seen),
+                None => break,
+            },
+        }
     }
     seen
 }
