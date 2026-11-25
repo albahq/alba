@@ -406,6 +406,10 @@ fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) 
 /// has printed nothing yet is still a legitimate thing to do. `None`
 /// only when no beam is selected at all (before the first run).
 fn selected_buffer_mut(state: &mut AppState) -> Option<&mut LogBuffer> {
+    // Nothing to scroll while the structured diagnostic is what shows.
+    if state.shows_structured_diagnostic() {
+        return None;
+    }
     let id = state.selected_beam()?.id.clone();
     Some(state.logs.entry(id).or_default())
 }
@@ -1273,6 +1277,39 @@ mod tests {
         ));
 
         dispatch(&mut state, &commands, Action::FollowTail, size());
+        assert!(matches!(
+            state.logs["codegen"].scroll(),
+            logs::Scroll::Following
+        ));
+    }
+
+    /// While the structured diagnostic is what the pane shows, the
+    /// scroll keys have nothing to scroll: they must not pause a buffer
+    /// that is not drawn.
+    #[test]
+    fn scrolling_is_ignored_while_the_structured_diagnostic_shows() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["codegen"]);
+        let now = Instant::now();
+        for index in 0..5 {
+            state.apply(&output("codegen", &format!("line {index}")), now);
+        }
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: x\n".to_string(),
+                report: Some(alba_core::DiagnosticReport {
+                    message: "x".to_string(),
+                    path: "Beamfile".to_string(),
+                    line: 1,
+                    column: 1,
+                    snippet: Vec::new(),
+                    caret: 0..1,
+                    help: None,
+                }),
+            },
+            now,
+        );
+        dispatch(&mut state, &commands, Action::ScrollUp(2), size());
         assert!(matches!(
             state.logs["codegen"].scroll(),
             logs::Scroll::Following

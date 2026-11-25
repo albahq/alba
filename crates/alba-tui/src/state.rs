@@ -135,8 +135,10 @@ pub struct AppState {
     /// The structured diagnostic the parked session is stopped on, when
     /// the failure points at a span: drawn by `ui/diagnostic.rs` in place
     /// of the log pane. Replaced by each `ProjectBroken` and cleared when
-    /// a run starts. Search and copy address logs, so neither opens while
-    /// it is set.
+    /// a run starts. While search or copy is active, or a committed search
+    /// is kept, the pane shows the plain rendered text instead
+    /// (`shows_structured_diagnostic`), where highlights and selections
+    /// line up with the log buffer.
     pub diagnostic: Option<DiagnosticReport>,
     /// The text `y` or a mouse release last selected, waiting for the
     /// composition root (`lib::run`) to actually attempt the clipboard
@@ -410,13 +412,6 @@ impl AppState {
                 self.phase = Phase::Parked;
                 self.outcome = None;
                 self.diagnostic = report.clone();
-                if report.is_some() && matches!(self.mode, Mode::Search(_) | Mode::Copy(_)) {
-                    // The log they were working on is no longer on screen.
-                    self.leave_mode();
-                }
-                if report.is_some() {
-                    self.last_search = None;
-                }
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
                 for line in diagnostic.lines() {
                     buffer.push_output(line, alba_executors::Stream::Stdout, false);
@@ -529,6 +524,15 @@ impl AppState {
         self.select(focused);
     }
 
+    /// Whether the pane draws the structured diagnostic rather than the
+    /// plain log: there is one, and nothing needs the log's own rows
+    /// (search, copy, or a search kept highlighted).
+    pub fn shows_structured_diagnostic(&self) -> bool {
+        self.diagnostic.is_some()
+            && !matches!(self.mode, Mode::Search(_) | Mode::Copy(_))
+            && self.last_search.is_none()
+    }
+
     /// The filter the displayed log is actually drawn through: the
     /// parked diagnostic is Alba's own text, not process output, so no
     /// stream filter applies to it.
@@ -570,9 +574,6 @@ impl AppState {
     /// is itself left, which is what keeps the log pane highlighted
     /// right up to the moment a new search replaces it.
     pub fn enter_search(&mut self) {
-        if self.diagnostic.is_some() {
-            return;
-        }
         self.mode = Mode::Search(SearchState::new());
     }
 
@@ -581,9 +582,6 @@ impl AppState {
     /// is actually on screen (`displayed_log_key`), the diagnostic's
     /// included, while the project is parked.
     pub fn enter_copy(&mut self) {
-        if self.diagnostic.is_some() {
-            return;
-        }
         let beam = self.displayed_log_key();
         let top_line = self
             .logs

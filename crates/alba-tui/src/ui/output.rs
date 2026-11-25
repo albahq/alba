@@ -168,7 +168,11 @@ pub fn pane_state(state: &AppState) -> PaneState {
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     // A parked session whose failure points at a span draws it as a
     // structured diagnostic; without one the plain text below stays.
-    if let Some(report) = &state.diagnostic {
+    if let Some(report) = state
+        .diagnostic
+        .as_ref()
+        .filter(|_| state.shows_structured_diagnostic())
+    {
         diagnostic::draw(frame, area, report, state.colour);
         return;
     }

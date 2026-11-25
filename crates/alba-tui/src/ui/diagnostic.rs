@@ -47,7 +47,12 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, report: &DiagnosticReport, mod
     );
     let body = Rect::new(x, area.y + 1, width, area.height - 1);
     frame.render_widget(
-        Paragraph::new(body_lines(report, width as usize, mode)),
+        Paragraph::new(body_lines(
+            report,
+            width as usize,
+            body.height as usize,
+            mode,
+        )),
         body,
     );
 }
@@ -69,26 +74,74 @@ fn title_line(report: &DiagnosticReport, width: usize, mode: ColourMode) -> Line
     Line::from(spans)
 }
 
-fn body_lines(report: &DiagnosticReport, width: usize, mode: ColourMode) -> Vec<Line<'static>> {
-    let mut lines = labelled(
+fn body_lines(
+    report: &DiagnosticReport,
+    width: usize,
+    height: usize,
+    mode: ColourMode,
+) -> Vec<Line<'static>> {
+    let mut error = labelled(
         ERROR_LABEL,
         style(Token::Error, mode).bold(),
         &report.message,
         style(Token::Text, mode).bold(),
         width,
     );
-    lines.push(Line::default());
-    lines.extend(snippet_lines(report, width, mode));
-    if let Some(help) = &report.help {
-        lines.push(Line::default());
-        lines.extend(labelled(
+    let mut help = report.help.as_ref().map_or_else(Vec::new, |help| {
+        labelled(
             HELP_LABEL,
             style(Token::Success, mode).bold(),
             help,
             style(Token::Text, mode),
             width,
-        ));
+        )
+    });
+    let Snippet {
+        mut before,
+        faulty,
+        mut after,
+    } = snippet_lines(report, width, mode);
+    let mut blanks = true;
+    let total = |error: &[Line], before: &[Line], after: &[Line], help: &[Line], blanks: bool| {
+        let spacing = if blanks {
+            usize::from(!error.is_empty()) + usize::from(!help.is_empty())
+        } else {
+            0
+        };
+        error.len() + before.len() + faulty.len() + after.len() + help.len() + spacing
+    };
+    // Short panes lose, in order: the context before the faulty line,
+    // the context after it, the blank rows, the wrapped rows of the
+    // message and of the help, then the message itself. The faulty line,
+    // its caret and the help are what stay.
+    while total(&error, &before, &after, &help, blanks) > height {
+        if !before.is_empty() {
+            before.remove(0);
+        } else if !after.is_empty() {
+            after.pop();
+        } else if blanks {
+            blanks = false;
+        } else if error.len() > 1 {
+            error.truncate(1);
+        } else if help.len() > 1 {
+            help.truncate(1);
+        } else if !error.is_empty() {
+            error.clear();
+        } else {
+            break;
+        }
     }
+    let mut lines = error;
+    if blanks && !lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(before);
+    lines.extend(faulty);
+    lines.extend(after);
+    if blanks && !help.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(help);
     lines
 }
 
@@ -117,22 +170,34 @@ fn labelled(
     lines
 }
 
-/// `text` cut into rows of at most `room` cells, at newlines and, past
-/// that, wherever the row is full. A row is never empty unless its source
-/// line is.
+/// `text` cut into rows of at most `room` cells, at newlines, then at
+/// spaces; a word wider than `room` is cut where the row is full.
 fn wrap(text: &str, room: usize) -> Vec<String> {
     let mut rows = Vec::new();
     for source in text.lines() {
         let mut row = String::new();
         let mut used = 0;
-        for c in source.chars() {
-            let cell = c.width().unwrap_or(0);
-            if used + cell > room && used > 0 {
+        for word in source.split(' ').filter(|word| !word.is_empty()) {
+            let word_width = word.width();
+            if used > 0 && used + 1 + word_width <= room {
+                row.push(' ');
+                row.push_str(word);
+                used += 1 + word_width;
+                continue;
+            }
+            if used > 0 {
                 rows.push(std::mem::take(&mut row));
                 used = 0;
             }
-            row.push(c);
-            used += cell;
+            for c in word.chars() {
+                let cell = c.width().unwrap_or(0);
+                if used + cell > room && used > 0 {
+                    rows.push(std::mem::take(&mut row));
+                    used = 0;
+                }
+                row.push(c);
+                used += cell;
+            }
         }
         rows.push(row);
     }
@@ -180,7 +245,15 @@ fn column_of(glyphs: &[Glyph], index: usize) -> usize {
     )
 }
 
-fn snippet_lines(report: &DiagnosticReport, width: usize, mode: ColourMode) -> Vec<Line<'static>> {
+/// The snippet's rows, split around the faulty line (with its caret row)
+/// so a short pane can drop the context on either side.
+struct Snippet {
+    before: Vec<Line<'static>>,
+    faulty: Vec<Line<'static>>,
+    after: Vec<Line<'static>>,
+}
+
+fn snippet_lines(report: &DiagnosticReport, width: usize, mode: ColourMode) -> Snippet {
     let digits = report
         .snippet
         .iter()
@@ -189,14 +262,29 @@ fn snippet_lines(report: &DiagnosticReport, width: usize, mode: ColourMode) -> V
         .unwrap_or(1);
     let bar = " │ ";
     let room = width.saturating_sub(digits + bar.width());
-    let mut lines = Vec::new();
+    let mut snippet = Snippet {
+        before: Vec::new(),
+        faulty: Vec::new(),
+        after: Vec::new(),
+    };
     for line in &report.snippet {
-        lines.push(source_line(line, report, digits, room, mode));
         if line.faulty {
-            lines.push(caret_line(line, report, digits, room, mode));
+            snippet
+                .faulty
+                .push(source_line(line, report, digits, room, mode));
+            snippet
+                .faulty
+                .push(caret_line(line, report, digits, room, mode));
+        } else {
+            let row = source_line(line, report, digits, room, mode);
+            if snippet.faulty.is_empty() {
+                snippet.before.push(row);
+            } else {
+                snippet.after.push(row);
+            }
         }
     }
-    lines
+    snippet
 }
 
 fn gutter(
@@ -298,7 +386,7 @@ mod tests {
 
     use super::super::draw as draw_frame;
     use super::*;
-    use crate::state::{AppState, Mode};
+    use crate::state::AppState;
     use crate::ui::theme::ColourMode;
 
     fn snippet(lines: &[(usize, &str, bool)]) -> Vec<SnippetLine> {
@@ -498,28 +586,92 @@ mod tests {
         assert!(state.diagnostic.is_none());
     }
 
-    #[test]
-    fn search_and_copy_are_not_offered_on_a_structured_diagnostic() {
-        let mut state = parked(Some(report(&[(5, "tset", true)], 0..4)));
-        state.enter_search();
-        assert!(matches!(state.mode, Mode::Normal));
-        state.enter_copy();
-        assert!(matches!(state.mode, Mode::Normal));
+    fn typed(state: &mut AppState, text: &str) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for c in text.chars() {
+            state.handle_modal_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
     }
 
     #[test]
-    fn a_break_while_searching_leaves_search_mode() {
-        let mut state = AppState::new("build", true);
+    fn search_and_copy_stay_offered_on_a_structured_diagnostic() {
+        let state = parked(Some(report(&[(5, "tset", true)], 0..4)));
+        let all = rows(&drawn(&state, 100, 24));
+        assert!(all[22].contains("/ search"), "{:?}", all[22]);
+        assert!(all[22].contains("v copy"), "{:?}", all[22]);
+    }
+
+    #[test]
+    fn searching_shows_the_plain_text_and_escape_returns_to_the_structure() {
+        let mut state = parked(Some(report(&[(5, "tset = 1", true)], 0..4)));
         state.enter_search();
-        state.apply(
-            &RunEvent::ProjectBroken {
-                diagnostic: "error: x\n".to_string(),
-                report: Some(report(&[(5, "tset", true)], 0..4)),
-            },
-            Instant::now(),
+        typed(&mut state, "tset");
+        let buffer = drawn(&state, 100, 24);
+        let all = rows(&buffer);
+        assert!(!all.iter().any(|row| row.contains('^')), "{all:#?}");
+        let plain = row_with(&buffer, "unknown field");
+        let x = column_of_text(&buffer, plain, "tset") as u16;
+        assert!(
+            buffer[(x, plain)].modifier.contains(Modifier::REVERSED),
+            "the match is highlighted"
         );
-        assert!(matches!(state.mode, Mode::Normal));
-        assert!(state.last_search.is_none());
+        state.leave_mode();
+        let all = rows(&drawn(&state, 100, 24));
+        assert!(all.iter().any(|row| row.contains('^')), "{all:#?}");
+    }
+
+    #[test]
+    fn copying_shows_the_plain_text() {
+        let mut state = parked(Some(report(&[(5, "tset = 1", true)], 0..4)));
+        state.enter_copy();
+        let all = rows(&drawn(&state, 100, 24));
+        assert!(!all.iter().any(|row| row.contains('^')), "{all:#?}");
+        assert!(all.iter().any(|row| row.contains("unknown field")));
+    }
+
+    #[test]
+    fn the_caret_and_help_survive_the_twelve_row_floor() {
+        let report = report(
+            &[
+                (4, "beam build {", false),
+                (5, "    tset = 1", true),
+                (6, "}", false),
+            ],
+            4..8,
+        );
+        let all = rows(&drawn(&parked(Some(report)), 40, 12));
+        assert!(all.iter().any(|row| row.contains('^')), "{all:#?}");
+        assert!(all.iter().any(|row| row.contains("help:")), "{all:#?}");
+        assert!(all.iter().any(|row| row.contains("5 │")), "{all:#?}");
+    }
+
+    #[test]
+    fn long_messages_wrap_at_word_boundaries() {
+        let mut broken = report(&[(5, "tset", true)], 0..4);
+        broken.message = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda".into();
+        let all = rows(&drawn(&parked(Some(broken.clone())), 60, 24));
+        let panes: Vec<&str> = all
+            .iter()
+            .filter_map(|row| row.split('│').nth(1))
+            .map(str::trim)
+            .collect();
+        let start = panes
+            .iter()
+            .position(|row| row.starts_with("error:"))
+            .unwrap();
+        let message: Vec<&str> = panes[start..]
+            .iter()
+            .take_while(|row| !row.is_empty())
+            .copied()
+            .collect();
+        assert!(message.len() > 1, "the message wraps: {message:?}");
+        let allowed: Vec<&str> = broken.message.split(' ').collect();
+        for word in message.iter().flat_map(|row| row.split_whitespace()) {
+            assert!(
+                word == "error:" || allowed.contains(&word),
+                "a word was cut: {word:?} in {message:?}"
+            );
+        }
     }
 
     #[test]
