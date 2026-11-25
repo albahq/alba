@@ -1,9 +1,11 @@
 //! The graph view, in the right pane beside the beams: a title row,
 //! the run's dependency DAG laid out by `graph::layers` as one row of
 //! `[ glyph name ]` nodes per layer (dependencies above the beams that
-//! need them), a connector row between consecutive layers, then
-//! `COMMANDS` for the focused beam. The edges on the focused beam's path
-//! to the targets are drawn in `accent`, the others in `line`. When the
+//! need them), a three-row connector band between consecutive layers
+//! (`│` under each parent, one joining row such as `└──┼──┘`, `│` into
+//! each child), then `COMMANDS` for the focused beam. The edges on the
+//! focused beam's path to the targets are drawn in `accent` (bold in
+//! monochrome), the others in `line`. When the
 //! pane is too short, `COMMANDS` goes first, then the DAG scrolls to
 //! keep the focused node on screen.
 //!
@@ -55,7 +57,7 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
     }
 
     let room = area.height.saturating_sub(ROWS_ABOVE_DAG) as usize;
-    let dag_rows = layers.len() * 2 - 1;
+    let dag_rows = node_row(layers.len() - 1) + 1;
     let focused_row = layer_of(&layers, graph_state.focused).map_or(0, node_row);
     let visible = if dag_rows <= room {
         0..dag_rows
@@ -76,8 +78,11 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
         }
     }
     for boundary in 0..layers.len() - 1 {
-        if let Some(row_area) = row_rect(dag, &visible, connector_row(boundary)) {
-            draw_connectors(frame, row_area, &layers, boundary, state, &path);
+        let band = Band::crossing(&layers, boundary, state, &path, dag);
+        for (part, glyphs) in band.rows().into_iter().enumerate() {
+            if let Some(row_area) = row_rect(dag, &visible, connector_row(boundary, part)) {
+                draw_band_row(frame, row_area, &glyphs, state.colour);
+            }
         }
     }
 
@@ -88,16 +93,20 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
     }
 }
 
+/// The connector band between two layers: a row of `│` under the
+/// parents, the joining row, a row of `│` into the children.
+const BAND_ROWS: usize = 3;
+
 /// The DAG's own row of layer `layer_index`'s nodes: one node row per
-/// layer, one connector row between consecutive layers.
+/// layer, a connector band between consecutive layers.
 fn node_row(layer_index: usize) -> usize {
-    layer_index * 2
+    layer_index * (BAND_ROWS + 1)
 }
 
-/// The DAG's own row of the connectors between layer `boundary` and the
-/// next one.
-fn connector_row(boundary: usize) -> usize {
-    boundary * 2 + 1
+/// The DAG's own row of part `part` (0 to 2) of the connector band
+/// between layer `boundary` and the next one.
+fn connector_row(boundary: usize, part: usize) -> usize {
+    node_row(boundary) + 1 + part
 }
 
 /// The screen row of the DAG's row `index` inside `dag`, or `None` when
@@ -317,29 +326,69 @@ fn draw_label(frame: &mut Frame, area: Rect, fraction: f64, label: &str, style: 
     );
 }
 
-/// Every edge whose dependency's layer is at or above `boundary` and
-/// whose beam's layer is below it passes through this connector row: an
-/// edge spanning several layers passes straight through every
-/// intermediate row at its dependency's own column, and only bends
-/// toward its beam's column on the row immediately above that beam.
-/// Edges on the focused path are drawn in `accent` after the others in
-/// `line`, so where two share a cell the path wins.
-fn draw_connectors(
-    frame: &mut Frame,
-    area: Rect,
-    layers: &[Vec<usize>],
-    boundary: usize,
-    state: &AppState,
-    path: &HashSet<(usize, usize)>,
-) {
-    let (on_path, off_path): (Vec<_>, Vec<_>) =
-        state.edges.iter().partition(|edge| path.contains(edge));
-    let passes = [
-        (off_path, style(Token::Line, state.colour)),
-        (on_path, style(Token::Accent, state.colour)),
-    ];
-    for (edges, edge_style) in passes {
-        for &(beam, dependency) in edges {
+/// Which ways the lines leave one cell of the joining row, and whether
+/// any of them is on the focused path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Ways {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    path: bool,
+}
+
+impl Ways {
+    /// The square box-drawing glyph for these ways, `None` for an empty
+    /// cell.
+    fn glyph(self) -> Option<char> {
+        let glyph = match (self.up, self.down, self.left, self.right) {
+            (false, false, false, false) => return None,
+            (true, true, false, false)
+            | (true, false, false, false)
+            | (false, true, false, false) => '│',
+            (false, false, _, _) => '─',
+            (true, false, false, true) => '└',
+            (true, false, true, false) => '┘',
+            (false, true, false, true) => '┌',
+            (false, true, true, false) => '┐',
+            (true, false, true, true) => '┴',
+            (false, true, true, true) => '┬',
+            (true, true, false, true) => '├',
+            (true, true, true, false) => '┤',
+            (true, true, true, true) => '┼',
+        };
+        Some(glyph)
+    }
+}
+
+/// One connector band, column by column over the DAG's width: the
+/// parents' drops, the joining row, the children's drops. Every edge
+/// whose dependency's layer is at or above `boundary` and whose beam's
+/// layer is below it crosses the band. An edge spanning several layers
+/// drops straight through every intermediate band at its dependency's
+/// own column, and only bends toward its beam's column in the band
+/// immediately above that beam.
+struct Band {
+    above: Vec<Ways>,
+    join: Vec<Ways>,
+    below: Vec<Ways>,
+}
+
+impl Band {
+    fn crossing(
+        layers: &[Vec<usize>],
+        boundary: usize,
+        state: &AppState,
+        path: &HashSet<(usize, usize)>,
+        dag: Rect,
+    ) -> Self {
+        let width = dag.width as usize;
+        let mut band = Band {
+            above: vec![Ways::default(); width],
+            join: vec![Ways::default(); width],
+            below: vec![Ways::default(); width],
+        };
+        for edge @ &(beam, dependency) in &state.edges {
             let Some(dependency_layer) = layer_of(layers, dependency) else {
                 continue;
             };
@@ -347,16 +396,67 @@ fn draw_connectors(
                 continue;
             };
             if dependency_layer > boundary || beam_layer <= boundary {
-                continue; // this edge does not cross this particular row
+                continue; // this edge does not cross this band
             }
-            let top_x = node_x(area, layers, dependency_layer, dependency);
-            let bottom_x = if beam_layer == boundary + 1 {
-                node_x(area, layers, beam_layer, beam)
+            let top = (node_x(dag, layers, dependency_layer, dependency) - dag.x) as usize;
+            let bottom = if beam_layer == boundary + 1 {
+                (node_x(dag, layers, beam_layer, beam) - dag.x) as usize
             } else {
-                top_x // still passing through: no bend until the beam's own row
+                top // still passing through: no bend until the beam's own band
             };
-            draw_segment(frame, area, top_x, bottom_x, edge_style);
+            band.add(top, bottom, path.contains(edge));
         }
+        band
+    }
+
+    /// One edge from column `top` down to column `bottom`.
+    fn add(&mut self, top: usize, bottom: usize, path: bool) {
+        let mark = |ways: &mut Ways, apply: fn(&mut Ways)| {
+            apply(ways);
+            ways.path |= path;
+        };
+        mark(&mut self.above[top], |ways| ways.down = true);
+        mark(&mut self.below[bottom], |ways| ways.up = true);
+        mark(&mut self.join[top], |ways| ways.up = true);
+        mark(&mut self.join[bottom], |ways| ways.down = true);
+        let (left, right) = (top.min(bottom), top.max(bottom));
+        if left < right {
+            mark(&mut self.join[left], |ways| ways.right = true);
+            mark(&mut self.join[right], |ways| ways.left = true);
+            for ways in &mut self.join[left + 1..right] {
+                mark(ways, |ways| {
+                    ways.left = true;
+                    ways.right = true;
+                });
+            }
+        }
+    }
+
+    fn rows(self) -> [Vec<Ways>; BAND_ROWS] {
+        [self.above, self.join, self.below]
+    }
+}
+
+/// One row of a band: each cell's glyph in `line`, or in `accent` (bold
+/// in monochrome, which has no accent) when any of its lines is on the
+/// focused path.
+fn draw_band_row(frame: &mut Frame, area: Rect, cells: &[Ways], mode: ColourMode) {
+    let line = style(Token::Line, mode);
+    let path = match mode {
+        ColourMode::Monochrome => Style::new().bold(),
+        _ => style(Token::Accent, mode),
+    };
+    for (offset, ways) in cells.iter().enumerate().take(area.width as usize) {
+        let Some(glyph) = ways.glyph() else {
+            continue;
+        };
+        let cell_style = if ways.path { path } else { line };
+        frame.buffer_mut().set_string(
+            area.x + offset as u16,
+            area.y,
+            glyph.to_string(),
+            cell_style,
+        );
     }
 }
 
@@ -366,46 +466,16 @@ fn layer_of(layers: &[Vec<usize>], beam: usize) -> Option<usize> {
 
 fn node_x(area: Rect, layers: &[Vec<usize>], layer_index: usize, beam: usize) -> u16 {
     let nodes = &layers[layer_index];
-    // `beam` always belongs to `layers[layer_index]` here: both callers
-    // (`draw_connectors`) look it up via `layer_of` just before.
+    // `beam` always belongs to `layers[layer_index]` here: its caller
+    // (`Band::crossing`) looks it up via `layer_of` just before.
     let position = nodes.iter().position(|&node| node == beam).unwrap_or(0);
     let fraction = graph::slot_center_fraction(position, nodes.len());
     fraction_to_x(area, fraction)
 }
 
-fn draw_segment(frame: &mut Frame, area: Rect, top_x: u16, bottom_x: u16, edge_style: Style) {
-    use std::cmp::Ordering;
-    match top_x.cmp(&bottom_x) {
-        Ordering::Equal => set_char(frame, area, top_x, '│', edge_style),
-        Ordering::Less => {
-            set_char(frame, area, top_x, '╰', edge_style);
-            for x in (top_x + 1)..bottom_x {
-                set_char(frame, area, x, '─', edge_style);
-            }
-            set_char(frame, area, bottom_x, '╮', edge_style);
-        }
-        Ordering::Greater => {
-            set_char(frame, area, top_x, '╯', edge_style);
-            for x in (bottom_x + 1)..top_x {
-                set_char(frame, area, x, '─', edge_style);
-            }
-            set_char(frame, area, bottom_x, '╭', edge_style);
-        }
-    }
-}
-
-fn set_char(frame: &mut Frame, area: Rect, x: u16, character: char, edge_style: Style) {
-    if x < area.x || x >= area.x + area.width {
-        return;
-    }
-    frame
-        .buffer_mut()
-        .set_string(x, area.y, character.to_string(), edge_style);
-}
-
 /// Turns a `slot_center_fraction` into an actual column inside `area`,
-/// clamped to `area`'s own last column — the one place both the node row
-/// and the connector row convert "how far across" into "which column",
+/// clamped to `area`'s own last column: the one place both the node row
+/// and the connector band convert "how far across" into "which column",
 /// so they can never drift apart over a rounding difference.
 fn fraction_to_x(area: Rect, fraction: f64) -> u16 {
     if area.width == 0 {
@@ -503,38 +573,58 @@ mod tests {
     const ACCENT: Color = Color::Rgb(0xF3, 0xC2, 0x80);
     const LINE: Color = Color::Rgb(0x62, 0x6A, 0x67);
 
-    /// Focused on `build`: its edge to `test` is the path, in `accent`;
-    /// `lint`'s edge to `test` and both edges from `codegen` stay `line`.
-    /// The focused node itself is `on-accent` on `accent`.
+    /// Focused on `build`: its edge to `test` is the path, in `accent`,
+    /// the join it shares with `lint` included; `lint`'s own edge and
+    /// both edges from `codegen` stay `line`. The focused node itself is
+    /// `on-accent` on `accent`.
     #[test]
     fn the_focused_path_is_accent() {
         let buffer = buffer_at(&diamond(Vec::new()), 1, 80, 24);
-        let connector = |y: u16, glyph: &str| {
+        let at = |y: u16, glyph: &str| {
             (0..80)
                 .find(|&x| buffer[(x, y)].symbol() == glyph)
                 .unwrap_or_else(|| panic!("no {glyph:?} on row {y}: {:?}", row(&buffer, y)))
         };
-        // Rows: title, blank, codegen, connector, build and lint, connector, test.
-        let from_build = connector(5, "╰");
-        let from_lint = connector(5, "╯");
-        assert_eq!(buffer[(from_build, 5)].fg, ACCENT, "build to test");
-        assert_eq!(buffer[(from_build + 1, 5)].fg, ACCENT, "build to test");
-        assert_eq!(buffer[(from_lint, 5)].fg, LINE, "lint to test");
-        for x in 0..80 {
-            if buffer[(x, 3)].symbol() != " " {
-                assert_eq!(buffer[(x, 3)].fg, LINE, "codegen's edges, x={x}");
+        // Rows: title, blank, codegen, three connector rows, build and
+        // lint, three connector rows, test.
+        let build = at(8, "└");
+        let lint = at(8, "┘");
+        let join = at(8, "┬");
+        assert_eq!(buffer[(build, 7)].fg, ACCENT, "out of build");
+        assert_eq!(buffer[(build, 8)].fg, ACCENT, "build's corner");
+        assert_eq!(buffer[(build + 1, 8)].fg, ACCENT, "build to test");
+        assert_eq!(buffer[(join, 8)].fg, ACCENT, "the shared join");
+        assert_eq!(buffer[(join, 9)].fg, ACCENT, "into test");
+        assert_eq!(buffer[(lint, 7)].fg, LINE, "out of lint");
+        assert_eq!(buffer[(lint, 8)].fg, LINE, "lint's corner");
+        assert_eq!(buffer[(lint - 1, 8)].fg, LINE, "lint to test");
+        for y in 3..6 {
+            for x in 0..80 {
+                if buffer[(x, y)].symbol() != " " {
+                    assert_eq!(buffer[(x, y)].fg, LINE, "codegen's edges, ({x}, {y})");
+                }
             }
         }
         let start = (0..80)
-            .find(|&x| buffer[(x, 4)].symbol() == "b")
+            .find(|&x| buffer[(x, 6)].symbol() == "b")
             .expect("the build node");
-        assert_eq!(buffer[(start, 4)].bg, ACCENT, "the focused node");
-        assert_eq!(buffer[(start, 4)].fg, Color::Rgb(0x24, 0x22, 0x1E));
+        assert_eq!(buffer[(start, 6)].bg, ACCENT, "the focused node");
+        assert_eq!(buffer[(start, 6)].fg, Color::Rgb(0x24, 0x22, 0x1E));
         assert!(
-            row(&buffer, 4).contains("[ ○ build ]"),
+            row(&buffer, 6).contains("[ ○ build ]"),
             "{:?}",
-            row(&buffer, 4)
+            row(&buffer, 6)
         );
+    }
+
+    /// Monochrome has no accent: the path is bold instead.
+    #[test]
+    fn the_focused_path_is_bold_in_monochrome() {
+        let state = diamond(Vec::new()).with_colour(ColourMode::Monochrome);
+        let buffer = buffer_at(&state, 1, 80, 24);
+        let at = |glyph: &str| (0..80).find(|&x| buffer[(x, 8)].symbol() == glyph).unwrap();
+        assert!(buffer[(at("└"), 8)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(at("┘"), 8)].modifier.contains(Modifier::BOLD));
     }
 
     /// The title names the target and counts the beams and layers.
@@ -593,8 +683,8 @@ mod tests {
         assert!(!header.contains("NEEDED BY"), "{header:?}");
     }
 
-    /// A four-layer chain takes seven rows, nine with the title and the
-    /// blank under it; `COMMANDS` needs five more. At 12 rows the DAG
+    /// A four-layer chain takes thirteen rows, fifteen with the title and
+    /// the blank under it; `COMMANDS` needs five more. At 16 rows the DAG
     /// still fits whole and `COMMANDS` goes; at 6 rows the DAG scrolls
     /// to keep the focused node, at the bottom, on screen.
     #[test]
@@ -608,10 +698,10 @@ mod tests {
             vec![details("beam3", &["make"])],
         );
 
-        let roomy = rows(&buffer_at(&state, 3, 60, 14)).join("\n");
+        let roomy = rows(&buffer_at(&state, 3, 60, 20)).join("\n");
         assert!(roomy.contains("COMMANDS / beam3"), "{roomy}");
 
-        let short = rows(&buffer_at(&state, 3, 60, 12)).join("\n");
+        let short = rows(&buffer_at(&state, 3, 60, 16)).join("\n");
         assert!(!short.contains("COMMANDS"), "{short}");
         assert!(
             short.contains("beam0") && short.contains("beam3"),
@@ -781,61 +871,84 @@ mod tests {
         assert!(x < area.x + area.width, "x={x} area={area:?}");
     }
 
-    /// The rendered row's own cells, indexed exactly like `draw_segment`'s
-    /// `top_x`/`bottom_x` columns. `TestBackend::to_string()` wraps each
-    /// row in a quoted, newline-terminated line for readability (see any
-    /// committed `.snap` file) — stripped back off here so a cell index
-    /// into this `Vec` means the same column `draw_segment` was asked to
-    /// draw at, not one shifted by that framing.
-    fn draw_segment_render(top_x: u16, bottom_x: u16) -> Vec<char> {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut terminal = Terminal::new(TestBackend::new(10, 1)).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                draw_segment(frame, area, top_x, bottom_x, Style::default());
-            })
-            .unwrap();
-        terminal
-            .backend()
-            .to_string()
-            .trim_end_matches('\n')
-            .trim_matches('"')
-            .chars()
-            .collect()
+    /// The cells of row `y` from column `from` to `to`, inclusive.
+    fn cells(buffer: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..=to).map(|x| buffer[(x, y)].symbol()).collect()
     }
 
-    /// Aligned columns need nothing more than a plain vertical bar.
+    /// One parent, two children: a `│` under the parent, one joining
+    /// row, a `│` into each child. In a 41-cell terminal the pane's
+    /// content is 40 cells from column 1: `lib` centres on column 21,
+    /// `app` and `cli` on columns 11 and 31.
     #[test]
-    fn draw_segment_draws_a_bar_when_the_columns_align() {
-        let cells = draw_segment_render(3, 3);
-        assert_eq!(cells[3], '│');
+    fn two_layers_join_through_three_connector_rows() {
+        let state = run(
+            &["lib", "app", "cli"],
+            &[("app", "lib"), ("cli", "lib")],
+            &["app", "cli"],
+            Vec::new(),
+        );
+        let buffer = buffer_at(&state, 0, 41, 24);
+        let bar = format!("{}│{}", " ".repeat(10), " ".repeat(10));
+        assert_eq!(cells(&buffer, 3, 11, 31), bar, "under lib");
+        assert_eq!(
+            cells(&buffer, 4, 11, 31),
+            format!("┌{}┴{}┐", "─".repeat(9), "─".repeat(9))
+        );
+        assert_eq!(
+            cells(&buffer, 5, 11, 31),
+            format!("│{}│", " ".repeat(19)),
+            "into app and cli"
+        );
     }
 
-    /// Bending right (the dependency sits left of the beam below it):
-    /// the top end sends its line rightward (`╰`, up + right), the
-    /// bottom end receives it from the left (`╮`, left + down), and
-    /// every column strictly between is filled with a dash.
+    /// Three parents, one child under the middle one: the join is the
+    /// `└──┼──┘` row. 61 cells: the pane's content is 60 from column 1,
+    /// the parents on columns 11, 31 and 51.
     #[test]
-    fn draw_segment_bends_right_with_matching_corners() {
-        let cells = draw_segment_render(1, 7);
-        assert_eq!(cells[1], '╰', "left end: up + right");
-        assert_eq!(cells[7], '╮', "right end: left + down");
-        for (x, &cell) in cells.iter().enumerate().take(7).skip(2) {
-            assert_eq!(cell, '─', "filled between at {x}");
+    fn parents_join_their_child_on_one_row() {
+        let state = run(
+            &["a", "b", "c", "d"],
+            &[("d", "a"), ("d", "b"), ("d", "c")],
+            &["d"],
+            Vec::new(),
+        );
+        let buffer = buffer_at(&state, 0, 61, 24);
+        assert_eq!(
+            cells(&buffer, 4, 11, 51),
+            format!("└{}┼{}┘", "─".repeat(19), "─".repeat(19))
+        );
+        assert_eq!(cells(&buffer, 5, 31, 31), "│");
+    }
+
+    /// `c` needs `a` (two layers up) and `b`; `b` needs `x`. The edge
+    /// from `a` drops straight through the first band and past `b`'s
+    /// row at `a`'s column, then bends to `c` on the second join, where
+    /// it meets `b`'s own drop.
+    #[test]
+    fn an_edge_skipping_a_layer_still_renders() {
+        let state = run(
+            &["a", "b", "c", "x"],
+            &[("c", "a"), ("c", "b"), ("b", "x")],
+            &["c"],
+            Vec::new(),
+        );
+        // 41 cells: `a` and `x` on columns 11 and 31, `b` and `c` on 21.
+        let buffer = buffer_at(&state, 2, 41, 24);
+        for y in 3..6 {
+            assert_eq!(cells(&buffer, y, 11, 11), "│", "a's drop, row {y}");
         }
-    }
-
-    /// Bending left is the mirror image, with the corners swapped.
-    #[test]
-    fn draw_segment_bends_left_with_matching_corners() {
-        let cells = draw_segment_render(7, 1);
-        assert_eq!(cells[7], '╯', "right end: up + left");
-        assert_eq!(cells[1], '╭', "left end: down + right");
-        for (x, &cell) in cells.iter().enumerate().take(7).skip(2) {
-            assert_eq!(cell, '─', "filled between at {x}");
-        }
+        assert_eq!(
+            cells(&buffer, 4, 21, 31),
+            format!("┌{}┘", "─".repeat(9)),
+            "x to b"
+        );
+        assert_eq!(cells(&buffer, 7, 11, 11), "│", "a passes b's band");
+        assert_eq!(
+            cells(&buffer, 8, 11, 21),
+            format!("└{}┤", "─".repeat(9)),
+            "a joins b's drop into c"
+        );
+        assert_eq!(cells(&buffer, 9, 21, 21), "│", "into c");
     }
 }
