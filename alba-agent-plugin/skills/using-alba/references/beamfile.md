@@ -32,9 +32,9 @@ that declares one, in import order. Each `*` matches exactly one level
 | `description` | string template | Shown in listings. |
 | `needs` | `[beam, api:beam, *:beam, ...]` | Prerequisites; all must succeed first. `*` stands for any one import alias. |
 | `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. A glob skips `.gitignore`d files; a literal path is always an input. Turns caching on, and drives `--watch` and `--affected`. |
-| `env_inputs` | `["NODE_ENV", "PATH"]` | Ambient variables whose values (or absence) join the cache fingerprint; the inherited environment is otherwise ignored. Requires `inputs`. |
-| `secrets` | `["NPM_TOKEN"]` | Variables (from the beam's `env`, else the inherited environment) whose values are replaced by `***` in all output, live, JSON and cached. |
-| `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. A missing or rewritten output file forces a rerun. |
+| `env_inputs` | `["NODE_ENV", "PATH"]` | Ambient variables whose values (or absence) join the cache fingerprint; the inherited environment is otherwise ignored. Each entry is a variable name (letters, digits, `_`, no leading digit). Requires `inputs`. Needs alba 0.6.0 or later. |
+| `secrets` | `["NPM_TOKEN"]` | Variables (from the beam's `env`, else the environment Alba was started in) whose values are replaced by `***` in the output Alba shows and stores: live, JSON and cached. Masking is line by line, and does not cover what a command writes to a file or sends elsewhere. Needs alba 0.6.0 or later. |
+| `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. The beam reruns when an output is missing, and since alba 0.6.0 also when one was rewritten (size or modification time) or removed from a glob's matches or a directory. |
 | `run` | `"cmd"` or `["cmd1", "cmd2"]` | String templates. Commands run in order on the same executor. |
 | `env` | `{ NAME = "value", OTHER = param }` | Values are string templates or a bare `let` / parameter name. |
 | `cwd` | string template | Working directory for the commands. |
@@ -93,6 +93,11 @@ Builtins, which always win over a PATH binary of the same name: `cd`,
 `pwd`, `exit`, `true`, `false`, `export`, `unset`, `echo` (`-n` only),
 `cat`, `cp` (`-r`), `mv`, `rm` (`-r -f`), `mkdir` (`-p`), `touch`, `sleep`,
 `test` / `[`. Use an explicit path (`/bin/rm`) to reach the system binary.
+
+Since alba 0.6.0, the builtin `rm` refuses three operands even under `-f`:
+the filesystem root (what `rm -rf $OUT_DIR/` names when `OUT_DIR` is
+unset), one ending in `.` or `..`, and an empty one. Each refusal goes to
+stderr and makes `rm` exit `1`; the other operands are still removed.
 
 Rejected at `alba check` time: `if`, `for`, `while`, `case`, functions,
 heredocs, `&`, `wait`, `(...)`, `${VAR:-default}`, `$((...))`, `{a,b}`,
@@ -153,9 +158,14 @@ literal.
   binary on the `PATH`. Resolution happens at plan time; a missing plugin
   fails the whole run before any beam starts.
 
-The cache fingerprints an executor by its option text, not by what the
-text resolves to: retagging a mutable docker tag or updating a plugin
-binary does not invalidate a cached beam.
+Since alba 0.6.0, the cache fingerprints an executor's options and also
+what they only name: the image a docker tag points at right now, or the
+Dockerfile of a built image; a compose service's resolved configuration
+plus the image or Dockerfile it names; the content of a plugin binary. An
+image not pulled yet counts as its own state, so the run that pulls it is
+followed by one more run before the cache settles. When that state cannot
+be read (a stopped docker daemon), the beam runs uncached and says why.
+Earlier versions only see the option text.
 
 ## Git hooks
 
