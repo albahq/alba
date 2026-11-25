@@ -10,7 +10,7 @@
 //! `ui/logpane.rs` slice the original text at match boundaries without
 //! ever landing off a char boundary.
 
-use crate::logs::LogBuffer;
+use crate::logs::{LogBuffer, StreamFilter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchState {
@@ -34,12 +34,12 @@ impl SearchState {
     }
 
     /// Recomputes `matches` (line indices, case-insensitive substring)
-    /// against `buffer`. Callers run this after every keystroke and
+    /// against the lines of `buffer` that `filter` shows. Callers run this after every keystroke and
     /// whenever the buffer gains lines — `SearchState` itself samples
     /// neither the clock nor the buffer on its own. An empty query
     /// matches nothing rather than every line: `"".contains("")` is
     /// true, which would otherwise light up the whole pane.
-    pub fn update(&mut self, buffer: &LogBuffer) {
+    pub fn update(&mut self, buffer: &LogBuffer, filter: StreamFilter) {
         self.matches.clear();
         if !self.query.is_empty() {
             let needle = self.query.to_ascii_lowercase();
@@ -47,7 +47,9 @@ impl SearchState {
                 buffer
                     .lines()
                     .enumerate()
-                    .filter(|(_, line)| line.text.to_ascii_lowercase().contains(&needle))
+                    .filter(|(_, line)| {
+                        filter.admits(line) && line.text.to_ascii_lowercase().contains(&needle)
+                    })
                     .map(|(index, _)| index),
             );
         }
@@ -95,7 +97,7 @@ mod tests {
     fn buffer_of(lines: &[&str]) -> LogBuffer {
         let mut buffer = LogBuffer::new();
         for text in lines {
-            buffer.push(text.to_string(), alba_executors::Stream::Stdout, false);
+            buffer.push_output(text.to_string(), alba_executors::Stream::Stdout, false);
         }
         buffer
     }
@@ -112,7 +114,7 @@ mod tests {
     fn matches_are_case_insensitive_and_incremental() {
         let buffer = buffer_of(&["Compiling api", "warning: unused", "Compiling core"]);
         let mut search = typed("compiling");
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         assert_eq!(search.matches, vec![0, 2]);
         assert_eq!(search.current_line(), Some(0));
         search.next();
@@ -127,7 +129,7 @@ mod tests {
     fn an_empty_query_matches_nothing() {
         let buffer = buffer_of(&["anything"]);
         let mut search = SearchState::new();
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         assert_eq!(search.current_line(), None);
     }
 
@@ -137,7 +139,7 @@ mod tests {
     fn pop_char_shrinks_the_query_and_the_matches_narrow_on_update() {
         let buffer = buffer_of(&["Compiling api", "warning: unused"]);
         let mut search = typed("Compilingx");
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         assert_eq!(
             search.matches,
             Vec::<usize>::new(),
@@ -145,7 +147,7 @@ mod tests {
         );
         search.pop_char();
         assert_eq!(search.query, "Compiling");
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         assert_eq!(search.matches, vec![0]);
     }
 
@@ -155,14 +157,14 @@ mod tests {
     fn update_picks_up_lines_the_buffer_gained_since() {
         let mut buffer = buffer_of(&["Compiling api"]);
         let mut search = typed("compiling");
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         assert_eq!(search.matches, vec![0]);
-        buffer.push(
+        buffer.push_output(
             "Compiling core".to_string(),
             alba_executors::Stream::Stdout,
             false,
         );
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         assert_eq!(search.matches, vec![0, 1]);
     }
 
@@ -171,7 +173,7 @@ mod tests {
     fn a_single_match_wraps_to_itself() {
         let buffer = buffer_of(&["Compiling api"]);
         let mut search = typed("compiling");
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         search.next();
         assert_eq!(search.current_line(), Some(0));
         search.previous();
@@ -183,7 +185,7 @@ mod tests {
     fn stepping_with_no_matches_is_a_no_op() {
         let buffer = buffer_of(&["anything"]);
         let mut search = typed("nope");
-        search.update(&buffer);
+        search.update(&buffer, StreamFilter::All);
         search.next();
         search.previous();
         assert_eq!(search.current_line(), None);

@@ -4,7 +4,7 @@ expression: "drawn(&state, 80, 24)"
 ---
 "┌─ alba · build ───────────────────────────────────────────────────────────────┐"
 "│BEAMS                         │LOGS                                ● following│"
-"│ ✔ services:payment:i…    1.2s│                                               │"
+"│ ✔ services:payment:i…    1.2s│✓ exit 0 · 1.2s                                │"
 "│ ○ build                      │                                               │"
 "│                              │                                               │"
 "│                              │                                               │"

@@ -29,7 +29,7 @@ use ratatui::layout::Size;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::input::Action;
-use crate::logs::LogBuffer;
+use crate::logs::{LineKind, LogBuffer};
 use crate::state::AppState;
 pub use crate::ui::theme::ColourMode;
 
@@ -307,25 +307,29 @@ fn dispatch(
         Action::SelectNext => state.select_next(),
         Action::SelectPrevious => state.select_previous(),
         Action::ScrollUp(rows) => {
+            let filter = state.stream_filter;
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up_rows(rows, width);
+                buffer.scroll_up_rows(rows, width, filter);
             }
         }
         Action::ScrollDown(rows) => {
+            let filter = state.stream_filter;
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down_rows(rows, width);
+                buffer.scroll_down_rows(rows, width, filter);
             }
         }
         Action::ScrollHalfPageUp => {
             let rows = half_pane(height);
+            let filter = state.stream_filter;
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up_rows(rows, width);
+                buffer.scroll_up_rows(rows, width, filter);
             }
         }
         Action::ScrollHalfPageDown => {
             let rows = half_pane(height);
+            let filter = state.stream_filter;
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down_rows(rows, width);
+                buffer.scroll_down_rows(rows, width, filter);
             }
         }
         Action::FollowTail => {
@@ -333,6 +337,8 @@ fn dispatch(
                 buffer.follow_tail();
             }
         }
+        Action::CycleStreamFilter => state.cycle_stream_filter(),
+        Action::OpenFocusedOutput => state.open_focused_output(),
         Action::EnterSearch => state.enter_search(),
         Action::SearchNext => state.search_next(),
         Action::SearchPrevious => state.search_previous(),
@@ -426,6 +432,7 @@ fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
         .map(|buffer| {
             buffer
                 .lines()
+                .filter(|line| matches!(line.kind, LineKind::Output(_)))
                 .map(|line| ReplayLine {
                     raw: line.raw.clone(),
                     text: line.text.clone(),
@@ -574,6 +581,39 @@ mod tests {
         assert!(
             state.last_copy_result.is_none(),
             "past the two-second window"
+        );
+    }
+
+    /// The replay is for the terminal the TUI just left: only what the
+    /// processes wrote, never Alba's own echo, notices or end lines.
+    #[test]
+    fn the_replay_after_quitting_holds_only_process_output() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started(&["bad"]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("bad") }, now);
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("bad"),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        state.apply(
+            &RunEvent::BeamNotice {
+                id: id("bad"),
+                level: alba_engine::NoticeLevel::Info,
+                text: "no cache".to_string(),
+            },
+            now,
+        );
+        state.apply(&output("bad", "boom"), now);
+        state.apply(&finished("bad", BeamStatus::Failed { exit_code: 2 }), now);
+        state.apply(&summary_event(&["bad"], &[]), now);
+
+        assert_eq!(
+            outcome(&state).failed_logs,
+            vec![("bad".to_string(), vec![replay_line("boom")])]
         );
     }
 

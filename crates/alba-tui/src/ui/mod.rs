@@ -229,7 +229,7 @@ fn bottom_bar(state: &AppState, now: Instant) -> String {
 /// same shape as `alba`'s `format_duration`, kept as its own copy
 /// here because the dependency direction (`alba` → `alba-tui`) runs
 /// the wrong way for this crate to import it.
-fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     format!("{:.1}s", duration.as_secs_f64())
 }
 

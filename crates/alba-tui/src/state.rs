@@ -15,17 +15,18 @@
 //! withdraw the outcome. The mapping from a finished run to its code
 //! stays where it already lives, in [`RunSummary::exit_code`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
-use alba_engine::{BeamStatus, RunEvent, RunSummary};
+use alba_engine::{BeamDetails, BeamStatus, RunEvent, RunSummary};
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 
 use crate::copy::CopyState;
 use crate::graph::GraphState;
-use crate::logs::LogBuffer;
+use crate::logs::{EndTone, LogBuffer, StreamFilter};
 use crate::search::SearchState;
+use crate::ui::format_duration;
 use crate::ui::theme::ColourMode;
 
 /// The log buffer the parked diagnostic goes to: a pseudo-beam, so a
@@ -112,6 +113,10 @@ pub struct AppState {
     pub edges: Vec<(usize, usize)>,
     pub selected: usize,
     pub logs: HashMap<String, LogBuffer>,
+    /// What each beam of the run on screen is and runs, from `RunStarted`.
+    pub details: HashMap<String, BeamDetails>,
+    /// Which process output the log pane shows; persists across beams.
+    pub stream_filter: StreamFilter,
     pub phase: Phase,
     pub watch_enabled: bool,
     /// How the interface colours itself, decided once by the CLI via
@@ -148,6 +153,10 @@ pub struct AppState {
     /// watch trigger that follows a completed run is told apart from one
     /// that superseded a run still going.
     waiting_seen: bool,
+    /// Beams that began (`BeamStarted` or `BeamCached`) in the run on
+    /// screen: a beam that ends `Cancelled` without being in here was
+    /// skipped.
+    started: HashSet<String>,
     /// `j`/`k`/the graph's `Enter` moved the selection since the run
     /// started: the reader chose a place, so a failure must not pull
     /// them off it.
@@ -200,6 +209,24 @@ impl CopyResult {
 
 /// What the header calls the run: the target, the targets joined, or the
 /// reference an affected run found nothing for.
+/// The Alba line that closes a beam's buffer, and its tone.
+fn end_line(status: &BeamStatus, duration: Duration, skipped: bool) -> (EndTone, String) {
+    let time = format_duration(duration);
+    match status {
+        BeamStatus::Succeeded => (EndTone::Success, format!("✓ exit 0 · {time}")),
+        BeamStatus::Cached => (EndTone::Cached, format!("↯ restored from cache · {time}")),
+        BeamStatus::Failed { exit_code } => {
+            (EndTone::Error, format!("✗ exit {exit_code} · {time}"))
+        }
+        BeamStatus::FailedAllowed { exit_code } => (
+            EndTone::Error,
+            format!("✗ exit {exit_code} · allowed · {time}"),
+        ),
+        BeamStatus::Cancelled if skipped => (EndTone::Muted, "○ skipped".to_string()),
+        BeamStatus::Cancelled => (EndTone::Muted, format!("○ cancelled · {time}")),
+    }
+}
+
 fn run_label(targets: &[BeamId], affected_by: Option<&str>) -> String {
     match (targets, affected_by) {
         ([], Some(reference)) => format!("nothing affected by {reference}"),
@@ -220,6 +247,9 @@ impl AppState {
             edges: Vec::new(),
             selected: 0,
             logs: HashMap::new(),
+            details: HashMap::new(),
+            stream_filter: StreamFilter::default(),
+            started: HashSet::new(),
             // Nothing has run yet, so the session is idle rather than in
             // flight — and `outcome` is `None`, which is what makes `q`
             // fall back to the interrupted code: no run vouches for a
@@ -258,14 +288,21 @@ impl AppState {
                 affected_by,
                 beams,
                 edges,
-                details: _,
-            } => self.start_run(
-                run_label(targets, affected_by.as_deref()),
-                beams,
-                edges,
-                now,
-            ),
+                details,
+            } => {
+                self.start_run(
+                    run_label(targets, affected_by.as_deref()),
+                    beams,
+                    edges,
+                    now,
+                );
+                self.details = details
+                    .iter()
+                    .map(|detail| (detail.id.0.clone(), detail.clone()))
+                    .collect();
+            }
             RunEvent::BeamStarted { id } | RunEvent::BeamCached { id } => {
+                self.started.insert(id.0.clone());
                 if let Some(row) = self.row_mut(&id.0) {
                     row.state = BeamState::Running { since: now };
                 }
@@ -285,21 +322,30 @@ impl AppState {
                     self.last_search = Some(committed);
                 }
             }
-            // Echoed in the log pane by a later change; nothing to fold yet.
-            RunEvent::CommandStarted { .. } => {}
+            RunEvent::CommandStarted { id, command } => {
+                self.logs
+                    .entry(id.0.clone())
+                    .or_default()
+                    .push_command(command);
+                self.resync_selected_search(&id.0);
+            }
             RunEvent::BeamOutput { id, line, replayed } => {
                 self.append_log_line(&id.0, line.text.as_str(), line.stream, *replayed);
             }
-            // Drawn like a stderr line until notices get a look of their
-            // own, so nothing Alba says about a beam disappears.
-            RunEvent::BeamNotice { id, text, .. } => {
-                self.append_log_line(&id.0, text.as_str(), alba_executors::Stream::Stderr, false);
+            RunEvent::BeamNotice { id, level, text } => {
+                self.logs
+                    .entry(id.0.clone())
+                    .or_default()
+                    .push_notice(*level, text);
+                self.resync_selected_search(&id.0);
             }
             RunEvent::BeamFinished {
                 id,
                 status,
                 duration,
             } => {
+                let skipped =
+                    matches!(status, BeamStatus::Cancelled) && !self.started.contains(&id.0);
                 let Some(row) = self.row_mut(&id.0) else {
                     return;
                 };
@@ -307,6 +353,12 @@ impl AppState {
                     status: status.clone(),
                     duration: *duration,
                 };
+                let (tone, text) = end_line(status, *duration, skipped);
+                self.logs
+                    .entry(id.0.clone())
+                    .or_default()
+                    .push_end(tone, &text);
+                self.resync_selected_search(&id.0);
                 let real_failure = matches!(status, BeamStatus::Failed { .. });
                 if real_failure
                     && !self.selection_moved
@@ -361,7 +413,7 @@ impl AppState {
                 self.outcome = None;
                 let buffer = self.logs.entry(DIAGNOSTIC_LOG.to_string()).or_default();
                 for line in diagnostic.lines() {
-                    buffer.push(line, alba_executors::Stream::Stdout, false);
+                    buffer.push_output(line, alba_executors::Stream::Stdout, false);
                 }
             }
         }
@@ -442,6 +494,28 @@ impl AppState {
         self.last_copy_result = Some(CopyResult::new(message, now));
     }
 
+    /// `s`: all streams, stdout only, stderr only. A committed search is
+    /// recomputed against what the new filter shows.
+    pub fn cycle_stream_filter(&mut self) {
+        self.stream_filter = self.stream_filter.cycled();
+        if let Some(mut committed) = self.last_search.take() {
+            self.recompute_search_against(&committed.beam.clone(), &mut committed.search);
+            self.last_search = Some(committed);
+        }
+    }
+
+    /// `Enter` in the graph: the focused beam becomes the selection and
+    /// its output is shown.
+    pub fn open_focused_output(&mut self) {
+        let Mode::Graph(graph) = &self.mode else {
+            return;
+        };
+        let focused = graph.focused;
+        self.mode = Mode::Normal;
+        self.selection_moved = true;
+        self.select(focused);
+    }
+
     pub fn select_next(&mut self) {
         self.selection_moved = true;
         self.select(self.selected + 1);
@@ -480,7 +554,14 @@ impl AppState {
         let top_line = self
             .logs
             .get(&beam)
-            .map(|buffer| crate::copy::top_visible_line(buffer, self.pane_height, self.pane_width))
+            .map(|buffer| {
+                crate::copy::top_visible_line(
+                    buffer,
+                    self.pane_height,
+                    self.pane_width,
+                    self.stream_filter,
+                )
+            })
             .unwrap_or(0);
         self.mode = Mode::Copy(CopyState::new_at(top_line));
     }
@@ -594,7 +675,7 @@ impl AppState {
             KeyCode::Char('y') => {
                 let beam = self.displayed_log_key();
                 if let Some(buffer) = self.logs.get(&beam) {
-                    self.pending_copy = Some(copy.selected_text(buffer));
+                    self.pending_copy = Some(copy.selected_text(buffer, self.stream_filter));
                 }
                 return; // stays Mode::Normal, already replaced above
             }
@@ -624,9 +705,9 @@ impl AppState {
         };
         match key.code {
             KeyCode::Enter => {
-                self.selection_moved = true;
-                self.select(graph.focused);
-                return; // stays Mode::Normal, already replaced above
+                self.mode = Mode::Graph(graph);
+                self.open_focused_output();
+                return;
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 let layers = crate::graph::layers(self.beams.len(), &self.edges);
@@ -640,7 +721,7 @@ impl AppState {
     fn move_copy_cursor(&self, copy: &mut CopyState, dl: isize, dc: isize) {
         let beam = self.displayed_log_key();
         if let Some(buffer) = self.logs.get(&beam) {
-            copy.move_cursor(dl, dc, buffer);
+            copy.move_cursor(dl, dc, buffer, self.stream_filter);
         }
     }
 
@@ -656,6 +737,7 @@ impl AppState {
     fn sync_copy_scroll(&mut self, cursor_line: usize) {
         let pane_height = self.pane_height;
         let width = self.pane_width;
+        let filter = self.stream_filter;
         if pane_height == 0 {
             return;
         }
@@ -667,7 +749,7 @@ impl AppState {
             return;
         }
         let len = buffer.len();
-        let (start, end) = crate::copy::scroll_window(buffer, pane_height, width);
+        let (start, end) = crate::copy::scroll_window(buffer, pane_height, width, filter);
         if cursor_line < start {
             // Why this is a search and the downward branch below is a
             // closed form: `Scroll::Paused`'s offset counts lines from
@@ -693,7 +775,7 @@ impl AppState {
             let bound = end.saturating_sub(cursor_line);
             for _ in 0..bound {
                 buffer.scroll_up(1);
-                if crate::copy::scroll_window(buffer, pane_height, width).0 <= cursor_line {
+                if crate::copy::scroll_window(buffer, pane_height, width, filter).0 <= cursor_line {
                     break;
                 }
             }
@@ -751,11 +833,10 @@ impl AppState {
             return;
         }
         let beam = self.displayed_log_key();
-        let Some((line, column_offset)) = self
-            .logs
-            .get(&beam)
-            .and_then(|buffer| crate::copy::row_at(buffer, pane_height, pane_width, pane_row))
-        else {
+        let filter = self.stream_filter;
+        let Some((line, column_offset)) = self.logs.get(&beam).and_then(|buffer| {
+            crate::copy::row_at(buffer, pane_height, pane_width, pane_row, filter)
+        }) else {
             return;
         };
         let Mode::Copy(mut copy) = std::mem::replace(&mut self.mode, Mode::Normal) else {
@@ -786,7 +867,7 @@ impl AppState {
         };
         let beam = self.displayed_log_key();
         if let Some(buffer) = self.logs.get(&beam) {
-            self.pending_copy = Some(copy.selected_text(buffer));
+            self.pending_copy = Some(copy.selected_text(buffer, self.stream_filter));
         }
     }
 
@@ -843,7 +924,13 @@ impl AppState {
         self.logs
             .entry(beam.to_string())
             .or_default()
-            .push(text, stream, replayed);
+            .push_output(text, stream, replayed);
+        self.resync_selected_search(beam);
+    }
+
+    /// A line landed in `beam`'s buffer: when it is the selected one, an
+    /// active search must keep up.
+    fn resync_selected_search(&mut self, beam: &str) {
         if self.selected_beam().is_some_and(|row| row.id == beam) {
             self.resync_active_search();
         }
@@ -881,7 +968,7 @@ impl AppState {
     /// query would.
     fn recompute_search_against(&self, beam: &str, search: &mut SearchState) {
         match self.logs.get(beam) {
-            Some(buffer) => search.update(buffer),
+            Some(buffer) => search.update(buffer, self.stream_filter),
             None => {
                 search.matches.clear();
                 search.current = 0;
@@ -956,6 +1043,7 @@ impl AppState {
         self.waiting_seen = false;
         self.selection_moved = false;
         self.jumped_to_failure = false;
+        self.started.clear();
         // A run starting is the project loading again: the diagnostic
         // that parked the session describes a Beamfile that no longer is.
         if let Some(buffer) = self.logs.get_mut(DIAGNOSTIC_LOG) {
@@ -975,6 +1063,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logs::LineKind;
     use alba_core::BeamId;
     use alba_engine::{BeamStatus, RunEvent, RunSummary};
     use crossterm::event::KeyModifiers;
@@ -1073,8 +1162,11 @@ mod tests {
         state.apply(&summary_event(&[]), now);
         assert_eq!(
             lines(&state, "build"),
-            vec![("old line".to_string(), false)],
-            "the first run's output is on screen until the rerun"
+            vec![
+                ("old line".to_string(), false),
+                ("✓ exit 0 · 1.0s".to_string(), false)
+            ],
+            "the first run's story is on screen until the rerun"
         );
         // second run
         state.apply(&run_started("build", &["build"], &[]), now);
@@ -2027,7 +2119,7 @@ mod tests {
 
         assert_eq!(search_state(&state).current_line(), Some(0));
         let buffer = state.logs.get("build").unwrap();
-        let view = buffer.view(5, 80);
+        let view = buffer.view(5, 80, StreamFilter::All);
         assert_eq!(
             view.last().map(|row| row.text.as_str()),
             Some("ERROR here"),
@@ -2081,7 +2173,293 @@ mod tests {
             ]
         );
         let notice = state.logs["build"].lines().last().unwrap();
-        assert_eq!(notice.stream, alba_executors::Stream::Stderr);
+        assert_eq!(
+            notice.kind,
+            LineKind::Notice(alba_engine::NoticeLevel::Error)
+        );
+    }
+
+    fn kinds(state: &AppState, beam: &str) -> Vec<(LineKind, String)> {
+        state.logs[beam]
+            .lines()
+            .map(|line| (line.kind, line.text.clone()))
+            .collect()
+    }
+
+    fn finished_after(beam: &str, status: BeamStatus, millis: u64) -> RunEvent {
+        RunEvent::BeamFinished {
+            id: id(beam),
+            status,
+            duration: Duration::from_millis(millis),
+        }
+    }
+
+    /// Each status ends the beam's buffer with the Alba line the spec words.
+    #[test]
+    fn a_finished_beam_ends_with_an_alba_line() {
+        let cases = [
+            (
+                BeamStatus::Succeeded,
+                100,
+                EndTone::Success,
+                "✓ exit 0 · 0.1s",
+            ),
+            (
+                BeamStatus::Failed { exit_code: 101 },
+                4200,
+                EndTone::Error,
+                "✗ exit 101 · 4.2s",
+            ),
+            (
+                BeamStatus::FailedAllowed { exit_code: 1 },
+                300,
+                EndTone::Error,
+                "✗ exit 1 · allowed · 0.3s",
+            ),
+            (
+                BeamStatus::Cancelled,
+                2000,
+                EndTone::Muted,
+                "○ cancelled · 2.0s",
+            ),
+        ];
+        for (status, millis, tone, text) in cases {
+            let mut state = AppState::new("build", false);
+            let now = Instant::now();
+            state.apply(&run_started("build", &["build"], &[]), now);
+            state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+            state.apply(&finished_after("build", status, millis), now);
+            let last = kinds(&state, "build").pop().expect("an end line");
+            assert_eq!(last, (LineKind::End(tone), text.to_string()));
+        }
+
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamCached { id: id("build") }, now);
+        state.apply(&finished_after("build", BeamStatus::Cached, 800), now);
+        assert_eq!(
+            kinds(&state, "build").pop().unwrap(),
+            (
+                LineKind::End(EndTone::Cached),
+                "↯ restored from cache · 0.8s".to_string()
+            )
+        );
+    }
+
+    /// The engine reports a skipped beam as cancelled; the TUI tells them
+    /// apart by the absence of a start.
+    #[test]
+    fn a_beam_that_never_started_is_skipped() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["lint", "build"], &[]), now);
+        state.apply(&finished_after("lint", BeamStatus::Cancelled, 0), now);
+        assert_eq!(
+            kinds(&state, "lint"),
+            vec![(LineKind::End(EndTone::Muted), "○ skipped".to_string())]
+        );
+
+        // The next run forgets which beams started.
+        state.apply(&run_started("build", &["lint", "build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&finished_after("build", BeamStatus::Cancelled, 2000), now);
+        state.apply(&finished_after("lint", BeamStatus::Cancelled, 0), now);
+        assert_eq!(
+            kinds(&state, "build").pop().unwrap().1,
+            "○ cancelled · 2.0s"
+        );
+        assert_eq!(kinds(&state, "lint").pop().unwrap().1, "○ skipped");
+    }
+
+    #[test]
+    fn commands_and_notices_land_in_the_beam_buffer_in_order() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamNotice {
+                id: id("build"),
+                level: alba_engine::NoticeLevel::Info,
+                text: "running without the cache".to_string(),
+            },
+            now,
+        );
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("build"),
+                command: "cargo build".to_string(),
+            },
+            now,
+        );
+        state.apply(&output("build", "compiling"), now);
+        assert_eq!(
+            kinds(&state, "build"),
+            vec![
+                (
+                    LineKind::Notice(alba_engine::NoticeLevel::Info),
+                    "running without the cache".to_string()
+                ),
+                (LineKind::Command, "$ cargo build".to_string()),
+                (
+                    LineKind::Output(alba_executors::Stream::Stdout),
+                    "compiling".to_string()
+                ),
+            ]
+        );
+    }
+
+    fn mixed_buffer() -> AppState {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("build"),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        state.apply(&output("build", "out"), now);
+        state.apply(
+            &RunEvent::BeamOutput {
+                id: id("build"),
+                line: alba_executors::OutputLine {
+                    stream: alba_executors::Stream::Stderr,
+                    text: "err".to_string(),
+                },
+                replayed: false,
+            },
+            now,
+        );
+        state.apply(&finished(BeamStatus::Succeeded, "build"), now);
+        state
+    }
+
+    #[test]
+    fn the_stream_filter_hides_only_process_output() {
+        let state = mixed_buffer();
+        let view = |filter| {
+            state.logs["build"]
+                .view(10, 80, filter)
+                .iter()
+                .map(|row| row.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(view(StreamFilter::All).len(), 4);
+        assert_eq!(
+            view(StreamFilter::Stderr),
+            vec!["$ make", "err", "✓ exit 0 · 1.0s"]
+        );
+        assert_eq!(
+            view(StreamFilter::Stdout),
+            vec!["$ make", "out", "✓ exit 0 · 1.0s"]
+        );
+    }
+
+    #[test]
+    fn s_cycles_all_stdout_stderr() {
+        let mut state = AppState::new("build", false);
+        assert_eq!(state.stream_filter, StreamFilter::All);
+        state.cycle_stream_filter();
+        assert_eq!(state.stream_filter, StreamFilter::Stdout);
+        state.cycle_stream_filter();
+        assert_eq!(state.stream_filter, StreamFilter::Stderr);
+        state.cycle_stream_filter();
+        assert_eq!(state.stream_filter, StreamFilter::All);
+    }
+
+    /// Search runs on what the reader sees.
+    #[test]
+    fn search_ignores_lines_the_filter_hides() {
+        let mut state = mixed_buffer();
+        state.cycle_stream_filter(); // stdout only
+        state.enter_search();
+        for character in "e".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+        // "err" (index 2) is hidden.
+        assert_eq!(search_state(&state).matches, vec![0, 3]);
+        state.leave_mode();
+        state.cycle_stream_filter(); // stderr only
+        state.enter_search();
+        state.handle_modal_key(char_key('u'));
+        assert!(
+            search_state(&state).matches.is_empty(),
+            "only stdout has a u"
+        );
+    }
+
+    /// Copy walks and joins the filtered view.
+    #[test]
+    fn copy_skips_lines_the_filter_hides() {
+        let mut state = mixed_buffer();
+        state.cycle_stream_filter(); // stdout only
+        state.set_pane_size(10, 80);
+        state.enter_copy();
+        for _ in 0..3 {
+            state.handle_modal_key(char_key('j'));
+        }
+        state.handle_modal_key(char_key('v'));
+        state.handle_modal_key(char_key('k'));
+        state.handle_modal_key(char_key('k'));
+        state.handle_modal_key(char_key('k'));
+        state.handle_modal_key(char_key('y'));
+        // Cursor ended on the top line; anchor on the last: the hidden
+        // stderr line is not copied.
+        let copied = state.pending_copy.take().unwrap();
+        assert_eq!(copied, "$ make\nout\n✓");
+    }
+
+    #[test]
+    fn a_reload_with_fewer_beams_keeps_the_selection_in_range() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("e", &["a", "b", "c", "d", "e"], &[]), now);
+        state.select(4);
+        state.apply(&run_started("a", &["a", "b", "c"], &[]), now);
+        assert_eq!(state.selected, 2);
+        assert!(matches!(state.phase, Phase::Running { total: 3, .. }));
+    }
+
+    #[test]
+    fn run_started_keeps_the_beam_details_of_the_latest_run() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        let details = |name: &str| alba_engine::BeamDetails {
+            id: id(name),
+            description: Some(format!("about {name}")),
+            location: Some("Beamfile:1".to_string()),
+            executor: alba_engine::ExecutorLabel {
+                kind: "shell".to_string(),
+                detail: None,
+            },
+            commands: vec!["make".to_string()],
+        };
+        let mut event = run_started("build", &["a", "b"], &[]);
+        if let RunEvent::RunStarted { details: slot, .. } = &mut event {
+            *slot = vec![details("a"), details("b")];
+        }
+        state.apply(&event, now);
+        assert_eq!(state.details["b"].description.as_deref(), Some("about b"));
+
+        let mut event = run_started("build", &["a"], &[]);
+        if let RunEvent::RunStarted { details: slot, .. } = &mut event {
+            *slot = vec![details("a")];
+        }
+        state.apply(&event, now);
+        assert!(!state.details.contains_key("b"));
+    }
+
+    #[test]
+    fn opening_the_focused_output_selects_it_and_leaves_the_graph() {
+        let mut state = three_beams();
+        state.mode = Mode::Graph(GraphState::new(1));
+        state.open_focused_output();
+        assert_eq!(state.mode, Mode::Normal);
+        assert_eq!(state.selected, 1);
     }
 
     fn replayed_output(beam: &str, text: &str) -> RunEvent {
@@ -2230,7 +2608,12 @@ mod tests {
         state.handle_modal_key(char_key('k'));
         assert_eq!(cursor(&state), (24, 0));
         assert_eq!(
-            state.logs.get("build").unwrap().view(5, 80)[0].text,
+            state
+                .logs
+                .get("build")
+                .unwrap()
+                .view(5, 80, StreamFilter::All)[0]
+                .text,
             "line 24",
             "the cursor's line is now the top of the view"
         );
@@ -2242,7 +2625,7 @@ mod tests {
         }
         assert_eq!(cursor(&state), (29, 0), "clamped to the last line");
         let buffer = state.logs.get("build").unwrap();
-        let view = buffer.view(5, 80);
+        let view = buffer.view(5, 80, StreamFilter::All);
         assert_eq!(
             view.last().map(|row| row.text.as_str()),
             Some("line 29"),
@@ -2261,7 +2644,11 @@ mod tests {
         // the cursor reaches the tail must have the pane keep following
         // it, not silently drift one line behind per pushed line.
         state.apply(&output("build", "line 30"), Instant::now());
-        let view_after_push = state.logs.get("build").unwrap().view(5, 80);
+        let view_after_push = state
+            .logs
+            .get("build")
+            .unwrap()
+            .view(5, 80, StreamFilter::All);
         assert_eq!(
             view_after_push.last().map(|row| row.text.as_str()),
             Some("line 30"),

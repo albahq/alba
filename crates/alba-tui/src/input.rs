@@ -35,15 +35,17 @@ pub enum Action {
     ScrollHalfPageUp,
     /// PageDown / Ctrl-d, the other way.
     ScrollHalfPageDown,
-    FollowTail,     // G
-    EnterSearch,    // /
-    EnterCopy,      // v
-    EnterGraph,     // g
-    EnterHelp,      // ?
-    SearchNext,     // n: step the committed search forward, wrapping
-    SearchPrevious, // N: step the committed search backward, wrapping
-    LeaveMode,      // Esc
-    Key(KeyEvent),  // anything else, for the active mode to interpret
+    FollowTail,        // G
+    CycleStreamFilter, // s: all streams, stdout, stderr
+    OpenFocusedOutput, // Enter in the graph
+    EnterSearch,       // /
+    EnterCopy,         // v
+    EnterGraph,        // g
+    EnterHelp,         // ?
+    SearchNext,        // n: step the committed search forward, wrapping
+    SearchPrevious,    // N: step the committed search backward, wrapping
+    LeaveMode,         // Esc
+    Key(KeyEvent),     // anything else, for the active mode to interpret
     Mouse(MouseEvent),
     None,
 }
@@ -76,6 +78,7 @@ pub fn action_for(event: &Event, mode: &Mode) -> Action {
     match mode {
         Mode::Normal => action_in_normal_mode(event),
         Mode::Help => action_in_help_mode(event),
+        Mode::Graph(_) => action_in_graph_mode(event),
         _ => action_in_modal_mode(event),
     }
 }
@@ -125,6 +128,7 @@ fn action_in_normal_mode(event: &Event) -> Action {
                     KeyCode::Char('g') => return Action::EnterGraph,
                     KeyCode::Char('?') => return Action::EnterHelp,
                     KeyCode::Char('G') => return Action::FollowTail,
+                    KeyCode::Char('s') => return Action::CycleStreamFilter,
                     KeyCode::Char('j') => return Action::SelectNext,
                     KeyCode::Char('k') => return Action::SelectPrevious,
                     KeyCode::Char('n') => return Action::SearchNext,
@@ -172,6 +176,18 @@ fn action_in_help_mode(event: &Event) -> Action {
         && !has_disallowed_modifiers(key_event.modifiers)
     {
         return Action::LeaveMode;
+    }
+    action_in_modal_mode(event)
+}
+
+/// The graph is an ordinary modal mode except `Enter`, which opens the
+/// focused beam's output.
+fn action_in_graph_mode(event: &Event) -> Action {
+    if let Event::Key(key_event) = event
+        && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key_event.code == KeyCode::Enter
+    {
+        return Action::OpenFocusedOutput;
     }
     action_in_modal_mode(event)
 }
@@ -564,6 +580,27 @@ mod tests {
             action_for(&mouse_event(MouseEventKind::ScrollDown), &mode),
             Action::ScrollDown(3)
         );
+    }
+
+    #[test]
+    fn s_cycles_the_stream_filter_in_normal_mode() {
+        assert_eq!(
+            action_for(&key(KeyCode::Char('s')), &Mode::Normal),
+            Action::CycleStreamFilter
+        );
+    }
+
+    /// `Enter` opens the focused beam's output from the graph only.
+    #[test]
+    fn enter_in_the_graph_opens_the_focused_output() {
+        assert_eq!(
+            action_for(&key(KeyCode::Enter), &Mode::Graph(GraphState::new(0))),
+            Action::OpenFocusedOutput
+        );
+        assert!(matches!(
+            action_for(&key(KeyCode::Enter), &Mode::Search(SearchState::new())),
+            Action::Key(_)
+        ));
     }
 
     /// Mouse wheel events in modal modes pass through as Mouse actions

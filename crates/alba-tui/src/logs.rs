@@ -1,7 +1,7 @@
 //! Per-beam log storage: a bounded ring buffer with a following viewport.
 //!
 //! Each line is kept three ways (see [`LogLine`]), with the ANSI parsing
-//! done once, at [`LogBuffer::push`], rather than on every render.
+//! done once, at [`LogBuffer::push_output`], rather than on every render.
 //!
 //! A day-long watch session can produce unbounded output, so the buffer
 //! caps memory at [`MAX_LINES`] and remembers how many older lines it
@@ -16,6 +16,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use alba_engine::NoticeLevel;
 use alba_executors::Stream;
 use ansi_to_tui::IntoText;
 use ratatui::style::Style;
@@ -23,6 +24,58 @@ use unicode_width::UnicodeWidthChar;
 
 /// The memory bound a day-long watch session relies on.
 pub const MAX_LINES: usize = 10_000;
+
+/// Who wrote a line: a process (on one of its streams), or Alba itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    /// What a command printed.
+    Output(Stream),
+    /// The `$ command` echo before a command's output.
+    Command,
+    /// One of Alba's own notices about the beam.
+    Notice(NoticeLevel),
+    /// The line Alba writes when the beam ends.
+    End(EndTone),
+}
+
+/// How an end line is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndTone {
+    Success,
+    Error,
+    Cached,
+    Muted,
+}
+
+/// Which process output the log pane shows. Alba's own lines (echo,
+/// notices, end line) are never hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamFilter {
+    #[default]
+    All,
+    Stdout,
+    Stderr,
+}
+
+impl StreamFilter {
+    /// `s`: all streams, then stdout only, then stderr only, then back.
+    pub fn cycled(self) -> Self {
+        match self {
+            Self::All => Self::Stdout,
+            Self::Stdout => Self::Stderr,
+            Self::Stderr => Self::All,
+        }
+    }
+
+    /// Whether `line` belongs to the filtered view.
+    pub fn admits(self, line: &LogLine) -> bool {
+        match (self, line.kind) {
+            (Self::Stdout, LineKind::Output(stream)) => stream == Stream::Stdout,
+            (Self::Stderr, LineKind::Output(stream)) => stream == Stream::Stderr,
+            _ => true,
+        }
+    }
+}
 
 /// One output line, kept three ways: `raw` as the command wrote it
 /// (the exit replay prints it into a terminal), `text` with every
@@ -33,19 +86,31 @@ pub struct LogLine {
     pub raw: String,
     pub text: String,
     pub spans: Vec<(Style, String)>,
-    pub stream: Stream,
+    pub kind: LineKind,
     pub replayed: bool,
 }
 
 impl LogLine {
-    fn new(raw: String, stream: Stream, replayed: bool) -> Self {
+    fn output(raw: String, stream: Stream, replayed: bool) -> Self {
         let (text, spans) = parse(&raw);
         Self {
             raw,
             text,
             spans,
-            stream,
+            kind: LineKind::Output(stream),
             replayed,
+        }
+    }
+
+    /// A line Alba wrote itself: its text is shown as given, never parsed
+    /// for escape sequences.
+    fn alba(kind: LineKind, text: String) -> Self {
+        Self {
+            raw: text.clone(),
+            spans: vec![(Style::default(), text.clone())],
+            text,
+            kind,
+            replayed: false,
         }
     }
 }
@@ -232,6 +297,11 @@ fn keep_only_sgr(raw: &str) -> String {
     out
 }
 
+/// The lines of `text`, at least one (an empty text is one empty line).
+fn physical_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\n').map(|line| line.trim_end_matches('\r'))
+}
+
 pub struct LogBuffer {
     lines: VecDeque<LogLine>,
     truncated: usize,
@@ -254,6 +324,33 @@ impl LogBuffer {
         }
     }
 
+    /// A line a process wrote.
+    pub fn push_output(&mut self, raw: impl Into<String>, stream: Stream, replayed: bool) {
+        self.push_line(LogLine::output(raw.into(), stream, replayed));
+    }
+
+    /// The `$ command` echo. A command spanning several lines becomes one
+    /// buffer line per physical line, the continuations indented, so no
+    /// line ever holds a line break.
+    pub fn push_command(&mut self, command: &str) {
+        for (index, line) in physical_lines(command).enumerate() {
+            let prefix = if index == 0 { "$ " } else { "  " };
+            self.push_line(LogLine::alba(LineKind::Command, format!("{prefix}{line}")));
+        }
+    }
+
+    /// One of Alba's notices; a multi-line text becomes one line each.
+    pub fn push_notice(&mut self, level: NoticeLevel, text: &str) {
+        for line in physical_lines(text) {
+            self.push_line(LogLine::alba(LineKind::Notice(level), line.to_string()));
+        }
+    }
+
+    /// The line Alba writes when the beam ends.
+    pub fn push_end(&mut self, tone: EndTone, text: &str) {
+        self.push_line(LogLine::alba(LineKind::End(tone), text.to_string()));
+    }
+
     /// While paused, an append must not move the pinned view: the tail
     /// moves on by one line regardless of whether this push also drops
     /// the oldest surviving line, so pinning the same *content* always
@@ -263,9 +360,8 @@ impl LogBuffer {
     /// so a reader paused anywhere (not only at the very top) stays
     /// pinned on the same lines across any number of incoming pushes,
     /// until truncation itself finally erases what they were looking at.
-    pub fn push(&mut self, raw: impl Into<String>, stream: Stream, replayed: bool) {
-        self.lines
-            .push_back(LogLine::new(raw.into(), stream, replayed));
+    fn push_line(&mut self, line: LogLine) {
+        self.lines.push_back(line);
         if self.lines.len() > MAX_LINES {
             self.lines.pop_front();
             self.truncated += 1;
@@ -343,13 +439,15 @@ impl LogBuffer {
         self.scroll = Scroll::Following;
     }
 
-    /// The rows a pane of `height` by `width` shows, honoring the scroll
+    /// The rows a pane of `height` by `width` shows through `filter`
+    /// (hidden lines have no rows; line indices stay buffer-absolute),
+    /// honoring the scroll
     /// state: the last `height` rows of the lines up to the tail minus
     /// the paused offset, the top line cut to its last rows when it does
     /// not fit whole. When line 0's first row is in view and lines were
     /// dropped past the cap, the marker `"… N older lines truncated"`
     /// is prepended as a row of its own, displacing the bottom row.
-    pub fn view(&self, height: usize, width: usize) -> Vec<Row> {
+    pub fn view(&self, height: usize, width: usize, filter: StreamFilter) -> Vec<Row> {
         if height == 0 {
             return Vec::new();
         }
@@ -363,6 +461,9 @@ impl LogBuffer {
         while line > 0 && rows.len() < height {
             line -= 1;
             let text = &self.lines[line];
+            if !filter.admits(text) {
+                continue;
+            }
             for range in wrap_ranges(&text.text, width).into_iter().rev() {
                 if rows.len() == height {
                     break;
@@ -370,9 +471,10 @@ impl LogBuffer {
                 rows.push_front(Row::slice(line, text, range));
             }
         }
-        let at_top = rows
-            .front()
-            .is_some_and(|row| row.line == Some(0) && row.chars.start == 0);
+        let first_visible = self.lines.iter().position(|line| filter.admits(line));
+        let at_top = rows.front().is_some_and(|row| {
+            row.line.is_some() && row.line == first_visible && row.chars.start == 0
+        });
         if at_top && self.truncated > 0 {
             if rows.len() == height {
                 rows.pop_back();
@@ -385,34 +487,40 @@ impl LogBuffer {
     /// `PgUp`, `Ctrl-u`, the wheel: moves the window up by whole lines
     /// covering at least `rows` rendered rows, so a page never lands
     /// mid-line and always travels at least as far as asked.
-    pub fn scroll_up_rows(&mut self, rows: usize, width: usize) {
+    pub fn scroll_up_rows(&mut self, rows: usize, width: usize, filter: StreamFilter) {
         let offset = match self.scroll {
             Scroll::Following => 0,
             Scroll::Paused { offset } => offset,
         };
-        let end = self.lines.len().saturating_sub(offset);
+        let mut index = self.lines.len().saturating_sub(offset);
         let mut covered = 0;
-        let mut lines = 0;
-        while end > lines && covered < rows {
-            covered += wrap_ranges(&self.lines[end - lines - 1].text, width).len();
-            lines += 1;
+        let mut moved = 0;
+        while index > 0 && covered < rows {
+            index -= 1;
+            moved += 1;
+            if filter.admits(&self.lines[index]) {
+                covered += wrap_ranges(&self.lines[index].text, width).len();
+            }
         }
-        self.scroll_up(lines.max(1));
+        self.scroll_up(moved.max(1));
     }
 
     /// The other way; reaching the tail resumes following, as `scroll_down` does.
-    pub fn scroll_down_rows(&mut self, rows: usize, width: usize) {
+    pub fn scroll_down_rows(&mut self, rows: usize, width: usize, filter: StreamFilter) {
         let Scroll::Paused { offset } = self.scroll else {
             return;
         };
-        let end = self.lines.len().saturating_sub(offset);
+        let mut index = self.lines.len().saturating_sub(offset);
         let mut covered = 0;
-        let mut lines = 0;
-        while end + lines < self.lines.len() && covered < rows {
-            covered += wrap_ranges(&self.lines[end + lines].text, width).len();
-            lines += 1;
+        let mut moved = 0;
+        while index < self.lines.len() && covered < rows {
+            if filter.admits(&self.lines[index]) {
+                covered += wrap_ranges(&self.lines[index].text, width).len();
+            }
+            index += 1;
+            moved += 1;
         }
-        self.scroll_down(lines.max(1));
+        self.scroll_down(moved.max(1));
     }
 }
 
@@ -431,7 +539,7 @@ mod tests {
     fn filled(count: usize) -> LogBuffer {
         let mut buffer = LogBuffer::new();
         for index in 0..count {
-            buffer.push(format!("line {index}"), Stream::Stdout, false);
+            buffer.push_output(format!("line {index}"), Stream::Stdout, false);
         }
         buffer
     }
@@ -444,7 +552,7 @@ mod tests {
     #[test]
     fn a_coloured_line_is_split_into_styled_spans_and_plain_text() {
         let mut buffer = LogBuffer::new();
-        buffer.push(
+        buffer.push_output(
             "\u{1b}[1;31merror\u{1b}[0m: it broke",
             Stream::Stderr,
             false,
@@ -452,7 +560,7 @@ mod tests {
         let line = buffer.lines().next().unwrap();
         assert_eq!(line.raw, "\u{1b}[1;31merror\u{1b}[0m: it broke");
         assert_eq!(line.text, "error: it broke");
-        assert_eq!(line.stream, Stream::Stderr);
+        assert_eq!(line.kind, LineKind::Output(Stream::Stderr));
         assert_eq!(
             line.spans,
             vec![
@@ -470,7 +578,7 @@ mod tests {
     #[test]
     fn non_sgr_sequences_are_dropped() {
         let mut buffer = LogBuffer::new();
-        buffer.push(
+        buffer.push_output(
             "\u{1b}[2K\u{1b}]0;title\u{7}hello \u{1b}[1Aworld\u{1b}]8;;http://x\u{1b}\\",
             Stream::Stdout,
             false,
@@ -487,7 +595,7 @@ mod tests {
     #[test]
     fn a_plain_line_is_one_default_span() {
         let mut buffer = LogBuffer::new();
-        buffer.push("plain", Stream::Stdout, true);
+        buffer.push_output("plain", Stream::Stdout, true);
         let line = buffer.lines().next().unwrap();
         assert_eq!(line.spans, vec![(Style::default(), "plain".to_string())]);
         assert!(line.replayed);
@@ -497,9 +605,9 @@ mod tests {
     #[test]
     fn view_rows_name_their_line_and_carry_spans() {
         let mut buffer = LogBuffer::new();
-        buffer.push("a", Stream::Stdout, false);
-        buffer.push("\u{1b}[32mb\u{1b}[0m", Stream::Stdout, false);
-        let rows = buffer.view(5, 80);
+        buffer.push_output("a", Stream::Stdout, false);
+        buffer.push_output("\u{1b}[32mb\u{1b}[0m", Stream::Stdout, false);
+        let rows = buffer.view(5, 80, StreamFilter::All);
         assert_eq!(rows[0].line, Some(0));
         assert_eq!(rows[0].chars, 0..1);
         assert_eq!(rows[1].line, Some(1));
@@ -515,7 +623,7 @@ mod tests {
     fn the_marker_row_names_no_line() {
         let mut buffer = filled(MAX_LINES + 5);
         buffer.scroll_up(MAX_LINES);
-        let rows = buffer.view(4, 80);
+        let rows = buffer.view(4, 80, StreamFilter::All);
         assert_eq!(rows[0].line, None);
         assert_eq!(rows[0].text, "… 5 older lines truncated");
         assert_eq!(rows[1].line, Some(0));
@@ -536,7 +644,7 @@ mod tests {
     fn the_view_announces_truncation_at_the_top() {
         let mut buffer = filled(MAX_LINES + 5);
         buffer.scroll_up(MAX_LINES); // all the way to the top
-        let view = buffer.view(4, 80);
+        let view = buffer.view(4, 80, StreamFilter::All);
         assert_eq!(view[0].text, "… 5 older lines truncated");
         assert_eq!(view[1].text, "line 5");
     }
@@ -545,7 +653,7 @@ mod tests {
     #[test]
     fn a_following_buffer_shows_the_tail() {
         let buffer = filled(100);
-        let view = buffer.view(3, 80);
+        let view = buffer.view(3, 80, StreamFilter::All);
         assert_eq!(texts(&view), vec!["line 97", "line 98", "line 99"]);
     }
 
@@ -555,9 +663,13 @@ mod tests {
         let mut buffer = filled(100);
         buffer.scroll_up(10);
         assert!(matches!(buffer.scroll(), Scroll::Paused { offset: 10 }));
-        let pinned = buffer.view(3, 80);
-        buffer.push("line 100".to_string(), Stream::Stdout, false);
-        assert_eq!(buffer.view(3, 80), pinned, "a paused view does not move");
+        let pinned = buffer.view(3, 80, StreamFilter::All);
+        buffer.push_output("line 100".to_string(), Stream::Stdout, false);
+        assert_eq!(
+            buffer.view(3, 80, StreamFilter::All),
+            pinned,
+            "a paused view does not move"
+        );
     }
 
     /// Scrolling back to the bottom resumes following, as does `G`.
@@ -590,9 +702,9 @@ mod tests {
         let mut buffer = filled(MAX_LINES);
         buffer.scroll_up(MAX_LINES); // paused at the very top
         for index in 0..10 {
-            buffer.push(format!("extra {index}"), Stream::Stdout, false);
+            buffer.push_output(format!("extra {index}"), Stream::Stdout, false);
         }
-        let view = buffer.view(2, 80);
+        let view = buffer.view(2, 80, StreamFilter::All);
         assert_eq!(view[0].text, "… 10 older lines truncated");
     }
 
@@ -609,12 +721,12 @@ mod tests {
         // deque-relative position (the same addressing `copy::CopyState`
         // already uses), so it legitimately shifts by one per truncating
         // push even while the pinned *content* does not move at all.
-        let pinned_rows = buffer.view(5, 80);
+        let pinned_rows = buffer.view(5, 80, StreamFilter::All);
         let pinned = texts(&pinned_rows);
         for index in 0..20 {
-            buffer.push(format!("extra {index}"), Stream::Stdout, false); // every push truncates
+            buffer.push_output(format!("extra {index}"), Stream::Stdout, false); // every push truncates
         }
-        let after_rows = buffer.view(5, 80);
+        let after_rows = buffer.view(5, 80, StreamFilter::All);
         assert_eq!(
             texts(&after_rows),
             pinned,
@@ -625,14 +737,14 @@ mod tests {
     #[test]
     fn a_zero_height_view_shows_nothing() {
         let buffer = filled(10);
-        assert!(buffer.view(0, 80).is_empty());
+        assert!(buffer.view(0, 80, StreamFilter::All).is_empty());
     }
 
     #[test]
     fn a_view_taller_than_the_buffer_shows_only_what_exists() {
         let buffer = filled(3);
         assert_eq!(
-            texts(&buffer.view(10, 80)),
+            texts(&buffer.view(10, 80, StreamFilter::All)),
             vec!["line 0", "line 1", "line 2"]
         );
     }
@@ -640,13 +752,16 @@ mod tests {
     #[test]
     fn an_empty_buffer_has_an_empty_view() {
         let buffer = LogBuffer::new();
-        assert!(buffer.view(5, 80).is_empty());
+        assert!(buffer.view(5, 80, StreamFilter::All).is_empty());
     }
 
     #[test]
     fn a_single_line_buffer_shows_that_line() {
         let buffer = filled(1);
-        assert_eq!(texts(&buffer.view(3, 80)), vec!["line 0"]);
+        assert_eq!(
+            texts(&buffer.view(3, 80, StreamFilter::All)),
+            vec!["line 0"]
+        );
     }
 
     /// `scroll_up` itself clamps the offset to the top, but `view` must
@@ -655,7 +770,10 @@ mod tests {
     fn a_window_wider_than_the_reachable_history_clamps_to_the_top() {
         let mut buffer = filled(100);
         buffer.scroll_up(1_000); // asks for more than exists above the tail
-        assert_eq!(texts(&buffer.view(200, 80)), vec!["line 0"]);
+        assert_eq!(
+            texts(&buffer.view(200, 80, StreamFilter::All)),
+            vec!["line 0"]
+        );
     }
 
     /// A line wider than the pane wraps by character; the rows name the
@@ -663,8 +781,8 @@ mod tests {
     #[test]
     fn a_long_line_wraps_into_consecutive_rows() {
         let mut buffer = LogBuffer::new();
-        buffer.push("abcdefghij", Stream::Stdout, false);
-        let rows = buffer.view(5, 4);
+        buffer.push_output("abcdefghij", Stream::Stdout, false);
+        let rows = buffer.view(5, 4, StreamFilter::All);
         assert_eq!(texts(&rows), vec!["abcd", "efgh", "ij"]);
         assert_eq!(rows[1].line, Some(0));
         assert_eq!(rows[1].chars, 4..8);
@@ -675,8 +793,11 @@ mod tests {
     #[test]
     fn wrapping_counts_rendered_width() {
         let mut buffer = LogBuffer::new();
-        buffer.push("ab⚡cd", Stream::Stdout, false);
-        assert_eq!(texts(&buffer.view(5, 3)), vec!["ab", "⚡c", "d"]);
+        buffer.push_output("ab⚡cd", Stream::Stdout, false);
+        assert_eq!(
+            texts(&buffer.view(5, 3, StreamFilter::All)),
+            vec!["ab", "⚡c", "d"]
+        );
     }
 
     /// Following shows the last `height` rows, cutting the top line if
@@ -684,9 +805,9 @@ mod tests {
     #[test]
     fn following_shows_the_last_rows_even_mid_line() {
         let mut buffer = LogBuffer::new();
-        buffer.push("aaaaaaaa", Stream::Stdout, false);
-        buffer.push("bb", Stream::Stdout, false);
-        let rows = buffer.view(2, 4);
+        buffer.push_output("aaaaaaaa", Stream::Stdout, false);
+        buffer.push_output("bb", Stream::Stdout, false);
+        let rows = buffer.view(2, 4, StreamFilter::All);
         assert_eq!(texts(&rows), vec!["aaaa", "bb"]);
         assert_eq!(rows[0].chars, 4..8);
     }
@@ -705,7 +826,7 @@ mod tests {
     fn the_marker_stays_one_row_at_the_top() {
         let mut buffer = filled(MAX_LINES + 5);
         buffer.scroll_up(MAX_LINES - 3);
-        let rows = buffer.view(3, 6);
+        let rows = buffer.view(3, 6, StreamFilter::All);
         assert_eq!(rows[0].line, None);
         assert_eq!(texts(&rows)[1..], ["line 5", "line 6"]);
     }
@@ -715,8 +836,8 @@ mod tests {
     fn a_paused_offset_pins_the_same_line_at_any_width() {
         let mut buffer = filled(100);
         buffer.scroll_up(10);
-        let narrow = buffer.view(3, 4);
-        let wide = buffer.view(3, 80);
+        let narrow = buffer.view(3, 4, StreamFilter::All);
+        let wide = buffer.view(3, 80, StreamFilter::All);
         assert_eq!(narrow.last().unwrap().line, wide.last().unwrap().line);
         assert_eq!(wide.last().unwrap().text, "line 89");
     }
@@ -725,10 +846,16 @@ mod tests {
     #[test]
     fn empty_lines_and_zero_width_are_one_row() {
         let mut buffer = LogBuffer::new();
-        buffer.push("", Stream::Stdout, false);
-        buffer.push("abc", Stream::Stdout, false);
-        assert_eq!(texts(&buffer.view(5, 2)), vec!["", "ab", "c"]);
-        assert_eq!(texts(&buffer.view(5, 0)), vec!["", "abc"]);
+        buffer.push_output("", Stream::Stdout, false);
+        buffer.push_output("abc", Stream::Stdout, false);
+        assert_eq!(
+            texts(&buffer.view(5, 2, StreamFilter::All)),
+            vec!["", "ab", "c"]
+        );
+        assert_eq!(
+            texts(&buffer.view(5, 0, StreamFilter::All)),
+            vec!["", "abc"]
+        );
     }
 
     /// Row scrolling moves by whole lines, at least as far as asked.
@@ -736,13 +863,55 @@ mod tests {
     fn row_scrolling_rounds_toward_the_direction_of_travel() {
         let mut buffer = LogBuffer::new();
         for _ in 0..5 {
-            buffer.push("aaaaaaaa", Stream::Stdout, false); // 2 rows each at width 4
+            buffer.push_output("aaaaaaaa", Stream::Stdout, false); // 2 rows each at width 4
         }
-        buffer.scroll_up_rows(3, 4); // 3 rows up: covers 2 lines
+        buffer.scroll_up_rows(3, 4, StreamFilter::All); // 3 rows up: covers 2 lines
         assert!(matches!(buffer.scroll(), Scroll::Paused { offset: 2 }));
-        buffer.scroll_down_rows(1, 4); // 1 row down: one whole line
+        buffer.scroll_down_rows(1, 4, StreamFilter::All); // 1 row down: one whole line
         assert!(matches!(buffer.scroll(), Scroll::Paused { offset: 1 }));
-        buffer.scroll_down_rows(1, 4);
+        buffer.scroll_down_rows(1, 4, StreamFilter::All);
         assert!(matches!(buffer.scroll(), Scroll::Following));
+    }
+
+    /// A command or notice never holds a line break: each physical line
+    /// is its own buffer line, continuations indented for commands.
+    #[test]
+    fn multi_line_commands_and_notices_split_into_lines() {
+        let mut buffer = LogBuffer::new();
+        buffer.push_command("echo a\necho b");
+        buffer.push_notice(NoticeLevel::Error, "first\r\nsecond");
+        let lines: Vec<(&str, LineKind)> = buffer
+            .lines()
+            .map(|line| (line.text.as_str(), line.kind))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("$ echo a", LineKind::Command),
+                ("  echo b", LineKind::Command),
+                ("first", LineKind::Notice(NoticeLevel::Error)),
+                ("second", LineKind::Notice(NoticeLevel::Error)),
+            ]
+        );
+    }
+
+    /// Scrolling counts the lines the reader sees, not the hidden ones.
+    #[test]
+    fn filtered_scrolling_moves_over_visible_lines() {
+        let mut buffer = LogBuffer::new();
+        for index in 0..4 {
+            buffer.push_output(format!("out {index}"), Stream::Stdout, false);
+            buffer.push_output(format!("err {index}"), Stream::Stderr, false);
+        }
+        buffer.scroll_up_rows(2, 80, StreamFilter::Stdout);
+        assert_eq!(
+            texts(&buffer.view(2, 80, StreamFilter::Stdout)),
+            vec!["out 0", "out 1"]
+        );
+        buffer.scroll_down_rows(1, 80, StreamFilter::Stdout);
+        assert_eq!(
+            texts(&buffer.view(2, 80, StreamFilter::Stdout)),
+            vec!["out 1", "out 2"]
+        );
     }
 }

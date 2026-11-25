@@ -9,8 +9,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use alba_executors::Stream;
-
 use crate::logs::{LogBuffer, LogLine, Row, Scroll};
 use crate::state::{AppState, Mode, Phase};
 
@@ -59,12 +57,12 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
             .map(|committed| committed.search.query.as_str()),
     };
     // `styled_line` needs a real buffer to look up a row's own line (for
-    // the dimmed-stderr check and the full-line text search/copy need),
+    // the full-line text search/copy need),
     // harmless to require, since a `None` buffer never produces a row to
     // begin with (`rows_shown` is empty).
     let lines: Vec<Line> = match buffer {
         Some(buffer) => buffer
-            .view(body_height, rows[1].width as usize)
+            .view(body_height, rows[1].width as usize, state.stream_filter)
             .iter()
             .map(|row| styled_line(row, buffer, &state.mode, query, state.colour))
             .collect(),
@@ -108,7 +106,6 @@ fn fits_beside(name: &str, follow: &str, width: u16) -> bool {
 /// own slice, so a match or a selection is found in the line's own
 /// coordinates and then clipped to this row by `within`, the same line
 /// looked up the same way whether it wrapped into one row or several;
-/// the dimmed-stderr check reads the same line's `stream` off it.
 fn full_line(buffer: &LogBuffer, line: Option<usize>) -> Option<&LogLine> {
     line.and_then(|line| buffer.line(line))
 }
@@ -139,12 +136,6 @@ fn within(row: &Row, from: usize, to: usize) -> Option<(usize, usize)> {
 /// the covered or matched range on top, so a search hit inside a
 /// coloured `error` stays red as well as reversed.
 ///
-/// Before either highlight, plain stderr (no colour of its own: an
-/// ordinary `warning: ...`, never a line ANSI already coloured) is
-/// dimmed, off in monochrome: the same visual cue the CLI's
-/// headless renderers give stderr, so a beam's error output stands apart
-/// from its stdout without a search or copy highlight to point at it.
-///
 /// Pulled out of `draw` so this composition can be tested directly over
 /// the styled spans it produces. `draw` itself is only ever exercised
 /// through `TestBackend::to_string()` in the snapshot tests, which drops
@@ -165,25 +156,6 @@ fn styled_line(
         .collect();
     let line_ref = full_line(buffer, row.line);
     let full_text = line_ref.map(|line| line.text.as_str()).unwrap_or(&row.text);
-
-    // Decided over the whole logical line, not just this row's wrapped
-    // slice: a stderr line whose colour begins past the wrap boundary
-    // must dim the same way on every row it wraps into, not just the
-    // ones before its first coloured span. Falls back to the row's own
-    // spans for the truncation marker, which has no line behind it.
-    let own_colour = line_ref
-        .map(|line| line.spans.as_slice())
-        .unwrap_or(&row.spans)
-        .iter()
-        .any(|(style, _)| *style != Style::default());
-    let dim_stderr = colour != ColourMode::Monochrome
-        && line_ref.is_some_and(|line| line.stream == Stream::Stderr)
-        && !own_colour;
-    if dim_stderr {
-        for span in &mut spans {
-            span.style = span.style.dim();
-        }
-    }
 
     if let (Mode::Copy(selection), Some(line)) = (mode, row.line) {
         let covered = selection
@@ -292,7 +264,7 @@ mod tests {
     fn the_follow_text_reads_paused_once_scrolled_away_from_the_tail() {
         let mut buffer = LogBuffer::new();
         for text in ["alpha", "bravo", "charlie"] {
-            buffer.push(text, Stream::Stdout, false);
+            buffer.push_output(text, Stream::Stdout, false);
         }
         buffer.scroll_up(1);
         assert_eq!(follow_text(Some(&buffer)), "↑ paused");
@@ -348,7 +320,7 @@ mod tests {
     fn draw_marks_only_the_rows_the_selection_actually_covers() {
         let mut buffer = LogBuffer::new();
         for text in ["alpha", "bravo", "charlie", "delta"] {
-            buffer.push(text, Stream::Stdout, false);
+            buffer.push_output(text, Stream::Stdout, false);
         }
         // A span from bravo's own start to charlie's third character,
         // inclusive — the same shape `CopyState::selected_text` uses.
@@ -358,7 +330,7 @@ mod tests {
         let body_height = 4; // all four lines fit: row index == line index
 
         let rows: Vec<Line> = buffer
-            .view(body_height, 80)
+            .view(body_height, 80, crate::logs::StreamFilter::All)
             .iter()
             .map(|row| styled_line(row, &buffer, &mode, None, ColourMode::Monochrome))
             .collect();
@@ -406,64 +378,6 @@ mod tests {
                 Span::raw("Compiling "),
                 Span::styled("api", Style::new().reversed()),
             ])
-        );
-    }
-
-    /// stderr without colour of its own is dimmed; stderr that brought
-    /// colour keeps it.
-    #[test]
-    fn plain_stderr_is_dimmed_and_coloured_stderr_is_not() {
-        use alba_executors::Stream;
-        let mut buffer = LogBuffer::new();
-        buffer.push("warning", Stream::Stderr, false);
-        buffer.push("\u{1b}[31merror\u{1b}[0m", Stream::Stderr, false);
-        buffer.push("out", Stream::Stdout, false);
-        let rows = buffer.view(5, 80);
-        let plain = styled_line(&rows[0], &buffer, &Mode::Normal, None, ColourMode::Indexed);
-        assert_eq!(plain.spans[0].style, Style::new().dim());
-        let coloured = styled_line(&rows[1], &buffer, &Mode::Normal, None, ColourMode::Indexed);
-        assert_eq!(
-            coloured.spans[0].style,
-            crate::ui::theme::style(crate::ui::theme::Token::Error, ColourMode::Indexed)
-        );
-        let stdout = styled_line(&rows[2], &buffer, &Mode::Normal, None, ColourMode::Indexed);
-        assert_eq!(stdout.spans[0].style, Style::default());
-        let no_colour = styled_line(
-            &rows[0],
-            &buffer,
-            &Mode::Normal,
-            None,
-            ColourMode::Monochrome,
-        );
-        assert_eq!(no_colour.spans[0].style, Style::default());
-    }
-
-    /// A wrapped stderr line whose colour starts only on its second row
-    /// must dim (or not) the same way on both rows: the decision is
-    /// about the whole logical line, not each wrapped slice of it. Width
-    /// 4 wraps "aaaabb" into "aaaa" (default style) and "bb" (red),
-    /// reproducing exactly the split the bug used to produce: the first
-    /// row dimmed, the second row not, for what is really one coloured
-    /// line.
-    #[test]
-    fn wrapped_stderr_line_is_dimmed_consistently_across_its_rows() {
-        let mut buffer = LogBuffer::new();
-        buffer.push("aaaa\u{1b}[31mbb\u{1b}[0m", Stream::Stderr, false);
-        let rows = buffer.view(5, 4);
-        assert_eq!(rows[0].text, "aaaa");
-        assert_eq!(rows[1].text, "bb");
-
-        let first = styled_line(&rows[0], &buffer, &Mode::Normal, None, ColourMode::Indexed);
-        let second = styled_line(&rows[1], &buffer, &Mode::Normal, None, ColourMode::Indexed);
-        assert_ne!(
-            first.spans[0].style,
-            Style::new().dim(),
-            "line has colour, not dimmed"
-        );
-        assert_ne!(
-            second.spans[0].style,
-            Style::new().dim(),
-            "same line, same treatment"
         );
     }
 

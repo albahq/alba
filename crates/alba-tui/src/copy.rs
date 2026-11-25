@@ -16,7 +16,7 @@
 //! the slicing below goes through [`char`] iteration for exactly that
 //! reason.
 
-use crate::logs::LogBuffer;
+use crate::logs::{LogBuffer, StreamFilter};
 
 /// A selection over the selected beam's buffer. `anchor` is where the
 /// selection started (`v`, or a mouse-down); `cursor` is where it
@@ -45,9 +45,15 @@ impl CopyState {
     /// moving onto a shorter line pulls the column back to its last
     /// character (or to 0, on an empty one) the way a normal editor's
     /// cursor does.
-    pub fn move_cursor(&mut self, dl: isize, dc: isize, buffer: &LogBuffer) {
-        let max_line = buffer.len().saturating_sub(1);
-        let line = clamp_by(self.cursor.0, dl, max_line);
+    pub fn move_cursor(&mut self, dl: isize, dc: isize, buffer: &LogBuffer, filter: StreamFilter) {
+        let visible: Vec<usize> = (0..buffer.len())
+            .filter(|&index| buffer.line(index).is_some_and(|line| filter.admits(line)))
+            .collect();
+        // A cursor on a hidden line (the filter changed under it) counts
+        // as sitting at the next visible one.
+        let position = visible.partition_point(|&index| index < self.cursor.0);
+        let target = clamp_by(position, dl, visible.len().saturating_sub(1));
+        let line = visible.get(target).copied().unwrap_or(0);
         let max_col = char_count(buffer, line).saturating_sub(1);
         let column = clamp_by(self.cursor.1, dc, max_col);
         self.cursor = (line, column);
@@ -60,7 +66,7 @@ impl CopyState {
     /// the start column to the end of the first line, keeps every line
     /// strictly between whole, and ends with the last line's own start
     /// up to (and including) the end column.
-    pub fn selected_text(&self, buffer: &LogBuffer) -> String {
+    pub fn selected_text(&self, buffer: &LogBuffer, filter: StreamFilter) -> String {
         let (start, end) = self.normalized();
         if start.0 == end.0 {
             let line = line_text(buffer, start.0);
@@ -71,7 +77,9 @@ impl CopyState {
         let first_len = first.chars().count();
         parts.push(slice_chars(&first, start.1, first_len));
         for index in (start.0 + 1)..end.0 {
-            parts.push(line_text(buffer, index));
+            if buffer.line(index).is_some_and(|line| filter.admits(line)) {
+                parts.push(line_text(buffer, index));
+            }
         }
         let last = line_text(buffer, end.0);
         parts.push(slice_chars(&last, 0, end.1.saturating_add(1)));
@@ -149,8 +157,13 @@ fn slice_chars(text: &str, from: usize, to: usize) -> String {
 /// The buffer-absolute index of the first line with a row on screen
 /// (possibly a partial one: the top line cut to its last rows).
 /// Clamped to the buffer's own last line for a zero-height pane.
-pub fn top_visible_line(buffer: &LogBuffer, height: usize, width: usize) -> usize {
-    scroll_window(buffer, height, width)
+pub fn top_visible_line(
+    buffer: &LogBuffer,
+    height: usize,
+    width: usize,
+    filter: StreamFilter,
+) -> usize {
+    scroll_window(buffer, height, width, filter)
         .0
         .min(buffer.len().saturating_sub(1))
 }
@@ -165,8 +178,9 @@ pub fn row_at(
     height: usize,
     width: usize,
     pane_row: usize,
+    filter: StreamFilter,
 ) -> Option<(usize, usize)> {
-    let rows = buffer.view(height, width);
+    let rows = buffer.view(height, width, filter);
     let row = rows.get(pane_row)?;
     Some((row.line?, row.chars.start))
 }
@@ -174,8 +188,13 @@ pub fn row_at(
 /// The `(start, end)` line window `LogBuffer::view` currently draws
 /// from: `start` is the first line with a visible row, `end` one past
 /// the last. `(0, 0)` for an empty view.
-pub fn scroll_window(buffer: &LogBuffer, height: usize, width: usize) -> (usize, usize) {
-    let rows = buffer.view(height, width);
+pub fn scroll_window(
+    buffer: &LogBuffer,
+    height: usize,
+    width: usize,
+    filter: StreamFilter,
+) -> (usize, usize) {
+    let rows = buffer.view(height, width, filter);
     let mut lines = rows.iter().filter_map(|row| row.line);
     match (lines.next(), lines.next_back()) {
         (Some(first), Some(last)) => (first, last + 1),
@@ -260,7 +279,7 @@ mod tests {
     fn buffer_of(lines: &[&str]) -> LogBuffer {
         let mut buffer = LogBuffer::new();
         for text in lines {
-            buffer.push(text.to_string(), alba_executors::Stream::Stdout, false);
+            buffer.push_output(text.to_string(), alba_executors::Stream::Stdout, false);
         }
         buffer
     }
@@ -270,7 +289,7 @@ mod tests {
         let buffer = buffer_of(&["alpha", "bravo", "charlie"]);
         let mut copy = CopyState::new_at(0);
         copy.cursor = (1, 2);
-        assert_eq!(copy.selected_text(&buffer), "alpha\nbra");
+        assert_eq!(copy.selected_text(&buffer, StreamFilter::All), "alpha\nbra");
     }
 
     /// The controller's ruling on the brief's contradiction: end-column
@@ -282,7 +301,7 @@ mod tests {
         let buffer = buffer_of(&["alpha", "bravo"]);
         let mut copy = CopyState::new_at(1);
         copy.cursor = (0, 0);
-        assert_eq!(copy.selected_text(&buffer), "alpha\nb");
+        assert_eq!(copy.selected_text(&buffer, StreamFilter::All), "alpha\nb");
     }
 
     #[test]
@@ -290,7 +309,7 @@ mod tests {
         let buffer = buffer_of(&["Compiling api v0.1.0"]);
         let mut copy = CopyState::new_at(0);
         copy.cursor = (0, 3);
-        assert_eq!(copy.selected_text(&buffer), "Comp");
+        assert_eq!(copy.selected_text(&buffer, StreamFilter::All), "Comp");
     }
 
     /// Multi-byte characters must never cause a panic, and columns
@@ -301,22 +320,22 @@ mod tests {
         let buffer = buffer_of(&["héllo wörld"]);
         let mut copy = CopyState::new_at(0);
         copy.cursor = (0, 3);
-        assert_eq!(copy.selected_text(&buffer), "héll");
+        assert_eq!(copy.selected_text(&buffer, StreamFilter::All), "héll");
     }
 
     #[test]
     fn move_cursor_clamps_to_the_buffer() {
         let buffer = buffer_of(&["ab", "cdef"]);
         let mut copy = CopyState::new_at(0);
-        copy.move_cursor(-5, -5, &buffer);
+        copy.move_cursor(-5, -5, &buffer, StreamFilter::All);
         assert_eq!(copy.cursor, (0, 0));
-        copy.move_cursor(5, 5, &buffer);
+        copy.move_cursor(5, 5, &buffer, StreamFilter::All);
         assert_eq!(
             copy.cursor,
             (1, 3),
             "clamped to the last line and its last char"
         );
-        copy.move_cursor(-1, 0, &buffer);
+        copy.move_cursor(-1, 0, &buffer, StreamFilter::All);
         assert_eq!(
             copy.cursor,
             (0, 1),
@@ -328,7 +347,7 @@ mod tests {
     fn move_cursor_on_an_empty_buffer_does_not_panic() {
         let buffer = LogBuffer::new();
         let mut copy = CopyState::new_at(0);
-        copy.move_cursor(3, 3, &buffer);
+        copy.move_cursor(3, 3, &buffer, StreamFilter::All);
         assert_eq!(copy.cursor, (0, 0));
     }
 
@@ -393,44 +412,44 @@ mod tests {
     fn top_visible_line_follows_the_tail_by_default() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
-            buffer.push(
+            buffer.push_output(
                 format!("line {index}"),
                 alba_executors::Stream::Stdout,
                 false,
             );
         }
-        assert_eq!(top_visible_line(&buffer, 3, 80), 7);
+        assert_eq!(top_visible_line(&buffer, 3, 80, StreamFilter::All), 7);
     }
 
     #[test]
     fn top_visible_line_honors_a_paused_scroll() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
-            buffer.push(
+            buffer.push_output(
                 format!("line {index}"),
                 alba_executors::Stream::Stdout,
                 false,
             );
         }
         buffer.scroll_up(4);
-        assert_eq!(top_visible_line(&buffer, 3, 80), 3);
+        assert_eq!(top_visible_line(&buffer, 3, 80, StreamFilter::All), 3);
     }
 
     #[test]
     fn row_at_maps_rows_to_buffer_lines() {
         let mut buffer = LogBuffer::new();
         for index in 0..10 {
-            buffer.push(
+            buffer.push_output(
                 format!("line {index}"),
                 alba_executors::Stream::Stdout,
                 false,
             );
         }
         // Following, height 3: rows show lines 7, 8, 9.
-        assert_eq!(row_at(&buffer, 3, 80, 0), Some((7, 0)));
-        assert_eq!(row_at(&buffer, 3, 80, 2), Some((9, 0)));
+        assert_eq!(row_at(&buffer, 3, 80, 0, StreamFilter::All), Some((7, 0)));
+        assert_eq!(row_at(&buffer, 3, 80, 2, StreamFilter::All), Some((9, 0)));
         assert_eq!(
-            row_at(&buffer, 3, 80, 3),
+            row_at(&buffer, 3, 80, 3, StreamFilter::All),
             None,
             "past what the view actually rendered"
         );
@@ -443,7 +462,7 @@ mod tests {
     fn row_at_skips_the_truncation_marker() {
         let mut buffer = LogBuffer::new();
         for index in 0..(crate::logs::MAX_LINES + 5) {
-            buffer.push(
+            buffer.push_output(
                 format!("line {index}"),
                 alba_executors::Stream::Stdout,
                 false,
@@ -451,7 +470,7 @@ mod tests {
         }
         buffer.scroll_up(crate::logs::MAX_LINES); // paused at the very top
         assert_eq!(
-            row_at(&buffer, 4, 80, 0),
+            row_at(&buffer, 4, 80, 0, StreamFilter::All),
             None,
             "row 0 is the marker, not a line"
         );
@@ -460,7 +479,7 @@ mod tests {
         // text, which is why this is 0 rather than 5 (`buffer.lines()`
         // itself starts over at 0 once the oldest 5 lines are dropped).
         assert_eq!(
-            row_at(&buffer, 4, 80, 1),
+            row_at(&buffer, 4, 80, 1, StreamFilter::All),
             Some((0, 0)),
             "the first surviving line"
         );
@@ -471,34 +490,34 @@ mod tests {
     #[test]
     fn row_at_reports_the_line_and_its_first_char() {
         let mut buffer = LogBuffer::new();
-        buffer.push("abcdefgh", alba_executors::Stream::Stdout, false);
-        buffer.push("x", alba_executors::Stream::Stdout, false);
-        assert_eq!(row_at(&buffer, 5, 4, 0), Some((0, 0)));
-        assert_eq!(row_at(&buffer, 5, 4, 1), Some((0, 4)));
-        assert_eq!(row_at(&buffer, 5, 4, 2), Some((1, 0)));
-        assert_eq!(row_at(&buffer, 5, 4, 3), None);
+        buffer.push_output("abcdefgh", alba_executors::Stream::Stdout, false);
+        buffer.push_output("x", alba_executors::Stream::Stdout, false);
+        assert_eq!(row_at(&buffer, 5, 4, 0, StreamFilter::All), Some((0, 0)));
+        assert_eq!(row_at(&buffer, 5, 4, 1, StreamFilter::All), Some((0, 4)));
+        assert_eq!(row_at(&buffer, 5, 4, 2, StreamFilter::All), Some((1, 0)));
+        assert_eq!(row_at(&buffer, 5, 4, 3, StreamFilter::All), None);
     }
 
     /// A selection across a wrap boundary is the same text as unwrapped.
     #[test]
     fn a_selection_across_a_wrap_boundary_reads_the_logical_line() {
         let mut buffer = LogBuffer::new();
-        buffer.push("abcdefgh", alba_executors::Stream::Stdout, false);
+        buffer.push_output("abcdefgh", alba_executors::Stream::Stdout, false);
         let selection = CopyState {
             anchor: (0, 2),
             cursor: (0, 5),
         };
-        assert_eq!(selection.selected_text(&buffer), "cdef");
+        assert_eq!(selection.selected_text(&buffer, StreamFilter::All), "cdef");
     }
 
     /// The window is in lines, its top the first line with a visible row.
     #[test]
     fn scroll_window_starts_at_the_first_partly_visible_line() {
         let mut buffer = LogBuffer::new();
-        buffer.push("aaaaaaaa", alba_executors::Stream::Stdout, false);
-        buffer.push("bb", alba_executors::Stream::Stdout, false);
-        assert_eq!(scroll_window(&buffer, 2, 4), (0, 2));
-        assert_eq!(top_visible_line(&buffer, 2, 4), 0);
-        assert_eq!(scroll_window(&buffer, 1, 4), (1, 2));
+        buffer.push_output("aaaaaaaa", alba_executors::Stream::Stdout, false);
+        buffer.push_output("bb", alba_executors::Stream::Stdout, false);
+        assert_eq!(scroll_window(&buffer, 2, 4, StreamFilter::All), (0, 2));
+        assert_eq!(top_visible_line(&buffer, 2, 4, StreamFilter::All), 0);
+        assert_eq!(scroll_window(&buffer, 1, 4, StreamFilter::All), (1, 2));
     }
 }
