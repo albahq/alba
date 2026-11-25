@@ -880,7 +880,10 @@ command that beam's `run` list runs, so state a command leaves behind
 (files written, anything a previous command set up) is visible to the
 next one in the same beam; the container is removed once the beam ends.
 The image must provide `/bin/sh`, since every command runs through
-`docker exec ... sh -c "<command>"`.
+`docker exec ... sh -c "<command>"`. A beam's `env` never appears on that
+command line, where any user of the host could read it (`ps`): the
+container's shell reads the values on stdin, which needs `cat` in the
+image too, as every image with a shell has.
 
 The project directory is always bind-mounted into the container. On
 unix it is mounted at its own host path, so a beam's working directory

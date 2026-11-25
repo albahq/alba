@@ -6,6 +6,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::shell::stream_lines;
@@ -119,22 +120,42 @@ pub(crate) fn container_name(beam: &str) -> String {
 
 /// Builds the argument vector for `docker exec`, running one already
 /// rendered command line inside the session's container via `sh -c`.
-pub(crate) fn exec_args(
-    container: &str,
-    cwd: &str,
-    env: &[(String, String)],
-    command: &str,
-) -> Vec<String> {
+///
+/// The environment never appears here: every process's command line is
+/// readable by every user of the host (`ps`, `/proc/<pid>/cmdline`), so
+/// `-e NAME=VALUE` would publish each value for as long as the command
+/// runs. With an environment to set, the container's shell instead reads
+/// its exports from stdin (see [`env_script`]), then runs the command
+/// exactly as `sh -c` would without one. The values are not handed to the
+/// local `docker` client's own environment either (`-e NAME`): the client
+/// reads `HOME`, `PATH`, `DOCKER_HOST` and the proxy variables itself, so a
+/// beam setting one of them for its container would reconfigure the client.
+pub(crate) fn exec_args(container: &str, cwd: &str, has_env: bool, command: &str) -> Vec<String> {
     let mut args = vec!["exec".to_string(), "-w".to_string(), cwd.to_string()];
-    for (key, value) in env {
-        args.push("-e".to_string());
-        args.push(format!("{key}={value}"));
+    if has_env {
+        args.push("-i".to_string());
     }
     args.push(container.to_string());
     args.push("sh".to_string());
     args.push("-c".to_string());
+    if has_env {
+        // `$(cat)` reads the whole script before any of it runs, so the
+        // command sees an exhausted stdin, as it would see `/dev/null`
+        // without an environment; the command is then `$0` of a fresh
+        // `sh -c`, which inherits the exports.
+        args.push(r#"eval "$(cat)" && exec sh -c "$0""#.to_string());
+    }
     args.push(command.to_string());
     args
+}
+
+/// The script [`exec_args`] feeds the container's shell on stdin: one
+/// `export` per variable, each value single-quoted so that no character in
+/// it, newlines included, is interpreted.
+pub(crate) fn env_script(env: &[(String, String)]) -> String {
+    env.iter()
+        .map(|(name, value)| format!("export {name}='{}'\n", value.replace('\'', r"'\''")))
+        .collect()
 }
 
 /// Runs one command inside `container` through `docker exec`, streaming its
@@ -148,14 +169,30 @@ pub(crate) async fn exec(
     ctx: ExecContext,
     requirement: &str,
 ) -> Result<ExecResult, ExecError> {
-    let args = exec_args(container, cwd, &cmd.env, &cmd.command);
+    let has_env = !cmd.env.is_empty();
+    let args = exec_args(container, cwd, has_env, &cmd.command);
     let mut child = Command::new("docker")
         .args(&args)
-        .stdin(Stdio::null())
+        .stdin(if has_env {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| spawn_error(error, requirement))?;
+
+    // Written from its own task, so a script larger than the pipe buffer
+    // cannot stall the wait below; dropping the handle closes stdin, which
+    // is the end of the script `$(cat)` waits for. A failed write surfaces
+    // as the command's own failure: its shell never sees a complete script.
+    if let Some(mut stdin) = child.stdin.take() {
+        let script = env_script(&cmd.env);
+        tokio::spawn(async move {
+            let _ = stdin.write_all(script.as_bytes()).await;
+        });
+    }
 
     let stdout = child
         .stdout
@@ -339,21 +376,11 @@ mod tests {
     }
 
     #[test]
-    fn exec_args_carry_workdir_and_env() {
-        let args = exec_args("cid", "/proj/api", &[("K".into(), "V".into())], "echo hi");
+    fn exec_args_carry_workdir_and_command_without_env() {
+        let args = exec_args("cid", "/proj/api", false, "echo hi");
         assert_eq!(
             args,
-            vec![
-                "exec",
-                "-w",
-                "/proj/api",
-                "-e",
-                "K=V",
-                "cid",
-                "sh",
-                "-c",
-                "echo hi",
-            ]
+            vec!["exec", "-w", "/proj/api", "cid", "sh", "-c", "echo hi"]
         );
     }
 }
