@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use crate::logs::{LineKind, LogBuffer, LogLine, Row, Scroll, StreamFilter};
+use crate::logs::{Extent, LineKind, LogBuffer, LogLine, Row, Scroll, StreamFilter};
 use crate::state::{AppState, BeamState, Mode, Phase};
 use alba_executors::Stream;
 
@@ -95,6 +95,7 @@ impl PaneState {
             Self::Paused => "Ⅱ paused".to_string(),
             Self::EndOfOutput => "end of output".to_string(),
             Self::Match { current, total } => format!("match {current}/{total}"),
+            Self::Copy { lines: 1 } => "COPY · 1 line".to_string(),
             Self::Copy { lines } => format!("COPY · {lines} lines"),
             Self::Filtered(StreamFilter::Stdout) => "▎ stdout only".to_string(),
             Self::Filtered(StreamFilter::Stderr) => "▎ stderr only".to_string(),
@@ -217,8 +218,8 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(gutter), parts.gutter);
     frame.render_widget(Paragraph::new(lines), parts.text);
 
-    let (window, total) = buffer.row_window(height, width, filter);
-    if let Some(thumb) = scrollbar(window, total, height) {
+    let extent = buffer.extent(&rows, width, filter);
+    if let Some(thumb) = scrollbar(extent.window.clone(), extent.rows, height) {
         let rail: Vec<Line> = (0..height)
             .map(|row| {
                 if thumb.contains(&row) {
@@ -232,28 +233,18 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     if matches!(buffer.scroll(), Scroll::Paused { .. }) && area.width >= BADGE_MIN_WIDTH {
-        draw_badge(frame, parts.text, buffer, &rows, filter, mode);
+        draw_badge(frame, parts.text, &extent, mode);
     }
 }
 
 /// ` current/total ` at the bottom right of the output, over the end of
 /// the last visible row: `current` is the last line in view, both
 /// counted in lines of the filtered view, not rows.
-fn draw_badge(
-    frame: &mut Frame,
-    text: Rect,
-    buffer: &LogBuffer,
-    rows: &[Row],
-    filter: StreamFilter,
-    mode: ColourMode,
-) {
-    let Some(last) = rows.iter().rev().find_map(|row| row.line) else {
+fn draw_badge(frame: &mut Frame, text: Rect, extent: &Extent, mode: ColourMode) {
+    if extent.current == 0 {
         return;
-    };
-    let admitted = |line: &&LogLine| filter.admits(line);
-    let current = buffer.lines().take(last + 1).filter(admitted).count();
-    let total = buffer.lines().filter(admitted).count();
-    let badge = position_badge(current, total);
+    }
+    let badge = position_badge(extent.current, extent.lines);
     let badge_width = badge.width() as u16;
     if badge_width > text.width || text.height == 0 {
         return;
@@ -294,9 +285,9 @@ fn grouped(number: usize) -> String {
 /// and the pane's state against the right edge. When the row is too
 /// narrow the executor goes first, then the beam name is cut with `…`,
 /// then dropped; the state is never cut. Parked, the pane is the
-/// diagnostic's and names no beam. With no beam to follow (before the
-/// first run, or parked) `following` would not be true, so the state
-/// is left out.
+/// diagnostic's and names no beam. With nothing producing (no beam
+/// before the first run or while parked, or a beam still pending)
+/// `following` would not be true, so the state is left out.
 fn title_line(state: &AppState, pane_state: PaneState, width: usize) -> Line<'static> {
     let mode = state.colour;
     let parked = matches!(state.phase, Phase::Parked);
@@ -305,7 +296,10 @@ fn title_line(state: &AppState, pane_state: PaneState, width: usize) -> Line<'st
         .selected_beam()
         .filter(|_| !parked)
         .map(|beam| beam.id.as_str());
-    let right = if beam.is_none() && pane_state == PaneState::Following {
+    let pending = state
+        .selected_beam()
+        .is_some_and(|beam| matches!(beam.state, BeamState::Pending));
+    let right = if (beam.is_none() || pending) && pane_state == PaneState::Following {
         String::new()
     } else {
         pane_state.text()
@@ -856,6 +850,9 @@ mod tests {
         state.mode = Mode::Copy(copy);
         assert_eq!(pane_state(&state), PaneState::Copy { lines: 3 });
         assert!(title_row(&state).ends_with("COPY · 3 lines"));
+        state.mode = Mode::Copy(CopyState::new_at(4));
+        assert_eq!(pane_state(&state), PaneState::Copy { lines: 1 });
+        assert!(title_row(&state).ends_with("COPY · 1 line"));
 
         state.mode = Mode::Normal;
         state.stream_filter = StreamFilter::All;
@@ -878,6 +875,24 @@ mod tests {
     fn a_pane_with_no_beam_claims_no_state() {
         let state = AppState::new("build", false);
         assert_eq!(title_row(&state).trim_end(), "OUTPUT");
+    }
+
+    /// A selected beam still waiting to start is not producing: the
+    /// title says nothing about following it.
+    #[test]
+    fn a_pending_beam_claims_no_state() {
+        let mut state = AppState::new("test", false).with_colour(ColourMode::TrueColour);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![id("test")],
+                affected_by: None,
+                beams: vec![id("test")],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            Instant::now(),
+        );
+        assert_eq!(title_row(&state).trim_end(), "OUTPUT / test");
     }
 
     #[test]

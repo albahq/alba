@@ -335,6 +335,21 @@ fn physical_lines(text: &str) -> impl Iterator<Item = &str> {
     text.split('\n').map(|line| line.trim_end_matches('\r'))
 }
 
+/// Where a view sits in the whole filtered output (see
+/// [`LogBuffer::extent`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extent {
+    /// The rows shown, as a range of all the rendered rows.
+    pub window: Range<usize>,
+    /// Every rendered row, the truncation marker included.
+    pub rows: usize,
+    /// The last line in view, counted among the lines the filter admits
+    /// (1-based; 0 when no line is in view).
+    pub current: usize,
+    /// The lines the filter admits.
+    pub lines: usize,
+}
+
 pub struct LogBuffer {
     lines: VecDeque<LogLine>,
     truncated: usize,
@@ -525,31 +540,46 @@ impl LogBuffer {
         rows.into()
     }
 
-    /// Where the rows `view` shows sit among all the rows the filtered
-    /// buffer renders as: the window's row range and the total, the
-    /// truncation marker counted as a row. Feeds the scrollbar.
-    pub fn row_window(
-        &self,
-        height: usize,
-        width: usize,
-        filter: StreamFilter,
-    ) -> (Range<usize>, usize) {
-        let offset = match self.scroll {
-            Scroll::Following => 0,
-            Scroll::Paused { offset } => offset,
+    /// Where `rows`, the rows `view` returned for this buffer at
+    /// `width` through `filter`, sit in the whole filtered output, in one
+    /// pass over the buffer: the scrollbar reads the rows, the position
+    /// badge the lines.
+    pub fn extent(&self, rows: &[Row], width: usize, filter: StreamFilter) -> Extent {
+        let first = rows
+            .iter()
+            .find_map(|row| row.line.map(|line| (line, row.chars.start)));
+        let last = rows.iter().rev().find_map(|row| row.line);
+        let marker = usize::from(self.truncated > 0);
+        let marker_shown = rows.first().is_some_and(|row| row.line.is_none());
+        let mut extent = Extent {
+            window: 0..0,
+            rows: marker,
+            current: 0,
+            lines: 0,
         };
-        let end = self.lines.len().saturating_sub(offset);
-        let rows = |range: Range<usize>| -> usize {
-            self.lines
-                .range(range)
-                .filter(|line| filter.admits(line))
-                .map(|line| line.ranges(width).len())
-                .sum()
-        };
-        let total = usize::from(self.truncated > 0) + rows(0..self.lines.len());
-        let window_end = total - rows(end..self.lines.len());
-        let shown = self.view(height, width, filter).len();
-        (window_end.saturating_sub(shown)..window_end, total)
+        // Rows before the first shown row, the marker's included unless
+        // the marker is itself shown.
+        let mut before = if marker_shown { 0 } else { marker };
+        for (index, line) in self.lines.iter().enumerate() {
+            if !filter.admits(line) {
+                continue;
+            }
+            let ranges = line.ranges(width);
+            extent.rows += ranges.len();
+            extent.lines += 1;
+            if last.is_some_and(|last| index <= last) {
+                extent.current += 1;
+            }
+            match first {
+                Some((first, _)) if index < first => before += ranges.len(),
+                Some((first, start)) if index == first => {
+                    before += ranges.iter().filter(|range| range.start < start).count();
+                }
+                _ => {}
+            }
+        }
+        extent.window = before..before + rows.len();
+        extent
     }
 
     /// `PgUp`, `Ctrl-u`, the wheel: moves the window up by whole lines
@@ -621,9 +651,35 @@ mod tests {
         for index in 1..10 {
             buffer.push_output(format!("l{index}"), Stream::Stdout, false);
         }
-        assert_eq!(buffer.row_window(4, 4, StreamFilter::All), (7..11, 11));
+        let extent = |buffer: &LogBuffer| {
+            let rows = buffer.view(4, 4, StreamFilter::All);
+            buffer.extent(&rows, 4, StreamFilter::All)
+        };
+        let following = extent(&buffer);
+        assert_eq!((following.window, following.rows), (7..11, 11));
+        assert_eq!((following.current, following.lines), (10, 10));
         buffer.scroll_up(3);
-        assert_eq!(buffer.row_window(4, 4, StreamFilter::All), (4..8, 11));
+        let paused = extent(&buffer);
+        assert_eq!((paused.window, paused.rows), (4..8, 11));
+        assert_eq!((paused.current, paused.lines), (7, 10));
+    }
+
+    /// At the top of a truncated buffer the marker takes the first row
+    /// and pushes the last one out: the window is the marker's row and
+    /// the rows really shown, `0..height`.
+    #[test]
+    fn the_extent_counts_the_truncation_marker_at_the_top() {
+        let mut buffer = LogBuffer::new();
+        for index in 0..(MAX_LINES + 5) {
+            buffer.push_output(format!("line {index}"), Stream::Stdout, false);
+        }
+        buffer.scroll_up(MAX_LINES - 4);
+        let rows = buffer.view(4, 80, StreamFilter::All);
+        assert_eq!(rows[0].line, None, "the marker row");
+        let extent = buffer.extent(&rows, 80, StreamFilter::All);
+        assert_eq!(extent.window, 0..4);
+        assert_eq!(extent.rows, MAX_LINES + 1);
+        assert_eq!((extent.current, extent.lines), (3, MAX_LINES));
     }
 
     fn texts(rows: &[Row]) -> Vec<&str> {

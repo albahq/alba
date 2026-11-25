@@ -1173,7 +1173,7 @@ mod tests {
     /// but never falls to zero, which would make the key a no-op.
     #[test]
     fn the_page_distance_is_half_the_panes_own_height() {
-        assert_eq!(half_pane(15), 7, "15 content rows at 80x24");
+        assert_eq!(half_pane(13), 6, "13 content rows at 80x24");
         assert_eq!(half_pane(3), 1, "3 content rows at the floor");
         assert_eq!(
             half_pane(0),
