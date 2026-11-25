@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 
 use crate::state::{AppState, Phase};
 
-use super::theme::parked_style;
+use super::theme::{Token, style};
 
 /// The left-hand title.
 pub fn line(state: &AppState) -> Line<'static> {
@@ -33,7 +33,7 @@ pub fn session(state: &AppState) -> Option<Line<'static>> {
         }
         Phase::Parked => Some(Line::from(vec![Span::styled(
             "parked · waiting for a valid Beamfile".to_string(),
-            parked_style(state.colour),
+            style(Token::Accent, state.colour),
         )])),
         Phase::Running { .. } | Phase::Finished => None,
     }
@@ -41,8 +41,8 @@ pub fn session(state: &AppState) -> Option<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::theme::ColourMode;
     use super::*;
-    use ratatui::style::{Color, Style};
     use std::time::Instant;
 
     fn state_with_phase(phase: Phase) -> AppState {
@@ -100,9 +100,12 @@ mod tests {
     #[test]
     fn a_parked_project_is_named_in_the_parked_colour() {
         let mut parked = state_with_phase(Phase::Parked);
-        parked.colour = true;
+        parked.colour = ColourMode::TrueColour;
         let title = session(&parked).unwrap();
         assert_eq!(title.to_string(), "parked · waiting for a valid Beamfile");
-        assert_eq!(title.spans[0].style, Style::new().fg(Color::Yellow));
+        assert_eq!(
+            title.spans[0].style,
+            style(Token::Accent, ColourMode::TrueColour)
+        );
     }
 }

@@ -14,6 +14,8 @@ use alba_executors::Stream;
 use crate::logs::{LogBuffer, LogLine, Row, Scroll};
 use crate::state::{AppState, Mode, Phase};
 
+use super::theme::{ColourMode, remap_ansi};
+
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     let rows = Layout::vertical([
         Constraint::Length(1), // "LOGS" / "DIAGNOSTIC", follow state at the right
@@ -139,7 +141,7 @@ fn within(row: &Row, from: usize, to: usize) -> Option<(usize, usize)> {
 ///
 /// Before either highlight, plain stderr (no colour of its own: an
 /// ordinary `warning: ...`, never a line ANSI already coloured) is
-/// dimmed, off when `colour` is off: the same visual cue the CLI's
+/// dimmed, off in monochrome: the same visual cue the CLI's
 /// headless renderers give stderr, so a beam's error output stands apart
 /// from its stdout without a search or copy highlight to point at it.
 ///
@@ -154,12 +156,12 @@ fn styled_line(
     buffer: &LogBuffer,
     mode: &Mode,
     query: Option<&str>,
-    colour: bool,
+    colour: ColourMode,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = row
         .spans
         .iter()
-        .map(|(style, content)| Span::styled(content.clone(), *style))
+        .map(|(style, content)| Span::styled(content.clone(), remap_ansi(*style, colour)))
         .collect();
     let line_ref = full_line(buffer, row.line);
     let full_text = line_ref.map(|line| line.text.as_str()).unwrap_or(&row.text);
@@ -174,8 +176,9 @@ fn styled_line(
         .unwrap_or(&row.spans)
         .iter()
         .any(|(style, _)| *style != Style::default());
-    let dim_stderr =
-        colour && line_ref.is_some_and(|line| line.stream == Stream::Stderr) && !own_colour;
+    let dim_stderr = colour != ColourMode::Monochrome
+        && line_ref.is_some_and(|line| line.stream == Stream::Stderr)
+        && !own_colour;
     if dim_stderr {
         for span in &mut spans {
             span.style = span.style.dim();
@@ -357,7 +360,7 @@ mod tests {
         let rows: Vec<Line> = buffer
             .view(body_height, 80)
             .iter()
-            .map(|row| styled_line(row, &buffer, &mode, None, false))
+            .map(|row| styled_line(row, &buffer, &mode, None, ColourMode::Monochrome))
             .collect();
 
         assert_eq!(rows[0], Line::from("alpha"), "before the span: unstyled");
@@ -390,7 +393,13 @@ mod tests {
             text: "Compiling api".to_string(),
         };
         let buffer = LogBuffer::new();
-        let line = styled_line(&row, &buffer, &Mode::Normal, Some("api"), false);
+        let line = styled_line(
+            &row,
+            &buffer,
+            &Mode::Normal,
+            Some("api"),
+            ColourMode::Monochrome,
+        );
         assert_eq!(
             line,
             Line::from(vec![
@@ -410,16 +419,22 @@ mod tests {
         buffer.push("\u{1b}[31merror\u{1b}[0m", Stream::Stderr, false);
         buffer.push("out", Stream::Stdout, false);
         let rows = buffer.view(5, 80);
-        let plain = styled_line(&rows[0], &buffer, &Mode::Normal, None, true);
+        let plain = styled_line(&rows[0], &buffer, &Mode::Normal, None, ColourMode::Indexed);
         assert_eq!(plain.spans[0].style, Style::new().dim());
-        let coloured = styled_line(&rows[1], &buffer, &Mode::Normal, None, true);
+        let coloured = styled_line(&rows[1], &buffer, &Mode::Normal, None, ColourMode::Indexed);
         assert_eq!(
             coloured.spans[0].style,
-            Style::new().fg(ratatui::style::Color::Red)
+            crate::ui::theme::style(crate::ui::theme::Token::Error, ColourMode::Indexed)
         );
-        let stdout = styled_line(&rows[2], &buffer, &Mode::Normal, None, true);
+        let stdout = styled_line(&rows[2], &buffer, &Mode::Normal, None, ColourMode::Indexed);
         assert_eq!(stdout.spans[0].style, Style::default());
-        let no_colour = styled_line(&rows[0], &buffer, &Mode::Normal, None, false);
+        let no_colour = styled_line(
+            &rows[0],
+            &buffer,
+            &Mode::Normal,
+            None,
+            ColourMode::Monochrome,
+        );
         assert_eq!(no_colour.spans[0].style, Style::default());
     }
 
@@ -438,8 +453,8 @@ mod tests {
         assert_eq!(rows[0].text, "aaaa");
         assert_eq!(rows[1].text, "bb");
 
-        let first = styled_line(&rows[0], &buffer, &Mode::Normal, None, true);
-        let second = styled_line(&rows[1], &buffer, &Mode::Normal, None, true);
+        let first = styled_line(&rows[0], &buffer, &Mode::Normal, None, ColourMode::Indexed);
+        let second = styled_line(&rows[1], &buffer, &Mode::Normal, None, ColourMode::Indexed);
         assert_ne!(
             first.spans[0].style,
             Style::new().dim(),

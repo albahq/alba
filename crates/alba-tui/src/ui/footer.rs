@@ -22,7 +22,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::state::{AppState, BeamState, Phase};
 
 use super::format_duration;
-use super::theme::{bar_style, outcome_style, status_style};
+use super::theme::{ColourMode, Token, status_token, style};
 
 /// The bar's widest. It has only `total + 1` distinct states, so more
 /// cells would make each step jump further without saying anything new.
@@ -69,7 +69,7 @@ fn run_line(state: &AppState, now: Instant, room: usize) -> Line<'static> {
                 Some(width) => {
                     let filled = filled_cells(*done, *total, width);
                     Line::from(vec![
-                        Span::styled("▰".repeat(filled), bar_style(state.colour)),
+                        Span::styled("▰".repeat(filled), style(Token::Success, state.colour)),
                         Span::raw(format!("{} {text}", "▱".repeat(width - filled))),
                     ])
                 }
@@ -106,9 +106,9 @@ fn filled_cells(done: usize, total: usize, width: usize) -> usize {
 }
 
 /// The last run's outcome, one word in the outcome colour and the
-/// duration. An allowed failure reads `failed`, as `outcome_style` and
+/// duration. An allowed failure reads `failed`, as the outcome colour and
 /// the tree's `✖` both already treat it.
-fn outcome_line(summary: &RunSummary, colour: bool) -> Line<'static> {
+fn outcome_line(summary: &RunSummary, mode: ColourMode) -> Line<'static> {
     let ran = summary.succeeded.len()
         + summary.cached.len()
         + summary.failed.len()
@@ -117,19 +117,19 @@ fn outcome_line(summary: &RunSummary, colour: bool) -> Line<'static> {
     if ran == 0 {
         return Line::from("nothing ran");
     }
-    let word = if summary.failed.is_empty() && summary.failed_allowed.is_empty() {
-        "ok"
+    let (word, token) = if summary.failed.is_empty() && summary.failed_allowed.is_empty() {
+        ("ok", Token::Success)
     } else {
-        "failed"
+        ("failed", Token::Error)
     };
     Line::from(vec![
-        Span::styled(word.to_string(), outcome_style(summary, colour)),
+        Span::styled(word.to_string(), style(token, mode)),
         Span::raw(format!(" · {}", format_duration(summary.duration))),
     ])
 }
 
 /// The four buckets a beam can settle into, each `glyph count` pair
-/// styled by `status_style` of a representative state for that bucket:
+/// styled by `status_token` of a representative state for that bucket:
 /// the same colour the tree's own rows would show that status in.
 fn counts_line(state: &AppState) -> Line<'static> {
     let mut succeeded = 0;
@@ -183,7 +183,7 @@ fn counts_line(state: &AppState) -> Line<'static> {
         }
         spans.push(Span::styled(
             format!("{glyph} {count}"),
-            status_style(representative, state.colour),
+            style(status_token(representative), state.colour),
         ));
     }
     Line::from(spans)
@@ -193,7 +193,6 @@ fn counts_line(state: &AppState) -> Line<'static> {
 mod tests {
     use super::*;
     use alba_core::BeamId;
-    use ratatui::style::{Color, Style};
 
     fn state_with_phase(phase: Phase) -> AppState {
         let mut state = AppState::new("build", false);
@@ -304,21 +303,21 @@ mod tests {
     fn colour_reaches_the_bar_and_the_outcome() {
         let now = Instant::now();
         let mut state = running(1, 2, now);
-        state.colour = true;
+        state.colour = ColourMode::Indexed;
         assert_eq!(
             run_line(&state, now, 55).spans[0].style,
-            Style::new().fg(Color::Green)
+            style(Token::Success, ColourMode::Indexed)
         );
 
         let mut finished = state_with_phase(Phase::Finished);
-        finished.colour = true;
+        finished.colour = ColourMode::Indexed;
         finished.last_summary = Some(RunSummary {
             failed: vec![BeamId("a".into())],
             ..RunSummary::default()
         });
         assert_eq!(
             run_line(&finished, now, 55).spans[0].style,
-            Style::new().fg(Color::Red)
+            style(Token::Error, ColourMode::Indexed)
         );
     }
 

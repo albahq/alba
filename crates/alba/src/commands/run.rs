@@ -385,7 +385,8 @@ async fn tui_execute(
         }
     };
 
-    let colour = crate::color_enabled();
+    let mode = crate::current_colour_mode();
+    let colour = mode != alba_tui::ColourMode::Monochrome;
     let options = RunOptions {
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
@@ -456,7 +457,7 @@ async fn tui_execute(
         alba_tui::TuiOptions {
             target: selection_label(selection),
             watch: flags.watch,
-            colour,
+            colour: mode,
         },
     )
     .await;

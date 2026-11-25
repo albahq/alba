@@ -17,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::state::{AppState, BeamRow, BeamState};
 
 use super::format_duration;
+use super::theme::{ColourMode, status_token, style};
 
 /// Reserved for the duration column, right-aligned. Wide enough for the
 /// durations Alba actually produces without the beam name stealing space
@@ -56,7 +57,7 @@ fn row_line(
     now: Instant,
     width: usize,
     selected: bool,
-    colour: bool,
+    colour: ColourMode,
 ) -> Line<'static> {
     let glyph = glyph_for(&row.state);
     let duration = duration_text(&row.state, now);
@@ -72,10 +73,7 @@ fn row_line(
     // wide name would.
     let pad = name_width.saturating_sub(name.width());
     let mut spans = vec![
-        Span::styled(
-            format!(" {glyph}"),
-            super::theme::status_style(&row.state, colour),
-        ),
+        Span::styled(format!(" {glyph}"), style(status_token(&row.state), colour)),
         Span::raw(format!(" {name}{:pad$}{duration:>DURATION_WIDTH$}", "")),
     ];
     if selected {
@@ -162,13 +160,13 @@ fn duration_text(state: &BeamState, now: Instant) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::theme::Token;
     use super::*;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::Modifier;
     use std::time::Duration;
 
     #[test]
     fn a_failed_row_carries_the_status_colour_on_its_glyph() {
-        use ratatui::style::Color;
         let row = BeamRow {
             id: "build".to_string(),
             state: BeamState::Done {
@@ -176,10 +174,13 @@ mod tests {
                 duration: Duration::from_secs(1),
             },
         };
-        let line = row_line(&row, Instant::now(), 30, false, true);
-        assert_eq!(line.spans[0].style, Style::new().fg(Color::Red));
+        let line = row_line(&row, Instant::now(), 30, false, ColourMode::Indexed);
+        assert_eq!(
+            line.spans[0].style,
+            style(Token::Error, ColourMode::Indexed)
+        );
         assert_eq!(line.spans[0].content.trim(), "✖");
-        let selected = row_line(&row, Instant::now(), 30, true, true);
+        let selected = row_line(&row, Instant::now(), 30, true, ColourMode::Indexed);
         assert!(
             selected
                 .spans
@@ -230,7 +231,7 @@ mod tests {
                 duration: Duration::from_millis(1200),
             },
         };
-        let line = row_line(&row, Instant::now(), 30, false, false);
+        let line = row_line(&row, Instant::now(), 30, false, ColourMode::Monochrome);
         let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
             rendered.width(),

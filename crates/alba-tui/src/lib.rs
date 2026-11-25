@@ -31,6 +31,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::input::Action;
 use crate::logs::LogBuffer;
 use crate::state::AppState;
+pub use crate::ui::theme::ColourMode;
 
 /// The heartbeat between events. Redrawing is event-driven, but elapsed
 /// times and the progress bar have to keep moving while nothing else
@@ -49,7 +50,7 @@ const MAX_BATCH: usize = 256;
 pub struct TuiOptions {
     pub target: String,
     pub watch: bool,
-    pub colour: bool,
+    pub colour: ColourMode,
 }
 
 /// One replayed line, both ways the CLI may print it.

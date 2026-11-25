@@ -27,7 +27,7 @@ mod graphpane;
 mod header;
 mod help;
 mod logpane;
-mod theme;
+pub mod theme;
 mod tree;
 
 /// Below this floor, the tree and log panes have no room left to mean

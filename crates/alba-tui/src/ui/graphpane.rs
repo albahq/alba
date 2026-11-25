@@ -21,6 +21,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::graph::{self, GraphState};
 use crate::state::{AppState, BeamState};
 
+use super::theme::{ColourMode, status_token, style};
 use super::tree::glyph_for;
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, graph_state: &GraphState) {
@@ -87,12 +88,12 @@ fn draw_node_row(
 /// colour nor the reversed span would move a render snapshot whether or
 /// not this ever actually fired; this is what `ui/logpane.rs`'s
 /// `styled_line` does for the very same reason.
-fn node_style(state: &BeamState, beam: usize, focused: usize, colour: bool) -> Style {
-    let style = super::theme::status_style(state, colour);
+fn node_style(state: &BeamState, beam: usize, focused: usize, colour: ColourMode) -> Style {
+    let status = style(status_token(state), colour);
     if beam == focused {
-        style.reversed()
+        status.reversed()
     } else {
-        style
+        status
     }
 }
 
@@ -298,8 +299,8 @@ mod tests {
     /// snapshot.
     #[test]
     fn nodes_take_their_status_colour_and_the_focused_one_is_reversed() {
+        use super::super::theme::Token;
         use alba_engine::BeamStatus;
-        use ratatui::style::Color;
         use std::time::Duration;
 
         let failed = BeamState::Done {
@@ -307,13 +308,19 @@ mod tests {
             duration: Duration::from_secs(1),
         };
         assert_eq!(
-            node_style(&failed, 2, 2, true),
-            Style::new().fg(Color::Red).reversed()
+            node_style(&failed, 2, 2, ColourMode::Indexed),
+            style(Token::Error, ColourMode::Indexed).reversed()
         );
-        assert_eq!(node_style(&failed, 1, 2, true), Style::new().fg(Color::Red));
-        assert_eq!(node_style(&failed, 1, 2, false), Style::default());
         assert_eq!(
-            node_style(&failed, 2, 2, false),
+            node_style(&failed, 1, 2, ColourMode::Indexed),
+            style(Token::Error, ColourMode::Indexed)
+        );
+        assert_eq!(
+            node_style(&failed, 1, 2, ColourMode::Monochrome),
+            Style::default()
+        );
+        assert_eq!(
+            node_style(&failed, 2, 2, ColourMode::Monochrome),
             Style::default().reversed()
         );
     }
