@@ -35,6 +35,7 @@ mod keys;
 mod output;
 mod progress;
 pub(crate) mod theme;
+mod title;
 
 /// Below this floor the panes have no room left to mean anything, so the
 /// whole screen gives way to the too-small screen.
@@ -507,6 +508,25 @@ mod tests {
         assert_eq!(buffer[(34, 4)].symbol(), "┬");
         assert_eq!(buffer[(34, 10)].symbol(), "│");
         assert_eq!(buffer[(34, 21)].symbol(), "┴");
+    }
+
+    /// In the graph the beams pane's selection follows the focus, the
+    /// counter included; the selection itself waits for `Enter`.
+    #[test]
+    fn the_beams_pane_follows_the_graph_focus() {
+        use crate::graph::GraphState;
+
+        let now = Instant::now();
+        let mut state = running(now).with_colour(ColourMode::TrueColour);
+        state.mode = Mode::Graph(GraphState::new(2));
+        let buffer = drawn(&state, 80, 24, now);
+        assert!(row(&buffer, 5).contains("BEAMS"), "{:?}", row(&buffer, 5));
+        assert!(row(&buffer, 5).contains("3/3"), "{:?}", row(&buffer, 5));
+        let accent = Color::Rgb(0xF3, 0xC2, 0x80);
+        assert!(row(&buffer, 8).contains("build"), "{:?}", row(&buffer, 8));
+        assert_eq!(buffer[(6, 8)].bg, accent, "the focused beam's row");
+        assert_ne!(buffer[(6, 6)].bg, accent, "the selected beam's row");
+        assert_eq!(state.selected, 0);
     }
 
     #[test]

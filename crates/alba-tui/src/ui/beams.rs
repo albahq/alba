@@ -17,7 +17,7 @@ use ratatui::widgets::Paragraph;
 use alba_engine::BeamStatus;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::state::{AppState, BeamRow, BeamState, Phase};
+use crate::state::{AppState, BeamRow, BeamState, Mode, Phase};
 
 use super::format_duration;
 use super::theme::{ColourMode, Token, fill, status_token, style};
@@ -108,7 +108,7 @@ fn title_text(state: &AppState) -> &'static str {
 
 fn title_line(state: &AppState, width: usize) -> Line<'static> {
     let mode = state.colour;
-    let counter = counter(state.selected, state.beams.len());
+    let counter = counter(highlighted(state), state.beams.len());
     let room = width.saturating_sub(counter.width() + 1);
     let title = title_text(state);
     let title = if title.width() <= room {
@@ -124,6 +124,16 @@ fn title_line(state: &AppState, width: usize) -> Line<'static> {
         Span::raw(" ".repeat(pad)),
         Span::styled(counter, style(Token::TextMuted, mode)),
     ])
+}
+
+/// The row on the selection bar: the selected beam, or in the graph the
+/// focused one, which `Enter` makes the selection (`Esc` leaves the
+/// selection where it was).
+fn highlighted(state: &AppState) -> usize {
+    match &state.mode {
+        Mode::Graph(graph) => graph.focused,
+        _ => state.selected,
+    }
 }
 
 /// Draws the pane into `area` (the divider's left neighbour). The
@@ -142,13 +152,14 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
 
     let list = rows[1];
     let height = list.height as usize;
-    let visible = window(state.selected, state.beams.len(), height);
+    let highlighted = highlighted(state);
+    let visible = window(highlighted, state.beams.len(), height);
     for (offset, index) in visible.clone().enumerate() {
         let line = row_line(
             &state.beams[index],
             now,
             area.width as usize,
-            index == state.selected,
+            index == highlighted,
             state.colour,
         );
         let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);

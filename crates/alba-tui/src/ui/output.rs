@@ -24,6 +24,7 @@ use alba_executors::Stream;
 use super::beams::{fit_name, scrollbar};
 use super::diagnostic;
 use super::theme::{ColourMode, Token, fill, remap_ansi, style};
+use super::title;
 use super::{ROWS_ABOVE_BODY, ROWS_BELOW_BODY};
 
 /// Below this terminal height the definition row (and the blank row
@@ -316,36 +317,12 @@ fn title_line(state: &AppState, pane_state: PaneState, width: usize) -> Line<'st
         pane_state.text()
     };
     let room = width.saturating_sub(right.width() + 1);
-
-    let mut spans = Vec::new();
-    if head.width() <= room {
-        spans.push(Span::styled(head, style(Token::Text, mode).bold()));
-    }
-    if let Some(beam) = beam {
-        let lead = head.width() + " / ".width();
-        let executor = state
-            .details
-            .get(beam)
-            .map(|details| executor_spans(&details.executor, mode))
-            .unwrap_or_default();
-        let executor_width: usize = executor.iter().map(Span::width).sum();
-        let name_room = room.saturating_sub(lead);
-        if name_room > 0 {
-            spans.push(Span::styled(" / ", style(Token::Line, mode)));
-            let full = lead + beam.width() + executor_width;
-            let name = fit_name(beam, name_room);
-            spans.push(Span::styled(name, style(Token::Accent, mode).bold()));
-            if full <= room {
-                spans.extend(executor);
-            }
-        }
-    }
-    let used: usize = spans.iter().map(Span::width).sum();
-    spans.push(Span::raw(
-        " ".repeat(width.saturating_sub(used + right.width())),
-    ));
-    spans.push(Span::styled(right, pane_state.style(mode)));
-    Line::from(spans)
+    let executor = beam
+        .and_then(|beam| state.details.get(beam))
+        .map(|details| executor_spans(&details.executor, mode))
+        .unwrap_or_default();
+    let spans = title::breadcrumb(head, beam, executor, room, mode);
+    title::with_right(spans, Span::styled(right, pane_state.style(mode)), width)
 }
 
 /// `    EXECUTOR kind detail`: the label muted bold, the kind in `text`,

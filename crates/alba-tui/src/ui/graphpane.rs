@@ -30,6 +30,7 @@ use crate::state::{AppState, BeamState};
 
 use super::beams::{self, fit_name, glyph_for, selection_style};
 use super::theme::{ColourMode, Token, status_token, style};
+use super::title;
 
 /// The title row and the blank row under it.
 const ROWS_ABOVE_DAG: u16 = 2;
@@ -129,33 +130,17 @@ fn title_line(state: &AppState, layer_count: usize, width: usize) -> Line<'stati
         counted(layer_count, "layer")
     );
     let head = "GRAPH";
-    let separator = " / ";
-    let target = state.target.as_str();
-    let full = head.width() + separator.width() + target.width();
-    let room = if full + 1 + counter.width() <= width {
-        width - counter.width() - 1
-    } else {
-        width
-    };
-
-    let mut spans = Vec::new();
-    if head.width() <= room {
-        spans.push(Span::styled(head, style(Token::Text, mode).bold()));
-        let lead = head.width() + separator.width();
-        if !target.is_empty() && room > lead {
-            spans.push(Span::styled(separator, style(Token::Line, mode)));
-            spans.push(Span::styled(
-                fit_name(target, room - lead),
-                style(Token::Accent, mode).bold(),
-            ));
-        }
+    let target = Some(state.target.as_str()).filter(|target| !target.is_empty());
+    if title::full_width(head, target) + 1 + counter.width() <= width {
+        let room = width - counter.width() - 1;
+        let spans = title::breadcrumb(head, target, Vec::new(), room, mode);
+        return title::with_right(
+            spans,
+            Span::styled(counter, style(Token::TextMuted, mode)),
+            width,
+        );
     }
-    if room < width {
-        let used: usize = spans.iter().map(Span::width).sum();
-        spans.push(Span::raw(" ".repeat(width - used - counter.width())));
-        spans.push(Span::styled(counter, style(Token::TextMuted, mode)));
-    }
-    Line::from(spans)
+    Line::from(title::breadcrumb(head, target, Vec::new(), width, mode))
 }
 
 /// `1 beam`, `4 beams`.
@@ -206,41 +191,38 @@ fn draw_commands(frame: &mut Frame, area: Rect, state: &AppState, focused: usize
 
 /// The section's header: `COMMANDS / beam`, then `NEEDED BY` and the
 /// beams that depend on it directly, the location on the right. When it
-/// does not all fit, the dependents are cut first, then the beam's name.
+/// does not all fit, the location goes first, then the dependents are
+/// cut and dropped, and the beam's name is cut last.
 fn commands_header(state: &AppState, focused: usize, width: usize) -> Line<'static> {
     let mode = state.colour;
+    let head = "COMMANDS";
     let beam = state.beams[focused].id.as_str();
     let location = state
         .details
         .get(beam)
         .and_then(|details| details.location.as_deref())
-        .map(|location| fit_name(location, width))
         .unwrap_or_default();
+    let needed_by = dependents(state, focused);
+    let needed_width = if needed_by.is_empty() {
+        0
+    } else {
+        NEEDED_BY.width() + needed_by.width()
+    };
+    let whole = title::full_width(head, Some(beam)) + needed_width;
+    let location = if !location.is_empty() && whole + 1 + location.width() <= width {
+        location
+    } else {
+        ""
+    };
     let room = if location.is_empty() {
         width
     } else {
-        width.saturating_sub(location.width() + 1)
+        width - location.width() - 1
     };
 
-    let head = "COMMANDS";
-    let separator = " / ";
-    let mut spans = Vec::new();
-    if head.width() <= room {
-        spans.push(Span::styled(head, style(Token::Text, mode).bold()));
-        let lead = head.width() + separator.width();
-        if room > lead {
-            spans.push(Span::styled(separator, style(Token::Line, mode)));
-            spans.push(Span::styled(
-                fit_name(beam, room - lead),
-                style(Token::Accent, mode).bold(),
-            ));
-        }
-    }
-
-    let needed_by = dependents(state, focused);
+    let mut spans = title::breadcrumb(head, Some(beam), Vec::new(), room, mode);
     let used: usize = spans.iter().map(Span::width).sum();
-    let label = "    NEEDED BY ";
-    if !needed_by.is_empty() && used + label.width() < room {
+    if !needed_by.is_empty() && used + NEEDED_BY.width() < room {
         spans.push(Span::raw("    "));
         spans.push(Span::styled(
             "NEEDED BY",
@@ -248,17 +230,19 @@ fn commands_header(state: &AppState, focused: usize, width: usize) -> Line<'stat
         ));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            fit_name(&needed_by, room - used - label.width()),
+            fit_name(&needed_by, room - used - NEEDED_BY.width()),
             style(Token::Text, mode),
         ));
     }
-    let used: usize = spans.iter().map(Span::width).sum();
-    spans.push(Span::raw(
-        " ".repeat(width.saturating_sub(used + location.width())),
-    ));
-    spans.push(Span::styled(location, style(Token::TextMuted, mode)));
-    Line::from(spans)
+    title::with_right(
+        spans,
+        Span::styled(location.to_string(), style(Token::TextMuted, mode)),
+        width,
+    )
 }
+
+/// What goes between the beam's name and its dependents.
+const NEEDED_BY: &str = "    NEEDED BY ";
 
 /// The beams that depend on `focused` directly, in beam order, joined
 /// with `, `.
@@ -701,6 +685,9 @@ mod tests {
         let roomy = rows(&buffer_at(&state, 3, 60, 20)).join("\n");
         assert!(roomy.contains("COMMANDS / beam3"), "{roomy}");
 
+        let tight = rows(&buffer_at(&state, 3, 60, 19)).join("\n");
+        assert!(!tight.contains("COMMANDS"), "one row short: {tight}");
+
         let short = rows(&buffer_at(&state, 3, 60, 16)).join("\n");
         assert!(!short.contains("COMMANDS"), "{short}");
         assert!(
@@ -749,6 +736,47 @@ mod tests {
         }
         assert!(!row(&buffer, 0).contains("beams"), "{:?}", row(&buffer, 0));
         assert!(rows(&buffer).iter().any(|line| line.contains('…')));
+        // The location goes first, then `NEEDED BY`; the name is cut last.
+        let all = rows(&buffer).join("\n");
+        assert!(all.contains("COMMANDS / bui…"), "{all}");
+        assert!(
+            !all.contains("Beamfile") && !all.contains("NEEDED"),
+            "{all}"
+        );
+    }
+
+    /// The text of row `y`, the cell after each wide character skipped.
+    fn text(buffer: &Buffer, y: u16) -> String {
+        let mut text = String::new();
+        let mut x = 0;
+        while x < buffer.area.width {
+            let symbol = buffer[(x, y)].symbol();
+            text.push_str(symbol);
+            x += symbol.width().max(1) as u16;
+        }
+        text
+    }
+
+    /// A wide (CJK) target is cut by display width, in the title and in
+    /// the `COMMANDS` header alike, and nothing passes the pane's edge.
+    #[test]
+    fn a_wide_name_is_cut_by_display_width() {
+        let name = "国".repeat(10);
+        let mut details = details(&name, &["make"]);
+        details.location = None;
+        let state = run(&[name.as_str()], &[], &[name.as_str()], vec![details]);
+        // 20 cells: the pane's content is 19 from column 1.
+        let buffer = buffer_at(&state, 0, 20, 24);
+        let all: Vec<String> = (0..24).map(|y| text(&buffer, y)).collect();
+        assert_eq!(all[0].trim(), "GRAPH / 国国国国国…", "{all:#?}");
+        let header = all
+            .iter()
+            .find(|line| line.contains("COMMANDS"))
+            .unwrap_or_else(|| panic!("{all:#?}"));
+        assert_eq!(header.trim(), "COMMANDS / 国国国…");
+        for line in &all {
+            assert!(line.width() <= 20, "{line:?}");
+        }
     }
 
     /// Draws `state` at `width`x`height` and returns the rendered text —
@@ -934,7 +962,8 @@ mod tests {
             Vec::new(),
         );
         // 41 cells: `a` and `x` on columns 11 and 31, `b` and `c` on 21.
-        let buffer = buffer_at(&state, 2, 41, 24);
+        // Focused on `a`: only its edge to `c` is the path.
+        let buffer = buffer_at(&state, 0, 41, 24);
         for y in 3..6 {
             assert_eq!(cells(&buffer, y, 11, 11), "│", "a's drop, row {y}");
         }
@@ -950,5 +979,21 @@ mod tests {
             "a joins b's drop into c"
         );
         assert_eq!(cells(&buffer, 9, 21, 21), "│", "into c");
+
+        for (x, y) in [
+            (11, 3),
+            (11, 4),
+            (11, 5),
+            (11, 7),
+            (11, 8),
+            (16, 8),
+            (21, 8),
+            (21, 9),
+        ] {
+            assert_eq!(buffer[(x, y)].fg, ACCENT, "a to c at ({x}, {y})");
+        }
+        for (x, y) in [(31, 3), (31, 4), (26, 4), (21, 4), (21, 5), (21, 7)] {
+            assert_eq!(buffer[(x, y)].fg, LINE, "x to b and b to c at ({x}, {y})");
+        }
     }
 }
