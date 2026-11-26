@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "alba"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "alba-core",
  "alba-engine",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "alba-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "alba-syntax",
  "glob",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "alba-engine"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "alba-core",
  "alba-executors",
@@ -75,14 +75,14 @@ dependencies = [
 
 [[package]]
 name = "alba-executor-example"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "alba-executors"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "alba-shell",
  "async-trait",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "alba-shell"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "glob",
  "insta",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "alba-syntax"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "insta",
  "miette",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "alba-tui"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "alba-core",
  "alba-engine",
