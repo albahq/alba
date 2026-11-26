@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/albahq/alba/compare/v0.8.0...v0.9.0) - 2026-11-26
+
+### Added
+
+- *(cli)* say what forced a beam into full mode
+- *(cli)* diff from the declared base on every run
+- *(engine)* run beams on their changed files only
+- *(git)* list a beam's changed files with git.changes
+- *(git)* declare the reference to diff from in a git block
+- *(syntax)* add a match expression over glob patterns
+
+### Fixed
+
+- *(git)* leave Alba's own state out of changes
+- *(affected)* diff from the merge base with the reference
+- *(engine)* judge unchanged on the calls rendered
+- *(git)* keep non-UTF-8 changed names byte for byte
+- *(tui)* show the base unless the label names it
+
+### Other
+
+- *(render)* restore the colour test's rationale
+- *(cli)* pin the interleaved line of an unchanged beam
+- *(cli)* cover unchanged and full mode end to end only
+- *(git)* clarify flag order, ignored inputs and quoting
+- *(cli)* quote changed names through the system shell
+- *(core)* share the run directory and segment globs
+
 ## [0.8.0](https://github.com/albahq/alba/compare/v0.7.0...v0.8.0) - 2026-11-26
 
 ### Added
