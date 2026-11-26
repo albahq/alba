@@ -1347,12 +1347,7 @@ fn is_unchanged(changes: Option<&ChangeSet>, scope: &Scope) -> bool {
 /// `git.changes()`, the run's change set anchored to its directory and
 /// listed relative to that `cwd`, quoted for the shell that reads it.
 fn beam_scope(beam: &Beam, args: &[String], changes: Option<&ChangeSet>) -> (Scope, PathBuf) {
-    let cwd = match &beam.cwd {
-        // `join` with an absolute `cwd` yields that absolute path, so a
-        // beam can opt out of its Beamfile's directory.
-        Some(cwd) => beam.dir.join(cwd),
-        None => beam.dir.clone(),
-    };
+    let cwd = beam.run_dir();
     let mut scope = beam.scope.with_params(&beam.params, args);
     if let Some(changes) = changes {
         scope = scope

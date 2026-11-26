@@ -9,7 +9,7 @@
 //! [`crate::validate_graph`]'s job, not this module's.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use alba_syntax::{Span, Spanned, StringTemplate};
@@ -239,6 +239,24 @@ pub struct Beam {
     /// schedule time — `beam.scope.with_params(&beam.params, &args)` —
     /// before rendering `run`/`env`.
     pub scope: Scope,
+}
+
+impl Beam {
+    /// The directory the beam's commands run in: its `cwd` resolved
+    /// against its Beamfile directory (see [`run_dir`]).
+    pub fn run_dir(&self) -> PathBuf {
+        run_dir(&self.dir, self.cwd.as_deref())
+    }
+}
+
+/// The directory commands run in for a beam declared in `dir` with `cwd`:
+/// `dir` itself without one. `join` with an absolute `cwd` yields that
+/// path, so a beam can opt out of its Beamfile's directory.
+pub(crate) fn run_dir(dir: &Path, cwd: Option<&str>) -> PathBuf {
+    match cwd {
+        Some(cwd) => dir.join(cwd),
+        None => dir.to_path_buf(),
+    }
 }
 
 /// A git hook bound to a beam: `hook pre-commit { beam check }`. Only the

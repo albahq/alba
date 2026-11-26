@@ -15,7 +15,8 @@ use alba_syntax::Span;
 
 use crate::error::CoreError;
 use crate::files::{
-    anchor_pattern, lexical_components, lexically_normal, pattern_dir, relative_name,
+    anchor_pattern, compile_segment_glob, lexical_components, lexically_normal, pattern_dir,
+    relative_name,
 };
 use crate::model::{ChangeMode, ChangeSet, FullReason, Quoting};
 
@@ -147,19 +148,16 @@ fn relative_text(cwd: &[std::path::Component<'_>], path: &Path) -> Result<String
     Ok(relative_name(cwd, path))
 }
 
-/// Compiles a `.dirs()` glob. `literal_separator` keeps `*` within one
-/// path segment, so `src/*` names the directories directly under `src`.
+/// Compiles a `.dirs()` glob, `*` kept within one path segment (see
+/// [`compile_segment_glob`]), so `src/*` names the directories directly
+/// under `src`.
 pub(crate) fn compile_dirs_glob(glob: &str, span: Span) -> Result<globset::GlobMatcher, CoreError> {
-    globset::GlobBuilder::new(glob)
-        .literal_separator(true)
-        .build()
-        .map(|compiled| compiled.compile_matcher())
-        .map_err(|error| {
-            CoreError::new(
-                format!("invalid `dirs` glob `{glob}`: {}", error.kind()),
-                span,
-            )
-        })
+    compile_segment_glob(glob).map_err(|error| {
+        CoreError::new(
+            format!("invalid `dirs` glob `{glob}`: {}", error.kind()),
+            span,
+        )
+    })
 }
 
 /// `.dirs(glob)`: each element becomes the shortest prefix of its path,

@@ -172,6 +172,17 @@ fn walk(anchor: &Path, patterns: &[String]) -> Vec<PathBuf> {
     files
 }
 
+/// Compiles `pattern` with `*` and `?` kept within one path segment
+/// (`literal_separator`), where only `**` crosses a `/`: the dialect of a
+/// `match` arm, which reads `hotfix/*` as one level of branch name, and
+/// of `.dirs()`, which reads `src/*` as the directories under `src`.
+pub(crate) fn compile_segment_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
+    globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+}
+
 /// `path` with `.` dropped and each `..` folded into the component before
 /// it, without touching the disk: the form in which two spellings of one
 /// path (`/repo/app/../libs` and `/repo/libs`) compare equal, the way

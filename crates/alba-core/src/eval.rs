@@ -334,20 +334,16 @@ fn expr_span(expr: &Expr) -> Option<Span> {
 /// path segment, so `'hotfix/*'` matches `hotfix/x` but not `hotfix/x/y`,
 /// while `'hotfix/**'` matches both.
 fn compile_match_pattern(pattern: &Spanned<String>) -> Result<globset::GlobMatcher, CoreError> {
-    globset::GlobBuilder::new(&pattern.value)
-        .literal_separator(true)
-        .build()
-        .map(|glob| glob.compile_matcher())
-        .map_err(|error| {
-            CoreError::new(
-                format!(
-                    "invalid `match` pattern `{}`: {}",
-                    pattern.value,
-                    error.kind()
-                ),
-                pattern.span,
-            )
-        })
+    crate::files::compile_segment_glob(&pattern.value).map_err(|error| {
+        CoreError::new(
+            format!(
+                "invalid `match` pattern `{}`: {}",
+                pattern.value,
+                error.kind()
+            ),
+            pattern.span,
+        )
+    })
 }
 
 /// Requires a `match` subject to be a string: its arms are glob patterns,
@@ -1710,11 +1706,7 @@ fn build_beam(
         .map(|t| render_load_time_template("cwd", t, lets, &params))
         .transpose()?;
     let executor = build_executor(decl.executor.as_ref(), lets, &params)?;
-    // As the engine resolves it: `join` with an absolute `cwd` yields it.
-    let run_dir = match &cwd {
-        Some(cwd) => dir.join(cwd),
-        None => dir.to_path_buf(),
-    };
+    let run_dir = crate::model::run_dir(dir, cwd.as_deref());
 
     Ok(Beam {
         id: BeamId(decl.name.value.clone()),

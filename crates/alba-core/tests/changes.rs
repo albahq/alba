@@ -59,10 +59,7 @@ fn beam<'a>(project: &'a Project, id: &str) -> &'a Beam {
 
 /// The directory a beam's commands run in, as the engine computes it.
 fn cwd_of(beam: &Beam) -> PathBuf {
-    match &beam.cwd {
-        Some(cwd) => beam.dir.join(cwd),
-        None => beam.dir.clone(),
-    }
+    beam.run_dir()
 }
 
 fn incremental(changed: Vec<PathBuf>) -> ChangeSet {
