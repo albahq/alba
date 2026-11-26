@@ -490,6 +490,32 @@ fn an_unresolved_base_warns_and_runs_full() {
         1,
         "{stderr}"
     );
+
+    // The JSON stream says so twice: a `warning` event, and the reason the
+    // beam runs in full mode.
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "lint", "--log-format", "json", "--no-cache"])
+        .assert()
+        .success();
+    let events = json_lines(&stdout_of(&assert));
+    let warning = events
+        .iter()
+        .find(|event| event["event"] == "warning")
+        .expect("a warning event");
+    assert!(
+        warning["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("cannot diff from `origin/nope`: "),
+        "{warning}"
+    );
+    let started = events
+        .iter()
+        .find(|event| event["event"] == "beam_started" && event["beam"] == "lint")
+        .unwrap();
+    assert_eq!(started["full_reason"], "reference_unresolved", "{started}");
+    assert!(started.get("full_reason_detail").is_none(), "{started}");
 }
 
 #[test]
@@ -655,7 +681,8 @@ fn an_unchanged_beam_reads_unchanged_in_both_text_layouts() {
         .args(["run", "lint", "--output", "interleaved"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("○ unchanged"));
+        .stdout(predicates::str::contains("○ unchanged"))
+        .stderr(predicates::str::contains("○ 1 unchanged"));
 }
 
 /// A repository on `main` declaring `main` as its base, with nothing
@@ -795,7 +822,25 @@ fn beam_started_names_what_forced_full_mode() {
     let docs = started("docs");
     assert_eq!(docs["mode"], "incremental", "{docs}");
     assert!(docs.get("full_reason_detail").is_none(), "{docs}");
-    // A reason that names nothing carries no detail.
     let install = started("install");
-    assert!(install.get("full_reason_detail").is_none(), "{install}");
+    assert!(install.get("mode").is_none(), "{install}");
+    let finished = events.last().unwrap();
+    assert_eq!(finished["event"], "run_finished");
+    assert!(finished.get("unchanged").is_none(), "{finished}");
+
+    // An edited Beamfile forces full mode on its beams, naming nothing.
+    let beamfile = std::fs::read_to_string(dir.path().join("Beamfile")).unwrap();
+    std::fs::write(dir.path().join("Beamfile"), format!("{beamfile}\n")).unwrap();
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "docs", "--log-format", "json"])
+        .assert()
+        .success();
+    let events = json_lines(&stdout_of(&assert));
+    let docs = events
+        .iter()
+        .find(|event| event["event"] == "beam_started" && event["beam"] == "docs")
+        .unwrap();
+    assert_eq!(docs["full_reason"], "beamfile_changed", "{docs}");
+    assert!(docs.get("full_reason_detail").is_none(), "{docs}");
 }

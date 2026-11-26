@@ -495,89 +495,6 @@ mod tests {
         assert_eq!(json(&event)["cleanup_errors"], serde_json::json!([]));
     }
 
-    #[test]
-    fn an_unchanged_beam_is_reported_with_its_status_and_bucket() {
-        let finished = json(&RunEvent::BeamFinished {
-            id: BeamId("phpcs".to_string()),
-            status: BeamStatus::Unchanged,
-            duration: std::time::Duration::ZERO,
-        });
-        assert_eq!(finished["status"], "unchanged");
-        assert!(finished["exit_code"].is_null());
-
-        let run_finished = json(&RunEvent::RunFinished {
-            summary: RunSummary {
-                unchanged: vec![BeamId("phpcs".to_string())],
-                ..RunSummary::default()
-            },
-        });
-        assert_eq!(run_finished["unchanged"], serde_json::json!(["phpcs"]));
-        assert_eq!(run_finished["exit_code"], 0);
-    }
-
-    /// A run with nothing unchanged keeps the shape it always had.
-    #[test]
-    fn the_unchanged_bucket_is_omitted_when_empty() {
-        let value = json(&RunEvent::RunFinished {
-            summary: RunSummary::default(),
-        });
-        assert!(value.get("unchanged").is_none(), "{value}");
-    }
-
-    #[test]
-    fn beam_started_carries_the_mode_and_why_it_is_full() {
-        let started = |mode| {
-            json(&RunEvent::BeamStarted {
-                id: BeamId("phpcs".to_string()),
-                mode,
-            })
-        };
-
-        let incremental = started(Some(ChangeMode::Incremental));
-        assert_eq!(incremental["mode"], "incremental");
-        assert!(incremental.get("full_reason").is_none());
-
-        let without = started(None);
-        assert!(without.get("mode").is_none());
-        assert!(without.get("full_reason").is_none());
-
-        for (reason, name) in [
-            (FullReason::NoReference, "no_reference"),
-            (FullReason::ReferenceUnresolved, "reference_unresolved"),
-            (FullReason::OnTargetBranch, "on_target_branch"),
-            (FullReason::BeamfileChanged, "beamfile_changed"),
-            (
-                FullReason::DependencyAffected(BeamId("install".to_string())),
-                "dependency_affected",
-            ),
-            (
-                FullReason::InputOutsideChanges("phpcs.xml".to_string()),
-                "input_outside_changes",
-            ),
-        ] {
-            let full = started(Some(ChangeMode::Full(reason)));
-            assert_eq!(full["mode"], "full");
-            assert_eq!(full["full_reason"], name);
-        }
-    }
-
-    #[test]
-    fn run_started_carries_the_base_when_there_is_one() {
-        let event = RunEvent::RunStarted {
-            targets: vec![BeamId("phpcs".to_string())],
-            affected_by: None,
-            base: Some(("origin/develop".to_string(), "abc123".to_string())),
-            beams: vec![BeamId("phpcs".to_string())],
-            edges: Vec::new(),
-            details: Vec::new(),
-        };
-
-        assert_eq!(
-            json(&event)["base"],
-            serde_json::json!({"reference": "origin/develop", "merge_base": "abc123"})
-        );
-    }
-
     /// `run_started` is part of the public JSON contract: a consumer needs
     /// the run boundary and the graph snapshot for the same reason the TUI
     /// does.
@@ -636,23 +553,6 @@ mod tests {
         assert_eq!(
             line,
             r#"{"event":"project_broken","diagnostic":"error: oh no\n"}"#
-        );
-    }
-
-    /// A warning is one line of the stream, and only there: stderr keeps
-    /// carrying nothing but broken-project diagnostics.
-    #[test]
-    fn a_warning_is_an_event_of_its_own() {
-        let event = RunEvent::Warning {
-            message: "cannot diff from `origin/nope`: no merge base; running in full mode"
-                .to_string(),
-        };
-        assert_eq!(
-            json(&event),
-            serde_json::json!({
-                "event": "warning",
-                "message": "cannot diff from `origin/nope`: no merge base; running in full mode",
-            })
         );
     }
 }

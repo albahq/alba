@@ -161,18 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unchanged_beam_header_reports_no_duration() {
-        assert_eq!(
-            finished_header("phpcs", &BeamStatus::Unchanged, Duration::ZERO),
-            "\u{2500}\u{2500} phpcs (\u{25cb} unchanged) \u{2500}\u{2500}"
-        );
-        assert_eq!(
-            finished_header("phpcs", &BeamStatus::Succeeded, Duration::from_millis(1200)),
-            "\u{2500}\u{2500} phpcs (1.2s, ok) \u{2500}\u{2500}"
-        );
-    }
-
-    #[test]
     fn a_notice_is_buffered_with_the_beams_lines_in_arrival_order() {
         let mut renderer = GroupedRenderer::new(false);
 

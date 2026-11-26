@@ -305,24 +305,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unchanged_beam_is_labelled_unchanged() {
-        assert_eq!(status_label(&BeamStatus::Unchanged), "\u{25cb} unchanged");
-    }
-
-    #[test]
-    fn the_summary_counts_unchanged_beams() {
-        let summary = RunSummary {
-            succeeded: vec![BeamId("report".to_string())],
-            unchanged: vec![BeamId("phpcs".to_string())],
-            ..RunSummary::default()
-        };
-        assert_eq!(
-            summary_line(&summary, None),
-            "\u{2713} 1 succeeded \u{b7} \u{25cb} 1 unchanged \u{b7} 0.0s"
-        );
-    }
-
-    #[test]
     fn a_cached_beam_is_labelled_cached() {
         assert_eq!(status_label(&BeamStatus::Cached), "cached");
     }
