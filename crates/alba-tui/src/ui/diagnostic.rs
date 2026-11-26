@@ -61,20 +61,49 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, report: &DiagnosticReport, mod
 }
 
 /// `DIAGNOSTIC / path:line:column`, the location muted and cut with `…`
-/// when the row is narrow.
+/// when the row is narrow (see [`fit_location`]).
 fn title_line(report: &DiagnosticReport, width: usize, mode: ColourMode) -> Line<'static> {
     let head = "DIAGNOSTIC";
     let mut spans = vec![Span::styled(head, style(Token::Text, mode).bold())];
-    let location = format!("{}:{}:{}", report.path, report.line, report.column);
     let room = width.saturating_sub(head.width() + " / ".width());
     if room > 0 {
         spans.push(Span::styled(" / ", style(Token::Line, mode)));
         spans.push(Span::styled(
-            fit_name(&location, room),
+            fit_location(report, room),
             style(Token::TextMuted, mode),
         ));
     }
     Line::from(spans)
+}
+
+/// `path:line:column` in at most `room` cells. `:line:column` says where
+/// to look, so a location too long keeps it whole and loses the start of
+/// its path instead, behind `…`, which keeps the file name. Only a room
+/// too narrow for `…` and `:line:column` together cuts the end.
+fn fit_location(report: &DiagnosticReport, room: usize) -> String {
+    let position = format!(":{}:{}", report.line, report.column);
+    let location = format!("{}{position}", report.path);
+    if location.width() <= room {
+        return location;
+    }
+    let Some(budget) = room
+        .checked_sub(position.width() + 1)
+        .filter(|&budget| budget > 0)
+    else {
+        return fit_name(&location, room);
+    };
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for c in report.path.chars().rev() {
+        let cell = c.width().unwrap_or(0);
+        if used + cell > budget {
+            break;
+        }
+        kept.push(c);
+        used += cell;
+    }
+    let tail: String = kept.into_iter().rev().collect();
+    format!("…{tail}{position}")
 }
 
 /// The rows under the title. `spaced` asks for a blank row first, as
@@ -717,6 +746,24 @@ mod tests {
         let all = rows(&drawn(&state, 100, 24));
         assert!(!all.iter().any(|row| row.contains('^')), "{all:#?}");
         assert!(all.iter().any(|row| row.contains("unknown field")));
+    }
+
+    /// A location too long for the title keeps its `:line:column`
+    /// whole, the part that says where to look: the path is what gets
+    /// cut, from its start, so the file name stays too.
+    #[test]
+    fn a_long_location_keeps_its_line_and_column() {
+        let mut report = report(&[(5, "    tset = 1", true)], 4..8);
+        report.path = "/home/someone/projects/a/deeply/nested/payment/Beamfile".to_string();
+        let buffer = drawn(&parked(Some(report)), 80, 24);
+        let title = rows(&buffer)
+            .into_iter()
+            .find(|row| row.contains("DIAGNOSTIC"))
+            .expect("a title row");
+
+        let title = title.trim_end();
+        assert!(title.ends_with("/payment/Beamfile:5:5"), "{title:?}");
+        assert!(title.contains("DIAGNOSTIC / …"), "{title:?}");
     }
 
     /// A blank row under the title, as the beams pane leaves under its
