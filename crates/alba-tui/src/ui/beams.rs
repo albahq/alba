@@ -162,16 +162,12 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
         let row = &state.beams[index];
         let line = row_line(
             row,
+            state.is_skipped(row),
             now,
             area.width as usize,
             index == highlighted,
             state.colour,
         );
-        let line = if state.is_skipped(row) {
-            without_duration(line)
-        } else {
-            line
-        };
         let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
         frame.buffer_mut().set_style(rect, line.style);
         frame.render_widget(Paragraph::new(line), rect);
@@ -202,17 +198,19 @@ pub(super) fn selection_style(mode: ColourMode) -> Style {
 }
 
 /// One row: the glyph in its status colour, the name (muted while the
-/// beam is pending, cancelled or skipped), the muted duration; the whole
+/// beam is pending, cancelled or skipped), the muted duration (none for
+/// a `skipped` beam); the whole
 /// row on the selection bar when selected.
 fn row_line(
     row: &BeamRow,
+    skipped: bool,
     now: Instant,
     width: usize,
     selected: bool,
     colour: ColourMode,
 ) -> Line<'static> {
     let glyph = glyph_for(&row.state);
-    let duration = duration_text(&row.state, now);
+    let duration = duration_text(&row.state, skipped, now);
     let duration_width = duration.width().max(DURATION_WIDTH);
     // Budgeted by rendered width: a wide character paints two cells and
     // would otherwise push the duration out of its column.
@@ -245,16 +243,6 @@ fn row_line(
         span.style = Style::default();
     }
     Line::from(spans).style(selection_style(colour))
-}
-
-/// `line` with its duration replaced by [`NO_DURATION`], right-aligned
-/// in the same column.
-fn without_duration(mut line: Line<'static>) -> Line<'static> {
-    if let Some(duration) = line.spans.last_mut() {
-        let width = duration.content.width();
-        duration.content = format!("{NO_DURATION:>width$}").into();
-    }
-    line
 }
 
 /// `id` cut to fit `width` rendered cells, with a trailing `…` when it
@@ -305,9 +293,12 @@ fn status_glyph(status: &BeamStatus) -> &'static str {
 
 /// A running beam's duration ticks live (`now - since`); a pending beam
 /// has none yet and shows the dash.
-fn duration_text(state: &BeamState, now: Instant) -> String {
+/// The duration column: none yet for a pending beam, none at all for
+/// one the engine skipped (it never ran, whatever duration it reports).
+fn duration_text(state: &BeamState, skipped: bool, now: Instant) -> String {
     match state {
         BeamState::Pending => NO_DURATION.to_string(),
+        BeamState::Done { .. } if skipped => NO_DURATION.to_string(),
         BeamState::Running { since } => format_duration(now.saturating_duration_since(*since)),
         BeamState::Done { duration, .. } => format_duration(*duration),
     }
@@ -330,13 +321,13 @@ mod tests {
                 duration: Duration::from_secs(1),
             },
         };
-        let line = row_line(&row, Instant::now(), 30, false, ColourMode::Indexed);
+        let line = row_line(&row, false, Instant::now(), 30, false, ColourMode::Indexed);
         assert_eq!(
             line.spans[1].style,
             style(Token::Error, ColourMode::Indexed)
         );
         assert_eq!(line.spans[1].content, "✗");
-        let selected = row_line(&row, Instant::now(), 30, true, ColourMode::Indexed);
+        let selected = row_line(&row, false, Instant::now(), 30, true, ColourMode::Indexed);
         assert_eq!(selected.style, selection_style(ColourMode::Indexed));
     }
 
@@ -444,14 +435,28 @@ mod tests {
                 duration: Duration::from_millis(4100),
             },
         );
-        let line = row_line(&row, Instant::now(), 24, false, ColourMode::TrueColour);
+        let line = row_line(
+            &row,
+            false,
+            Instant::now(),
+            24,
+            false,
+            ColourMode::TrueColour,
+        );
         assert_eq!(text_of(&line), "  ✓ build           4.1s");
         assert_eq!(
             line.spans[3].style,
             style(Token::Text, ColourMode::TrueColour)
         );
         let pending = names_row("test", BeamState::Pending);
-        let line = row_line(&pending, Instant::now(), 24, false, ColourMode::TrueColour);
+        let line = row_line(
+            &pending,
+            false,
+            Instant::now(),
+            24,
+            false,
+            ColourMode::TrueColour,
+        );
         assert_eq!(text_of(&line), "  ○ test               —");
         assert_eq!(
             line.spans[3].style,
@@ -468,7 +473,14 @@ mod tests {
                 since: now - Duration::from_millis(2500),
             },
         );
-        let text = text_of(&row_line(&row, now, 24, false, ColourMode::Monochrome));
+        let text = text_of(&row_line(
+            &row,
+            false,
+            now,
+            24,
+            false,
+            ColourMode::Monochrome,
+        ));
         assert!(text.ends_with("   2.5s"), "{text:?}");
     }
 
@@ -484,6 +496,7 @@ mod tests {
             );
             let text = text_of(&row_line(
                 &row,
+                false,
                 Instant::now(),
                 20,
                 false,
@@ -500,14 +513,28 @@ mod tests {
     #[test]
     fn the_selected_row_is_on_accent_bold_and_whole() {
         let row = names_row("build", BeamState::Pending);
-        let line = row_line(&row, Instant::now(), 24, true, ColourMode::TrueColour);
+        let line = row_line(
+            &row,
+            false,
+            Instant::now(),
+            24,
+            true,
+            ColourMode::TrueColour,
+        );
         let expected = fill(Token::Accent, ColourMode::TrueColour)
             .patch(style(Token::OnAccent, ColourMode::TrueColour))
             .add_modifier(Modifier::BOLD);
         assert_eq!(line.style, expected);
         assert!(line.spans.iter().all(|s| s.style == Style::default()));
         assert_eq!(text_of(&line).width(), 24);
-        let mono = row_line(&row, Instant::now(), 24, true, ColourMode::Monochrome);
+        let mono = row_line(
+            &row,
+            false,
+            Instant::now(),
+            24,
+            true,
+            ColourMode::Monochrome,
+        );
         assert_eq!(
             mono.style,
             Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
@@ -531,7 +558,14 @@ mod tests {
                 duration: Duration::from_millis(1200),
             },
         );
-        let line = row_line(&row, Instant::now(), 30, false, ColourMode::Monochrome);
+        let line = row_line(
+            &row,
+            false,
+            Instant::now(),
+            30,
+            false,
+            ColourMode::Monochrome,
+        );
         let rendered = text_of(&line);
         assert_eq!(rendered.width(), 30);
         assert!(rendered.ends_with("   1.2s"), "{rendered:?}");
