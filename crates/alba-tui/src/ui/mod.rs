@@ -315,6 +315,92 @@ mod tests {
         assert_eq!(row(&buffer, 23).trim(), "");
     }
 
+    /// A run over `beams`, no edges, each beam running `echo <name>`.
+    fn graph_run(beams: &[&str]) -> RunEvent {
+        use alba_engine::{BeamDetails, ExecutorLabel};
+        RunEvent::RunStarted {
+            targets: vec![id("build")],
+            affected_by: None,
+            beams: beams.iter().map(|name| id(name)).collect(),
+            edges: Vec::new(),
+            details: beams
+                .iter()
+                .map(|name| BeamDetails {
+                    id: id(name),
+                    description: None,
+                    location: None,
+                    executor: ExecutorLabel {
+                        kind: "shell".to_string(),
+                        detail: None,
+                    },
+                    commands: vec![format!("echo {name}")],
+                })
+                .collect(),
+        }
+    }
+
+    /// The graph open on `focus` (by moving right from the first beam,
+    /// all beams sharing one layer).
+    fn graph_focused_on(beams: &[&str], focus: usize, now: Instant) -> AppState {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new("build", true);
+        state.apply(&graph_run(beams), now);
+        state.enter_graph();
+        for _ in 0..focus {
+            state.handle_modal_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        state
+    }
+
+    fn screen(state: &AppState, now: Instant) -> Vec<String> {
+        let buffer = drawn(state, 100, 30, now);
+        (0..buffer.area.height).map(|y| row(&buffer, y)).collect()
+    }
+
+    /// A reload while the graph is open keeps the focus on its beam by
+    /// id: the counter, the selection bar, `COMMANDS` and `Enter` all
+    /// follow it to its new row.
+    #[test]
+    fn the_graph_focus_follows_its_beam_across_a_reload() {
+        let now = Instant::now();
+        let mut state = graph_focused_on(&["a", "b", "c", "d", "e"], 4, now);
+        assert!(
+            screen(&state, now).iter().any(|line| line.contains("5/5")),
+            "precondition: focused on the fifth beam"
+        );
+
+        state.apply(&graph_run(&["x", "c", "e"]), now);
+
+        let all = screen(&state, now);
+        assert!(all.iter().any(|line| line.contains("3/3")), "{all:#?}");
+        assert!(
+            all.iter().any(|line| line.contains("COMMANDS / e")),
+            "{all:#?}"
+        );
+        state.open_focused_output();
+        assert_eq!(state.selected_beam().map(|row| row.id.as_str()), Some("e"));
+    }
+
+    /// A reload that removes the focused beam moves the focus to the
+    /// selection, itself carried across by id.
+    #[test]
+    fn a_graph_focus_whose_beam_is_gone_falls_back_to_the_selection() {
+        let now = Instant::now();
+        let mut state = graph_focused_on(&["a", "b", "c", "d", "e"], 4, now);
+        assert_eq!(state.selected_beam().map(|row| row.id.as_str()), Some("a"));
+
+        state.apply(&graph_run(&["x", "a", "b"]), now);
+
+        let all = screen(&state, now);
+        assert!(all.iter().any(|line| line.contains("2/3")), "{all:#?}");
+        assert!(
+            all.iter().any(|line| line.contains("COMMANDS / a")),
+            "{all:#?}"
+        );
+        state.open_focused_output();
+        assert_eq!(state.selected_beam().map(|row| row.id.as_str()), Some("a"));
+    }
+
     #[test]
     fn drawing_never_panics_from_40_to_200_columns() {
         use crate::graph::GraphState;

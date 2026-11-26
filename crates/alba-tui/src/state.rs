@@ -1110,7 +1110,9 @@ impl AppState {
     /// index — a different beam than the one the reader was reading, on
     /// every save that touches the Beamfile's shape. An id the new table
     /// no longer holds falls back to the old index, clamped, which is
-    /// the closest thing to "where they were" left to offer.
+    /// the closest thing to "where they were" left to offer. An open
+    /// graph's focus follows its beam by id too, and falls back to the
+    /// selection when its beam is gone.
     fn start_run(
         &mut self,
         label: String,
@@ -1119,6 +1121,10 @@ impl AppState {
         now: Instant,
     ) {
         let selected_id = self.selected_beam().map(|row| row.id.clone());
+        let focused_id = match &self.mode {
+            Mode::Graph(graph) => Some(self.beams.get(graph.focused).map(|row| row.id.clone())),
+            _ => None,
+        };
         self.target = label;
         self.beams = beams
             .iter()
@@ -1135,6 +1141,15 @@ impl AppState {
             .collect();
         let restored = selected_id.and_then(|id| self.index_of(&id));
         self.select(restored.unwrap_or(self.selected));
+        // An open graph's focus is carried the same way; a focused beam
+        // the reload removed hands the focus to the selection.
+        let focus = focused_id.map(|id| {
+            id.and_then(|id| self.index_of(&id))
+                .unwrap_or(self.selected)
+        });
+        if let (Some(focus), Mode::Graph(graph)) = (focus, &mut self.mode) {
+            graph.focused = focus;
+        }
         self.phase = Phase::Running {
             done: 0,
             total: self.beams.len(),
