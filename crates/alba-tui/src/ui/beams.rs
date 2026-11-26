@@ -155,13 +155,19 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
     let highlighted = highlighted(state);
     let visible = window(highlighted, state.beams.len(), height);
     for (offset, index) in visible.clone().enumerate() {
+        let row = &state.beams[index];
         let line = row_line(
-            &state.beams[index],
+            row,
             now,
             area.width as usize,
             index == highlighted,
             state.colour,
         );
+        let line = if state.is_skipped(row) {
+            without_duration(line)
+        } else {
+            line
+        };
         let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
         frame.buffer_mut().set_style(rect, line.style);
         frame.render_widget(Paragraph::new(line), rect);
@@ -235,6 +241,16 @@ fn row_line(
         span.style = Style::default();
     }
     Line::from(spans).style(selection_style(colour))
+}
+
+/// `line` with its duration replaced by [`NO_DURATION`], right-aligned
+/// in the same column.
+fn without_duration(mut line: Line<'static>) -> Line<'static> {
+    if let Some(duration) = line.spans.last_mut() {
+        let width = duration.content.width();
+        duration.content = format!("{NO_DURATION:>width$}").into();
+    }
+    line
 }
 
 /// `id` cut to fit `width` rendered cells, with a trailing `…` when it
@@ -516,5 +532,55 @@ mod tests {
         assert_eq!(rendered.width(), 30);
         assert!(rendered.ends_with("   1.2s"), "{rendered:?}");
         assert!(rendered.contains('…'));
+    }
+
+    /// A skipped beam never ran, so it has no duration to show, even
+    /// though the engine reports one; a beam cancelled while running
+    /// keeps the time it ran.
+    #[test]
+    fn a_skipped_beam_shows_no_duration() {
+        use alba_core::BeamId;
+        use alba_engine::RunEvent;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let id = |name: &str| BeamId(name.to_string());
+        let now = Instant::now();
+        let mut state = AppState::new("check", false);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![id("check")],
+                affected_by: None,
+                beams: vec![id("test"), id("check")],
+                edges: vec![(id("check"), id("test"))],
+                details: Vec::new(),
+            },
+            now,
+        );
+        state.apply(&RunEvent::BeamStarted { id: id("test") }, now);
+        for name in ["test", "check"] {
+            state.apply(
+                &RunEvent::BeamFinished {
+                    id: id(name),
+                    status: BeamStatus::Cancelled,
+                    duration: Duration::from_millis(2000),
+                },
+                now,
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, Rect::new(0, 0, 20, 10), &state, now))
+            .unwrap();
+        let row = |y: u16| {
+            (0..20)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let rows: Vec<String> = (0..10).map(row).collect();
+        let test = rows.iter().find(|row| row.contains("test")).unwrap();
+        let check = rows.iter().find(|row| row.contains("check")).unwrap();
+        assert!(test.trim_end().ends_with("2.0s"), "{test:?}");
+        assert!(check.trim_end().ends_with(NO_DURATION), "{check:?}");
     }
 }

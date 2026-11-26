@@ -461,6 +461,18 @@ impl AppState {
         self.user_cancelled
     }
 
+    /// `row` ended `Cancelled` without having started: the engine
+    /// skipped it, so nothing ran and its duration means nothing.
+    pub fn is_skipped(&self, row: &BeamRow) -> bool {
+        matches!(
+            row.state,
+            BeamState::Done {
+                status: BeamStatus::Cancelled,
+                ..
+            }
+        ) && !self.started.contains(&row.id)
+    }
+
     /// Ctrl-C with nothing running: the session is being interrupted,
     /// not concluded — `exit_outcome()` returns `None` from here on
     /// (spec: Ctrl-C when idle quits with 130, even after a green run).
