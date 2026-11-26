@@ -710,3 +710,47 @@ fn the_cache_inside_the_repository_affects_nothing() {
         .success()
         .stderr(predicates::str::contains("nothing affected by HEAD"));
 }
+
+/// A full mode names what forced it: the changed input outside every
+/// `git.changes()` glob, relative to the project root, or the dependency
+/// through which the beam is affected. An incremental beam carries
+/// neither the reason nor its detail.
+#[test]
+fn beam_started_names_what_forced_full_mode() {
+    let dir = based_repository(
+        "git { base 'main' }\n\
+         beam install { inputs [\"composer.lock\"] run \"echo installed\" }\n\
+         beam phpcs { needs [install] inputs [\"src/**/*.php\"] run \"echo phpcs {git.changes('src/**/*.php')}\" }\n\
+         beam lint { inputs [\"src/**/*.php\", \"config/phpcs.xml\"] run \"echo lint {git.changes('src/**/*.php')}\" }\n\
+         beam docs { inputs [\"docs/**\"] run \"echo docs {git.changes('docs/**')}\" }\n\
+         beam all { needs [phpcs, lint, docs] run \"echo ran-all\" }\n",
+    );
+    commit_changes(dir.path(), &["composer.lock", "config/phpcs.xml", "docs/a"]);
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "all", "--log-format", "json"])
+        .assert()
+        .success();
+    let events = json_lines(&stdout_of(&assert));
+    let started = |beam: &str| {
+        events
+            .iter()
+            .find(|event| event["event"] == "beam_started" && event["beam"] == beam)
+            .unwrap_or_else(|| panic!("`{beam}` starts"))
+            .clone()
+    };
+
+    let lint = started("lint");
+    assert_eq!(lint["full_reason"], "input_outside_changes", "{lint}");
+    assert_eq!(lint["full_reason_detail"], "config/phpcs.xml", "{lint}");
+    let phpcs = started("phpcs");
+    assert_eq!(phpcs["full_reason"], "dependency_affected", "{phpcs}");
+    assert_eq!(phpcs["full_reason_detail"], "install", "{phpcs}");
+    let docs = started("docs");
+    assert_eq!(docs["mode"], "incremental", "{docs}");
+    assert!(docs.get("full_reason_detail").is_none(), "{docs}");
+    // A reason that names nothing carries no detail.
+    let install = started("install");
+    assert!(install.get("full_reason_detail").is_none(), "{install}");
+}

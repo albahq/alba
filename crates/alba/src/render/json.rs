@@ -98,6 +98,11 @@ enum WireEvent<'a> {
         /// Why the mode is `full`; absent otherwise.
         #[serde(skip_serializing_if = "Option::is_none")]
         full_reason: Option<&'static str>,
+        /// What `full_reason` names, when it names something: the changed
+        /// path (relative to the project root) for `input_outside_changes`,
+        /// the dependency for `dependency_affected`; absent otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        full_reason_detail: Option<&'a str>,
     },
     BeamCached {
         beam: &'a str,
@@ -194,6 +199,7 @@ impl<'a> WireEvent<'a> {
                 beam: &id.0,
                 mode: mode.as_ref().map(mode_name),
                 full_reason: mode.as_ref().and_then(full_reason_name),
+                full_reason_detail: mode.as_ref().and_then(full_reason_detail),
             },
             RunEvent::BeamCached { id } => WireEvent::BeamCached { beam: &id.0 },
             RunEvent::BeamOutput { id, line, replayed } => WireEvent::BeamOutput {
@@ -294,6 +300,15 @@ fn full_reason_name(mode: &ChangeMode) -> Option<&'static str> {
         FullReason::DependencyAffected(_) => "dependency_affected",
         FullReason::InputOutsideChanges(_) => "input_outside_changes",
     })
+}
+
+/// What a full mode's reason names, for the reasons that name something.
+fn full_reason_detail(mode: &ChangeMode) -> Option<&str> {
+    match mode {
+        ChangeMode::Full(FullReason::InputOutsideChanges(path)) => Some(path),
+        ChangeMode::Full(FullReason::DependencyAffected(id)) => Some(&id.0),
+        _ => None,
+    }
 }
 
 /// A duration in whole milliseconds. `as_millis` is a `u128`, which no

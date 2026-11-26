@@ -53,7 +53,7 @@ One object per line, dispatched on `event`:
 | `event` | Fields |
 | --- | --- |
 | `run_started` | `targets`, `affected_by`, `base` (`{"reference", "merge_base"}`, omitted without a resolved reference), `beams`, `edges` (`[beam, dependency]` pairs). Always first. |
-| `beam_started` | `beam`; for a beam calling `git.changes()`, `mode` (`incremental`/`full`) and, when full, `full_reason`: `no_reference`, `reference_unresolved`, `on_target_branch`, `beamfile_changed`, `dependency_affected`, `input_outside_changes`. |
+| `beam_started` | `beam`; for a beam calling `git.changes()`, `mode` (`incremental`/`full`) and, when full, `full_reason`: `no_reference`, `reference_unresolved`, `on_target_branch`, `beamfile_changed`, `dependency_affected`, `input_outside_changes`; plus `full_reason_detail`, the changed path relative to the project root for `input_outside_changes` or the dependency's beam id for `dependency_affected`, absent for the other reasons. |
 | `beam_cached` | `beam`. |
 | `beam_output` | `beam`, `stream` (`stdout`/`stderr`), `text`, `replayed`. |
 | `beam_finished` | `beam`, `status` (`succeeded`, `cached`, `unchanged`, `failed`, `failed_allowed`, `cancelled`), `exit_code`, `duration_ms`. An `unchanged` beam had no `beam_started`. |
