@@ -140,7 +140,8 @@ fn highlighted(state: &AppState) -> usize {
 /// scrollbar's thumb goes on the divider column right of `area`.
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
     // A blank row under the title while the output pane has its
-    // definition row, so the list starts level with the output.
+    // definition row: the list then starts level with the output's
+    // blank separator row, one row above its first line.
     let blank = u16::from(super::output::has_definition_row(area.height));
     let rows = Layout::vertical([
         Constraint::Length(1),     // title row
@@ -622,8 +623,8 @@ mod tests {
     }
 
     /// Where the definition row is drawn, the beams pane leaves the row
-    /// under its title empty, so the list starts with the output; under
-    /// 16 rows both give that row back.
+    /// under its title empty, so the list starts level with the output's
+    /// blank separator row; under 16 rows both give their rows back.
     #[test]
     fn the_list_starts_under_a_blank_row_when_the_output_has_its_definition() {
         use alba_core::BeamId;

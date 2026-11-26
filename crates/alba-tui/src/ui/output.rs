@@ -36,7 +36,8 @@ const DEFINITION_MIN_HEIGHT: u16 = 16;
 const DEFINITION_MIN_ROWS: u16 = DEFINITION_MIN_HEIGHT - ROWS_ABOVE_BODY - ROWS_BELOW_BODY;
 
 /// Whether a pane `height` rows high keeps the definition row. The
-/// beams pane follows it, so both lists start below the same rows.
+/// beams pane leaves a blank row under its title on the same condition,
+/// so its list starts level with the output's blank separator row.
 pub(super) fn has_definition_row(height: u16) -> bool {
     height >= DEFINITION_MIN_ROWS
 }
