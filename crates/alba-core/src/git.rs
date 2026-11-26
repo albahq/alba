@@ -184,6 +184,44 @@ pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
     })
 }
 
+/// Refuses a `reference` git would read as one of its own options
+/// (`--output=<file>` writes a file) instead of as a revision.
+fn refuse_option_like(reference: &str) -> Result<(), GitError> {
+    if reference.starts_with('-') {
+        return Err(GitError(format!(
+            "`{reference}` is not a git reference: it would be read as an option"
+        )));
+    }
+    Ok(())
+}
+
+/// The full SHA of the best common ancestor of `reference` and `HEAD`:
+/// where the current branch forked from `reference`.
+///
+/// Computed with `git merge-base` rather than `git diff --merge-base`,
+/// which needs git 2.30. When there is none (unrelated histories, or a
+/// shallow clone that did not fetch far enough) the error says so and
+/// names the reference.
+pub fn merge_base(cwd: &Path, reference: &str) -> Result<String, GitError> {
+    refuse_option_like(reference)?;
+    let output = spawn(cwd, &["merge-base", reference, "HEAD"])?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    // Unrelated histories make git exit 1 without a word on stderr.
+    let mut message = format!("no merge base between `{reference}` and HEAD");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        message.push_str(&format!(": {}", stderr.trim()));
+    }
+    let shallow =
+        git(cwd, &["rev-parse", "--is-shallow-repository"]).is_ok_and(|out| out == "true");
+    if shallow {
+        message.push_str("; the clone is shallow, fetch more history (git fetch --unshallow)");
+    }
+    Err(GitError(message))
+}
+
 /// Every path that differs between `reference` and the working tree
 /// (committed since, staged, modified, deleted, renamed) plus every
 /// untracked file `.gitignore` does not exclude, anywhere in the
@@ -198,14 +236,14 @@ pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
 /// below it, and one outside climbs from `cwd` by as many `..` as git says
 /// separate it from the top level.
 ///
+/// "Since `reference`" means since the branch forked from it: the diff
+/// starts at [`merge_base`], so commits that landed on `reference` after
+/// the fork are not counted as the branch's changes.
+///
 /// A `reference` starting with `-` is refused: git would read it as one of
 /// its own options (`--output=<file>` writes a file), not as a revision.
 pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitError> {
-    if reference.starts_with('-') {
-        return Err(GitError(format!(
-            "`{reference}` is not a git reference: it would be read as an option"
-        )));
-    }
+    let base = merge_base(cwd, reference)?;
     let prefix = git_output(cwd, &["rev-parse", "--show-prefix"])?;
     let prefix = String::from_utf8_lossy(&prefix)
         .trim_end_matches(['\n', '\r'])
@@ -215,7 +253,7 @@ pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitErr
     // Both list paths relative to the top level: `diff` without
     // `--relative` always does, `ls-files` once told `--full-name` and
     // the `:/` pathspec (the top level, wherever `cwd` is).
-    let diff = git_output(cwd, &["diff", "--name-only", "-z", reference, "--"])?;
+    let diff = git_output(cwd, &["diff", "--name-only", "-z", &base, "--"])?;
     let untracked = git_output(
         cwd,
         &[

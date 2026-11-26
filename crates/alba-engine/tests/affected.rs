@@ -313,3 +313,80 @@ fn a_reference_shaped_like_an_option_is_refused() {
     assert!(err.to_string().contains("--output=leak"), "{err}");
     assert!(!dir.path().join("leak").exists());
 }
+
+/// What landed on the target after the branch was cut is not the branch's
+/// change: only the branch's own commits count.
+#[test]
+fn commits_landing_on_the_target_after_the_fork_do_not_count() {
+    let dir = repository();
+    git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    git(dir.path(), &["checkout", "-q", "main"]);
+    write(dir.path().join("api/src/lib.rs"), "landed on main");
+    git(dir.path(), &["commit", "-q", "-am", "api change on main"]);
+    git(dir.path(), &["checkout", "-q", "feature"]);
+    write(dir.path().join("docs/index.md"), "feature change");
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "docs change on feature"],
+    );
+
+    let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let beams = affected(&project, &sources, dir.path(), "main").unwrap();
+    let beams = names(&beams);
+    assert!(beams.contains(&"docs"), "{beams:?}");
+    assert!(!beams.contains(&"api:lint"), "{beams:?}");
+}
+
+/// Histories with nothing in common have no merge base: the error names
+/// the reference rather than reporting an empty change set.
+#[test]
+fn no_merge_base_is_an_error_naming_the_reference() {
+    let dir = repository();
+    git(dir.path(), &["checkout", "-q", "--orphan", "other"]);
+    write(dir.path().join("unrelated.txt"), "x");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "unrelated root"]);
+
+    let (project, sources) = load_project(&dir.path().join("Beamfile")).unwrap();
+    let err = affected(&project, &sources, dir.path(), "main").unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("main"), "{message}");
+    assert!(message.contains("merge base"), "{message}");
+    assert!(!message.ends_with(": "), "{message}");
+}
+
+/// In a shallow clone the fork point may be out of reach: the error tells
+/// how to get it back.
+#[test]
+fn a_shallow_clone_without_the_fork_point_suggests_fetching_more_history() {
+    let source = repository();
+    git(source.path(), &["checkout", "-q", "-b", "feature"]);
+    write(source.path().join("docs/index.md"), "feature change");
+    git(
+        source.path(),
+        &["commit", "-q", "-am", "docs change on feature"],
+    );
+    git(source.path(), &["checkout", "-q", "main"]);
+    write(source.path().join("api/src/lib.rs"), "landed on main");
+    git(
+        source.path(),
+        &["commit", "-q", "-am", "api change on main"],
+    );
+
+    let parent = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", source.path().display());
+    let clone = parent.path().join("clone");
+    git(
+        parent.path(),
+        &[
+            "clone", "-q", "--depth", "1", "--branch", "feature", &url, "clone",
+        ],
+    );
+    git(&clone, &["fetch", "-q", "--depth", "1", "origin", "main"]);
+
+    let (project, sources) = load_project(&clone.join("Beamfile")).unwrap();
+    let err = affected(&project, &sources, &clone, "origin/main").unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("origin/main"), "{message}");
+    assert!(message.contains("git fetch --unshallow"), "{message}");
+}

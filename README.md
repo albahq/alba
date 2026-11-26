@@ -390,12 +390,16 @@ add `.alba/` to it yourself in any project that turns caching on.
 ## Affected runs
 
 `alba run --affected <ref> [beam]` runs only the beams affected by what
-changed since `<ref>`: every path `git diff --name-only <ref>` reports,
-plus every untracked file `.gitignore` does not exclude. Both cover the
-whole repository, not only the Beamfile's directory, so a beam in `app/`
-declaring `inputs ["../libs/**"]`, or importing `../shared/Beamfile`, is
-affected by a change there. A `<ref>` starting with `-` is refused, since
-git would read it as one of its own options.
+changed since `<ref>`: every path `git diff --name-only` reports from the
+merge base of `<ref>` and `HEAD`, plus every untracked file `.gitignore`
+does not exclude. The merge base is where your branch forked from `<ref>`,
+so commits that landed on `<ref>` after the branch was cut no longer count
+as your changes. When there is no merge base (unrelated histories, or a
+shallow clone that did not fetch far enough), the run fails and says so.
+Both lists cover the whole repository, not only the Beamfile's directory, so
+a beam in `app/` declaring `inputs ["../libs/**"]`, or importing
+`../shared/Beamfile`, is affected by a change there. A `<ref>` starting with
+`-` is refused, since git would read it as one of its own options.
 
 A beam is affected when:
 
