@@ -34,10 +34,13 @@ use super::title;
 
 /// The title row and the blank row under it; where the output pane
 /// would have its definition row, one more, so the DAG starts level
-/// with the output's first line.
-fn rows_above_dag(pane_height: u16) -> u16 {
-    if super::output::has_definition_row(pane_height) {
-        3
+/// with the output's first line. That alignment row is the first thing
+/// a short pane gives back: it goes before `COMMANDS` does.
+fn rows_above_dag(pane_height: u16, dag_rows: usize) -> u16 {
+    let aligned = 3;
+    let room = pane_height.saturating_sub(aligned) as usize;
+    if super::output::has_definition_row(pane_height) && dag_rows + COMMANDS_MIN_ROWS <= room {
+        aligned
     } else {
         2
     }
@@ -68,9 +71,9 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
         return;
     }
 
-    let above = rows_above_dag(area.height);
-    let room = area.height.saturating_sub(above) as usize;
     let dag_rows = node_row(layers.len() - 1) + 1;
+    let above = rows_above_dag(area.height, dag_rows);
+    let room = area.height.saturating_sub(above) as usize;
     let focused_row = layer_of(&layers, graph_state.focused).map_or(0, node_row);
     let visible = if dag_rows <= room {
         0..dag_rows
@@ -679,8 +682,9 @@ mod tests {
         assert!(!header.contains("NEEDED BY"), "{header:?}");
     }
 
-    /// A four-layer chain takes thirteen rows, sixteen with the title and
-    /// the blanks under it; `COMMANDS` needs five more. At 16 rows the DAG
+    /// A four-layer chain takes thirteen rows, fifteen with the title and
+    /// the blank under it once the alignment row is given back;
+    /// `COMMANDS` needs five more. At 16 rows the DAG
     /// still fits whole and `COMMANDS` goes; at 6 rows the DAG scrolls
     /// to keep the focused node, at the bottom, on screen.
     #[test]
@@ -694,10 +698,10 @@ mod tests {
             vec![details("beam3", &["make"])],
         );
 
-        let roomy = rows(&buffer_at(&state, 3, 60, 21)).join("\n");
+        let roomy = rows(&buffer_at(&state, 3, 60, 20)).join("\n");
         assert!(roomy.contains("COMMANDS / beam3"), "{roomy}");
 
-        let tight = rows(&buffer_at(&state, 3, 60, 20)).join("\n");
+        let tight = rows(&buffer_at(&state, 3, 60, 19)).join("\n");
         assert!(!tight.contains("COMMANDS"), "one row short: {tight}");
 
         let short = rows(&buffer_at(&state, 3, 60, 16)).join("\n");
@@ -1032,5 +1036,22 @@ mod tests {
         assert_eq!(line_of(&roomy, "COMMANDS / build"), 10);
         let short = rows(&buffer_at(&state, 1, 60, 7));
         assert_eq!(line_of(&short, "[ ○ codegen ]"), 2);
+    }
+
+    /// The alignment row above the DAG goes before `COMMANDS` does: a
+    /// three-layer chain in the 16-row pane of an 80x24 terminal keeps
+    /// its `COMMANDS`, the DAG one row under the blank under the title.
+    #[test]
+    fn the_alignment_row_goes_before_commands() {
+        let state = run(
+            &["codegen", "build", "test"],
+            &[("build", "codegen"), ("test", "build")],
+            &["test"],
+            vec![details("build", &["make"])],
+        );
+        let all = rows(&buffer_at(&state, 1, 80, 16));
+        let line_of = |needle: &str| all.iter().position(|row| row.contains(needle));
+        assert_eq!(line_of("[ ○ codegen ]"), Some(2), "{all:#?}");
+        assert!(line_of("COMMANDS / build").is_some(), "{all:#?}");
     }
 }
