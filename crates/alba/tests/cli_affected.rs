@@ -297,6 +297,51 @@ fn posix_quoting_end_to_end() {
         );
 }
 
+/// The same through `executor system_shell`, whose host shell (`sh -c`)
+/// splits words as the embedded shell does: a changed file whose name
+/// holds a space and a quote still reaches `cat` as one argument.
+#[cfg(unix)]
+#[test]
+fn posix_quoting_through_the_system_shell() {
+    let dir = based_repository(
+        "git { base 'main' }\n\
+         beam lint { executor system_shell inputs [\"src/**\"] run \"cat {git.changes('src/**')}\" }\n",
+    );
+    std::fs::write(dir.path().join("src/a b.php"), "read-space\n").unwrap();
+    std::fs::write(dir.path().join("src/it's.php"), "read-quote\n").unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "awkward names"]);
+    alba()
+        .current_dir(&dir)
+        .args(["run", "lint"])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("read-space").and(predicates::str::contains("read-quote")),
+        );
+}
+
+/// On Windows the system shell is PowerShell: the list is quoted its way,
+/// with native separators, and `Get-Content` reads the name whole. One
+/// file: `Get-Content` takes a single positional path.
+#[cfg(windows)]
+#[test]
+fn powershell_quoting_through_the_system_shell() {
+    let dir = based_repository(
+        "git { base 'main' }\n\
+         beam lint { executor system_shell inputs [\"src/**\"] run \"Get-Content {git.changes('src/**')}\" }\n",
+    );
+    std::fs::write(dir.path().join("src/it's a.php"), "read-awkward\n").unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "awkward name"]);
+    alba()
+        .current_dir(&dir)
+        .args(["run", "lint"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("read-awkward"));
+}
+
 #[test]
 fn affected_without_a_value_uses_the_declared_base() {
     let dir = based_repository(BASED);
