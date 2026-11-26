@@ -596,19 +596,25 @@ impl AppState {
         }
     }
 
+    /// Moves down one beam; past the last, wraps to the first.
     pub fn select_next(&mut self) {
         self.selection_moved = true;
-        self.select(self.selected + 1);
+        let next = self.selected + 1;
+        self.select(if next < self.beams.len() { next } else { 0 });
     }
 
+    /// Moves up one beam; above the first, wraps to the last, so the
+    /// bottom of a long tree is one key away instead of a full scroll.
     pub fn select_previous(&mut self) {
         self.selection_moved = true;
-        self.select(self.selected.saturating_sub(1));
+        let previous = match self.selected {
+            0 => self.beams.len().saturating_sub(1),
+            selected => selected - 1,
+        };
+        self.select(previous);
     }
 
-    /// Moves the selection, clamped to the table. The ends of the tree
-    /// stop rather than wrap: a list the reader scans top to bottom is
-    /// easier to keep a place in when it does not loop under them.
+    /// Moves the selection, clamped to the table.
     pub fn select(&mut self, index: usize) {
         self.selected = index.min(self.beams.len().saturating_sub(1));
     }
@@ -1540,19 +1546,25 @@ mod tests {
         );
     }
 
-    /// The ends of the tree stop rather than wrap.
+    /// The ends of the tree wrap: up from the first beam reaches the
+    /// last, down from the last returns to the first.
     #[test]
-    fn selection_stops_at_both_ends() {
+    fn selection_wraps_at_both_ends() {
+        let mut state = three_beams();
+        state.select_previous();
+        assert_eq!(state.selected, 2);
+        state.select_next();
+        assert_eq!(state.selected, 0);
+    }
+
+    /// An empty table has nothing to wrap to.
+    #[test]
+    fn moving_through_an_empty_table_keeps_the_selection_at_zero() {
         let mut state = AppState::new("build", false);
-        state.apply(
-            &run_started("build", &["codegen", "build"], &[]),
-            Instant::now(),
-        );
         state.select_previous();
         assert_eq!(state.selected, 0);
         state.select_next();
-        state.select_next();
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
     }
 
     fn three_beams() -> AppState {
