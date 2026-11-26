@@ -63,9 +63,9 @@ impl Counts {
                         counts.done += 1;
                         counts.failed += 1;
                     }
-                    // A beam that ended without running is not complete:
-                    // pending no more while the run goes on, and skipped
-                    // once it is over.
+                    // A cancelled beam, skipped or cut short, is not
+                    // complete: pending no more while the run goes on,
+                    // and skipped once it is over.
                     BeamStatus::Cancelled if !running => counts.not_run += 1,
                     BeamStatus::Cancelled => {}
                 },
@@ -336,8 +336,8 @@ mod tests {
         assert_eq!(red.spans[0].style.fg, Some(Color::Rgb(0xF0, 0xA2, 0x9A)));
     }
 
-    /// A beam that ended without running is not complete: it counts
-    /// as skipped once the run is over, never towards `done`.
+    /// A cancelled beam is not complete: it counts as skipped once the
+    /// run is over, never towards `done`.
     #[test]
     fn a_finished_run_counts_skipped_beams() {
         let mut state = started(&["a", "b", "c"]);

@@ -199,8 +199,7 @@ pub(super) fn selection_style(mode: ColourMode) -> Style {
 
 /// One row: the glyph in its status colour, the name (muted while the
 /// beam is pending, cancelled or skipped), the muted duration (none for
-/// a `skipped` beam); the whole
-/// row on the selection bar when selected.
+/// a `skipped` beam); the whole row on the selection bar when selected.
 fn row_line(
     row: &BeamRow,
     skipped: bool,

@@ -1074,8 +1074,10 @@ impl AppState {
     fn sync_search_scroll(&mut self, search: &SearchState) {
         // With the pane's size known, the match is brought into view the
         // way copy mode's cursor is: not at all when it is already on
-        // screen, otherwise at the nearest edge. Without it (no frame
-        // drawn yet), the match is pinned as the view's last line.
+        // screen, otherwise at the nearest edge. `dispatch` sets the size
+        // before every action, so it is zero only below the size floor
+        // (or in a test that never set it): then the match is pinned as
+        // the view's last line.
         if self.pane_height > 0
             && let Some(line) = search.current_line()
         {
@@ -2197,9 +2199,11 @@ mod tests {
         ));
     }
 
-    /// The log pane rides the buffer's own Following/Paused scrolling:
-    /// searching for a match well above the tail pauses the buffer so
-    /// that match is the last line its view shows.
+    /// Without a known pane size (below the floor), the log pane rides
+    /// the buffer's own Following/Paused scrolling: searching for a match
+    /// well above the tail pauses the buffer so that match is the last
+    /// line its view shows. With a size, see
+    /// `a_match_above_the_pane_comes_in_at_its_top`.
     #[test]
     fn searching_scrolls_the_buffer_to_the_current_match() {
         let mut state = AppState::new("build", false);
