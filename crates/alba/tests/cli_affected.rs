@@ -676,13 +676,20 @@ fn an_unchanged_beam_reads_unchanged_in_both_text_layouts() {
         .assert()
         .success()
         .stdout(predicates::str::contains("── lint (○ unchanged) ──"));
-    alba()
+    let assert = alba()
         .current_dir(&dir)
         .args(["run", "lint", "--output", "interleaved"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("○ unchanged"))
         .stderr(predicates::str::contains("○ 1 unchanged"));
+    // An unchanged beam ran nothing: its line ends on the status, with no
+    // duration after it.
+    let stdout = stdout_of(&assert);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("○ unchanged"))
+        .unwrap_or_else(|| panic!("an unchanged line in {stdout}"));
+    assert!(line.ends_with("○ unchanged"), "{line}");
 }
 
 /// A repository on `main` declaring `main` as its base, with nothing
