@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/albahq/alba/compare/v0.6.0...v0.7.0) - 2026-11-26
+
+### Added
+
+- *(tui)* add the Alba palette and colour modes
+- *(engine)* attach a report to broken projects
+- *(engine)* announce each command before it runs
+- *(engine)* announce beam details in RunStarted
+- *(core)* compute beam definitions from sources
+- *(diagnostics)* add structured diagnostic report
+- *(tui)* turn help into a page, restyle search and copy
+- *(tui)* join graph layers through three-row bands
+- *(tui)* restyle the graph beside the beams pane
+- *(tui)* draw a structured diagnostic pane
+- *(tui)* draw the output pane with its title and lines
+- *(tui)* size the beams pane to its names and scroll it
+- *(tui)* model line kinds and the stream filter
+
+### Fixed
+
+- *(tui)* replay the error that failed a beam on exit
+- *(tui)* say when the exit replay lost lines to the cap
+- *(core)* keep one slash after the path root
+- *(core)* use slash separators in beam locations
+- *(diagnostics)* floor report spans to char boundaries
+- *(tui)* keep the graph focus on its beam across a reload
+- *(tui)* scroll a search only as far as its match needs
+- *(tui)* leave skipped beams out of the completed count
+- *(tui)* show no duration for a skipped beam
+- *(tui)* keep selection and matches visible on styled lines
+- *(tui)* highlight only what copy mode copies
+- *(tui)* replace the plain diagnostic on each break
+- *(tui)* follow the displayed log on a parked diagnostic
+- *(tui)* keep search and copy on a parked diagnostic
+- *(tui)* count the output window from the rows drawn
+- *(tui)* keep the search query whole in the key hints
+- *(tui)* keep filtered views consistent
+- *(tui)* keep accent distinct from error in 256 colours
+
+### Other
+
+- *(cli)* ignore the Windows line erase in the replay check
+- *(tui)* document the redesigned interface
+- *(tui)* lay the frame out in bands on a painted surface
+- *(cli)* cover the report of a run failure
+- *(engine)* cover notices in headless output
+- *(engine)* emit beam notices as events
+- *(render)* test the JSON renderer through handle
+- *(cli)* reuse the project root for definitions
+- *(core)* check definition paths the same way on Windows
+- *(tui)* bring stale and dashed doc comments up to date
+- *(tui)* drop a useless format! in a title test
+- *(tui)* sweep the diagnostic, copy mode and short heights
+- *(tui)* drop the graph keymap's unreachable Enter arm
+- *(tui)* read the shown search in one place
+- *(tui)* cut a long diagnostic path, not its position
+- *(tui)* share dispatch's session-free steps with the tests
+- *(tui)* reach the scrolled and copy screens through keys
+- *(tui)* say where the beams list starts beside the output
+- *(tui)* tell a skipped beam apart in one place
+- *(tui)* give back the graph's alignment row before COMMANDS
+- *(tui)* leave a blank row under the diagnostic title
+- *(tui)* size the pane before the committed search snapshot
+- *(tui)* say which beams leave the count and when search pins
+- *(tui)* decide a skipped row's duration where it is built
+- *(tui)* snapshot every mockup screen
+- *(tui)* indent the help page's right column like the left
+- *(tui)* set the current size apart on the small screen
+- *(tui)* align the graph with the output's first line
+- *(tui)* leave a blank row under the beams title
+- *(tui)* share section titles, follow graph focus
+- *(tui)* correct the beams pane comments
+- *(tui)* explain the copy scroll bound
+- *(tui)* cover every ANSI table row and fix remap
+
 ## [0.6.0](https://github.com/albahq/alba/compare/v0.5.1...v0.6.0) - 2026-11-25
 
 ### Added
