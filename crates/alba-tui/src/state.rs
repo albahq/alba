@@ -774,9 +774,10 @@ impl AppState {
         self.mode = Mode::Copy(copy);
     }
 
-    /// Graph mode's own keymap: arrows move the focus (`GraphState::navigate`),
-    /// and `Enter` commits the focused beam as the selection and returns
-    /// to Normal. The layering is recomputed fresh from `self.beams`/
+    /// Graph mode's own keymap: arrows move the focus (`GraphState::navigate`).
+    /// `Enter` never reaches it: the keymap turns it into
+    /// `Action::OpenFocusedOutput` (`open_focused_output`), which commits
+    /// the focused beam as the selection and returns to Normal. The layering is recomputed fresh from `self.beams`/
     /// `self.edges` on every keystroke rather than cached alongside the
     /// mode — the DAG is fixed for the run in flight, so this costs
     /// nothing worth avoiding, and it rules out the layering and the beam
@@ -789,11 +790,6 @@ impl AppState {
             unreachable!("handle_modal_key only calls this while Mode::Graph is active")
         };
         match key.code {
-            KeyCode::Enter => {
-                self.mode = Mode::Graph(graph);
-                self.open_focused_output();
-                return;
-            }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 let layers = crate::graph::layers(self.beams.len(), &self.edges);
                 graph.navigate(key.code, &layers);
@@ -1201,8 +1197,16 @@ mod tests {
     use crate::logs::LineKind;
     use alba_core::BeamId;
     use alba_engine::{BeamStatus, RunEvent, RunSummary};
-    use crossterm::event::KeyModifiers;
+    use crossterm::event::{Event, KeyModifiers};
     use std::time::{Duration, Instant};
+
+    /// `key` pressed, through the keymap and the dispatch the event loop
+    /// runs it through.
+    fn press(state: &mut AppState, key: KeyCode) {
+        let event = Event::Key(KeyEvent::new(key, KeyModifiers::NONE));
+        let action = crate::input::action_for(&event, &state.mode);
+        crate::apply_action(state, action, ratatui::layout::Size::new(80, 24));
+    }
 
     fn id(name: &str) -> BeamId {
         BeamId(name.to_string())
@@ -1625,7 +1629,7 @@ mod tests {
     fn selecting_in_the_graph_counts_as_moving() {
         let mut state = three_beams();
         state.enter_graph();
-        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(&mut state, KeyCode::Enter);
         state.apply(
             &finished(BeamStatus::Failed { exit_code: 1 }, "c"),
             Instant::now(),
@@ -2973,7 +2977,7 @@ mod tests {
 
         state.enter_graph();
         state.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        state.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(&mut state, KeyCode::Enter);
 
         assert_eq!(state.mode, Mode::Normal);
         assert_eq!(
