@@ -54,6 +54,9 @@ fn options(jobs: usize, keep_going: bool) -> RunOptions {
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
     }
 }
 
@@ -408,7 +411,7 @@ beam all { needs [broken, other] run "step all" }
     let started = only(
         positions(
             events,
-            |event| matches!(event, RunEvent::BeamStarted { id } if id.0 == "broken"),
+            |event| matches!(event, RunEvent::BeamStarted { id, .. } if id.0 == "broken"),
         ),
         "`broken` started event",
     );
@@ -750,7 +753,7 @@ beam b { needs [a] run "step b" }
         let started = only(
             positions(
                 events,
-                |e| matches!(e, RunEvent::BeamStarted { id } if id.0 == beam),
+                |e| matches!(e, RunEvent::BeamStarted { id, .. } if id.0 == beam),
             ),
             &format!("`{beam}` started event"),
         );
@@ -782,7 +785,7 @@ beam b { needs [a] run "step b" }
     let b_started = only(
         positions(
             events,
-            |e| matches!(e, RunEvent::BeamStarted { id } if id.0 == "b"),
+            |e| matches!(e, RunEvent::BeamStarted { id, .. } if id.0 == "b"),
         ),
         "`b` started event",
     );
@@ -931,6 +934,9 @@ beam deploy(target) {
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
     };
     let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
 
@@ -959,6 +965,9 @@ async fn parameter_count_must_match_the_target() {
             extra_env: Vec::new(),
             ambient_env: Vec::new(),
             definitions: Default::default(),
+            changes: None,
+            unresolved_base: false,
+            sources: Default::default(),
         },
         Arc::new(FakeExecutor::new()),
     )

@@ -50,6 +50,9 @@ fn options(dir: &Path) -> RunOptions {
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
     }
 }
 

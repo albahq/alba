@@ -511,6 +511,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: targets.iter().map(|name| id(name)).collect(),
                 affected_by: None,
+                base: None,
                 beams: beams.iter().map(|name| id(name)).collect(),
                 edges: edges
                     .iter()

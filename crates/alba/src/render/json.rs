@@ -24,6 +24,7 @@
 
 use std::io::{self, Write};
 
+use alba_core::{ChangeMode, FullReason};
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::Stream;
 use serde::Serialize;
@@ -81,11 +82,22 @@ enum WireEvent<'a> {
         targets: Vec<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         affected_by: Option<&'a str>,
+        /// The reference `git.changes()` diffs from and its merge-base
+        /// commit; absent when the run has none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base: Option<WireBase<'a>>,
         beams: Vec<&'a str>,
         edges: Vec<(&'a str, &'a str)>,
     },
     BeamStarted {
         beam: &'a str,
+        /// `incremental` or `full`, only for a beam calling
+        /// `git.changes()`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<&'static str>,
+        /// Why the mode is `full`; absent otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        full_reason: Option<&'static str>,
     },
     BeamCached {
         beam: &'a str,
@@ -108,6 +120,10 @@ enum WireEvent<'a> {
     RunFinished {
         succeeded: Vec<&'a str>,
         cached: Vec<&'a str>,
+        /// Beams with no changed file to process; absent when there are
+        /// none, so a run without `git.changes()` keeps its shape.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        unchanged: Vec<&'a str>,
         failed: Vec<&'a str>,
         failed_allowed: Vec<&'a str>,
         cancelled: Vec<&'a str>,
@@ -133,6 +149,12 @@ enum WireEvent<'a> {
 }
 
 #[derive(Serialize)]
+struct WireBase<'a> {
+    reference: &'a str,
+    merge_base: &'a str,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum WireStream {
     Stdout,
@@ -147,19 +169,28 @@ impl<'a> WireEvent<'a> {
             RunEvent::RunStarted {
                 targets,
                 affected_by,
+                base,
                 beams,
                 edges,
                 details: _,
             } => WireEvent::RunStarted {
                 targets: targets.iter().map(|id| id.0.as_str()).collect(),
                 affected_by: affected_by.as_deref(),
+                base: base.as_ref().map(|(reference, merge_base)| WireBase {
+                    reference,
+                    merge_base,
+                }),
                 beams: beams.iter().map(|id| id.0.as_str()).collect(),
                 edges: edges
                     .iter()
                     .map(|(from, to)| (from.0.as_str(), to.0.as_str()))
                     .collect(),
             },
-            RunEvent::BeamStarted { id } => WireEvent::BeamStarted { beam: &id.0 },
+            RunEvent::BeamStarted { id, mode } => WireEvent::BeamStarted {
+                beam: &id.0,
+                mode: mode.as_ref().map(mode_name),
+                full_reason: mode.as_ref().and_then(full_reason_name),
+            },
             RunEvent::BeamCached { id } => WireEvent::BeamCached { beam: &id.0 },
             RunEvent::BeamOutput { id, line, replayed } => WireEvent::BeamOutput {
                 beam: &id.0,
@@ -205,6 +236,7 @@ impl<'a> WireEvent<'a> {
         WireEvent::RunFinished {
             succeeded: ids(&summary.succeeded),
             cached: ids(&summary.cached),
+            unchanged: ids(&summary.unchanged),
             failed: ids(&summary.failed),
             failed_allowed: ids(&summary.failed_allowed),
             cancelled: ids(&summary.cancelled),
@@ -219,6 +251,7 @@ fn status_name(status: &BeamStatus) -> &'static str {
     match status {
         BeamStatus::Succeeded => "succeeded",
         BeamStatus::Cached => "cached",
+        BeamStatus::Unchanged => "unchanged",
         BeamStatus::Failed { .. } => "failed",
         BeamStatus::FailedAllowed { .. } => "failed_allowed",
         BeamStatus::Cancelled => "cancelled",
@@ -230,8 +263,32 @@ fn exit_code(status: &BeamStatus) -> Option<i32> {
         BeamStatus::Failed { exit_code } | BeamStatus::FailedAllowed { exit_code } => {
             Some(*exit_code)
         }
-        BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::Cancelled => None,
+        BeamStatus::Succeeded
+        | BeamStatus::Cached
+        | BeamStatus::Unchanged
+        | BeamStatus::Cancelled => None,
     }
+}
+
+fn mode_name(mode: &ChangeMode) -> &'static str {
+    match mode {
+        ChangeMode::Incremental => "incremental",
+        ChangeMode::Full(_) => "full",
+    }
+}
+
+fn full_reason_name(mode: &ChangeMode) -> Option<&'static str> {
+    let ChangeMode::Full(reason) = mode else {
+        return None;
+    };
+    Some(match reason {
+        FullReason::NoReference => "no_reference",
+        FullReason::ReferenceUnresolved => "reference_unresolved",
+        FullReason::OnTargetBranch => "on_target_branch",
+        FullReason::BeamfileChanged => "beamfile_changed",
+        FullReason::DependencyAffected(_) => "dependency_affected",
+        FullReason::InputOutsideChanges(_) => "input_outside_changes",
+    })
 }
 
 /// A duration in whole milliseconds. `as_millis` is a `u128`, which no
@@ -269,6 +326,7 @@ mod tests {
             &mut renderer,
             &RunEvent::BeamStarted {
                 id: BeamId("build".to_string()),
+                mode: None,
             },
         );
         assert!(!renderer.out.writer.is_empty());
@@ -417,6 +475,89 @@ mod tests {
         assert_eq!(json(&event)["cleanup_errors"], serde_json::json!([]));
     }
 
+    #[test]
+    fn an_unchanged_beam_is_reported_with_its_status_and_bucket() {
+        let finished = json(&RunEvent::BeamFinished {
+            id: BeamId("phpcs".to_string()),
+            status: BeamStatus::Unchanged,
+            duration: std::time::Duration::ZERO,
+        });
+        assert_eq!(finished["status"], "unchanged");
+        assert!(finished["exit_code"].is_null());
+
+        let run_finished = json(&RunEvent::RunFinished {
+            summary: RunSummary {
+                unchanged: vec![BeamId("phpcs".to_string())],
+                ..RunSummary::default()
+            },
+        });
+        assert_eq!(run_finished["unchanged"], serde_json::json!(["phpcs"]));
+        assert_eq!(run_finished["exit_code"], 0);
+    }
+
+    /// A run with nothing unchanged keeps the shape it always had.
+    #[test]
+    fn the_unchanged_bucket_is_omitted_when_empty() {
+        let value = json(&RunEvent::RunFinished {
+            summary: RunSummary::default(),
+        });
+        assert!(value.get("unchanged").is_none(), "{value}");
+    }
+
+    #[test]
+    fn beam_started_carries_the_mode_and_why_it_is_full() {
+        let started = |mode| {
+            json(&RunEvent::BeamStarted {
+                id: BeamId("phpcs".to_string()),
+                mode,
+            })
+        };
+
+        let incremental = started(Some(ChangeMode::Incremental));
+        assert_eq!(incremental["mode"], "incremental");
+        assert!(incremental.get("full_reason").is_none());
+
+        let without = started(None);
+        assert!(without.get("mode").is_none());
+        assert!(without.get("full_reason").is_none());
+
+        for (reason, name) in [
+            (FullReason::NoReference, "no_reference"),
+            (FullReason::ReferenceUnresolved, "reference_unresolved"),
+            (FullReason::OnTargetBranch, "on_target_branch"),
+            (FullReason::BeamfileChanged, "beamfile_changed"),
+            (
+                FullReason::DependencyAffected(BeamId("install".to_string())),
+                "dependency_affected",
+            ),
+            (
+                FullReason::InputOutsideChanges("phpcs.xml".to_string()),
+                "input_outside_changes",
+            ),
+        ] {
+            let full = started(Some(ChangeMode::Full(reason)));
+            assert_eq!(full["mode"], "full");
+            assert_eq!(full["full_reason"], name);
+        }
+    }
+
+    #[test]
+    fn run_started_carries_the_base_when_there_is_one() {
+        let event = RunEvent::RunStarted {
+            targets: vec![BeamId("phpcs".to_string())],
+            affected_by: None,
+            base: Some(("origin/develop".to_string(), "abc123".to_string())),
+            beams: vec![BeamId("phpcs".to_string())],
+            edges: Vec::new(),
+            details: Vec::new(),
+        };
+
+        assert_eq!(
+            json(&event)["base"],
+            serde_json::json!({"reference": "origin/develop", "merge_base": "abc123"})
+        );
+    }
+
     /// `run_started` is part of the public JSON contract: a consumer needs
     /// the run boundary and the graph snapshot for the same reason the TUI
     /// does.
@@ -425,6 +566,7 @@ mod tests {
         let event = RunEvent::RunStarted {
             targets: vec![BeamId("build".to_string())],
             affected_by: None,
+            base: None,
             beams: vec![BeamId("codegen".to_string()), BeamId("build".to_string())],
             edges: vec![(BeamId("build".to_string()), BeamId("codegen".to_string()))],
             details: Vec::new(),

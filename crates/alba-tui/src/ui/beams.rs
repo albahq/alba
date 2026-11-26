@@ -287,17 +287,22 @@ fn status_glyph(status: &BeamStatus) -> &'static str {
         BeamStatus::Succeeded => "✓",
         BeamStatus::Cached => "↯",
         BeamStatus::Failed { .. } | BeamStatus::FailedAllowed { .. } => "✗",
-        BeamStatus::Cancelled => "○",
+        BeamStatus::Unchanged | BeamStatus::Cancelled => "○",
     }
 }
 
 /// The duration column: a running beam's ticks live (`now - since`); a
-/// pending beam has none yet, and one the engine skipped none at all (it
-/// never ran, whatever duration it reports), so both show the dash.
+/// pending beam has none yet, and one the engine skipped or found
+/// unchanged none at all (it never ran, whatever duration it reports), so
+/// all three show the dash.
 fn duration_text(state: &BeamState, skipped: bool, now: Instant) -> String {
     match state {
         BeamState::Pending => NO_DURATION.to_string(),
         BeamState::Done { .. } if skipped => NO_DURATION.to_string(),
+        BeamState::Done {
+            status: BeamStatus::Unchanged,
+            ..
+        } => NO_DURATION.to_string(),
         BeamState::Running { since } => format_duration(now.saturating_duration_since(*since)),
         BeamState::Done { duration, .. } => format_duration(*duration),
     }
@@ -588,13 +593,20 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("check")],
                 affected_by: None,
+                base: None,
                 beams: vec![id("test"), id("check")],
                 edges: vec![(id("check"), id("test"))],
                 details: Vec::new(),
             },
             now,
         );
-        state.apply(&RunEvent::BeamStarted { id: id("test") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("test"),
+                mode: None,
+            },
+            now,
+        );
         for name in ["test", "check"] {
             state.apply(
                 &RunEvent::BeamFinished {
@@ -636,6 +648,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![BeamId("build".to_string())],
                 affected_by: None,
+                base: None,
                 beams: vec![BeamId("build".to_string())],
                 edges: Vec::new(),
                 details: Vec::new(),

@@ -5,8 +5,9 @@
 //! matters more than reading each beam's output as one block.
 
 use std::io;
+use std::time::Duration;
 
-use alba_engine::RunEvent;
+use alba_engine::{BeamStatus, RunEvent};
 use owo_colors::{AnsiColors, OwoColorize};
 
 use super::{LineSink, Renderer, format_duration, print_summary, status_label};
@@ -72,7 +73,7 @@ impl Renderer for InterleavedRenderer {
             return;
         }
         match event {
-            RunEvent::BeamStarted { id } => self.line(&id.0, "started"),
+            RunEvent::BeamStarted { id, .. } => self.line(&id.0, "started"),
             RunEvent::BeamCached { id } => self.line(&id.0, "cached — replaying last output"),
             RunEvent::BeamOutput { id, line, .. } => self.line(&id.0, &line.text),
             // Printed where the stderr line it replaced used to appear.
@@ -82,17 +83,7 @@ impl Renderer for InterleavedRenderer {
                 status,
                 duration,
             } => {
-                // `in` rather than a second parenthesis: a status is
-                // already parenthesized (`failed (exit 7)`), and
-                // `failed (exit 7) (1.2s)` reads as two unrelated asides.
-                // A cached beam's duration belongs to its original run, not
-                // this one, so it gets its own phrasing rather than
-                // `cached in 1.2s` implying the replay itself took that long.
-                let text = if matches!(status, alba_engine::BeamStatus::Cached) {
-                    format!("cached in {} (original run)", format_duration(*duration))
-                } else {
-                    format!("{} in {}", status_label(status), format_duration(*duration))
-                };
+                let text = finished_text(status, *duration);
                 self.line(&id.0, &text);
             }
             RunEvent::RunFinished { summary } => {
@@ -108,6 +99,22 @@ impl Renderer for InterleavedRenderer {
                 self.err.line(diagnostic.trim_end());
             }
         }
+    }
+}
+
+/// What a finished beam's line says after its prefix.
+///
+/// `in` rather than a second parenthesis: a status is already
+/// parenthesized (`failed (exit 7)`), and `failed (exit 7) (1.2s)` reads
+/// as two unrelated asides. A cached beam's duration belongs to its
+/// original run, not this one, so it gets its own phrasing rather than
+/// `cached in 1.2s` implying the replay itself took that long. An
+/// unchanged beam ran nothing: no duration to speak of.
+fn finished_text(status: &BeamStatus, duration: Duration) -> String {
+    match status {
+        BeamStatus::Cached => format!("cached in {} (original run)", format_duration(duration)),
+        BeamStatus::Unchanged => status_label(status),
+        _ => format!("{} in {}", status_label(status), format_duration(duration)),
     }
 }
 
@@ -151,6 +158,18 @@ mod tests {
 
     /// The property that matters: an id's colour is a function of the id
     /// alone, so it cannot vary with the order beams are encountered in.
+    #[test]
+    fn an_unchanged_beam_reports_no_duration() {
+        assert_eq!(
+            finished_text(&BeamStatus::Unchanged, Duration::ZERO),
+            "\u{25cb} unchanged"
+        );
+        assert_eq!(
+            finished_text(&BeamStatus::Succeeded, Duration::from_millis(1200)),
+            "ok in 1.2s"
+        );
+    }
+
     #[test]
     fn a_beam_id_always_gets_the_same_color() {
         assert_eq!(color_name("build"), color_name("build"));

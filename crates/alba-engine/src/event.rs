@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use alba_core::{BeamId, DiagnosticReport, ExecutorKind};
+use alba_core::{BeamId, ChangeMode, DiagnosticReport, ExecutorKind};
 use alba_executors::OutputLine;
 
 /// A beam's definition, for an interface that wants to show more than its
@@ -79,7 +79,8 @@ pub enum NoticeLevel {
 /// [`BeamStatus::Cached`]. A
 /// beam that never ran (cancelled before it acquired a slot, or skipped
 /// because a dependency failed) emits only `BeamFinished` with
-/// [`BeamStatus::Cancelled`]. Events from different beams interleave
+/// [`BeamStatus::Cancelled`]; one with no changed file to process emits
+/// only `BeamFinished` with [`BeamStatus::Unchanged`]. Events from different beams interleave
 /// freely; `RunStarted` is first *per run*, before any
 /// `BeamStarted`/`BeamCached`; `RunFinished` is last *per run* — in a watch
 /// session, it is followed by `WatchWaiting` and, once a change is seen,
@@ -101,6 +102,9 @@ pub enum RunEvent {
         /// The git reference an affected run was computed against, when
         /// it was one.
         affected_by: Option<String>,
+        /// The reference `git.changes()` diffs from and its merge-base
+        /// commit with `HEAD`, when the run has one.
+        base: Option<(String, String)>,
         beams: Vec<BeamId>,
         /// `(beam, dependency)`: the first needs the second. Both ends are
         /// always members of `beams` — the subgraph is transitively closed.
@@ -112,6 +116,9 @@ pub enum RunEvent {
     },
     BeamStarted {
         id: BeamId,
+        /// What `git.changes()` answers for this beam, and why when full:
+        /// `Some` only for a beam that calls it.
+        mode: Option<ChangeMode>,
     },
     /// A cache hit: emitted instead of `BeamStarted` for a beam that is
     /// skipped, followed by its replayed `BeamOutput` lines and a
@@ -200,7 +207,9 @@ pub struct RenderedError {
 /// `Failed` and `FailedAllowed` are the same event seen through the beam's
 /// `allow_failure` flag: a `FailedAllowed` beam counts as satisfied for its
 /// dependents, never triggers fail-fast, and does not affect the run's exit
-/// code. `Cancelled` covers both reasons a beam can be skipped: a
+/// code. `Unchanged` is a beam whose every `git.changes()` call is empty
+/// in incremental mode: it runs nothing, satisfies its dependents, and
+/// does not affect the exit code. `Cancelled` covers both reasons a beam can be skipped: a
 /// dependency that failed or was itself cancelled, and a run-wide stop
 /// (fail-fast, or the caller's cancellation token).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +218,8 @@ pub enum BeamStatus {
     /// A cache hit: counts as satisfied for this beam's dependents and as
     /// success for the run's exit code, exactly like `Succeeded`.
     Cached,
+    /// No changed file to process: nothing ran, nothing is cached.
+    Unchanged,
     Failed {
         exit_code: i32,
     },
@@ -221,7 +232,7 @@ pub enum BeamStatus {
 /// What a whole run amounts to: every beam of the target's subgraph sorted
 /// into the bucket it ended in, plus how long the run took.
 ///
-/// The five vectors are in the project's declaration order, never in
+/// The six vectors are in the project's declaration order, never in
 /// completion order — a run is a concurrent thing, and ordering the summary
 /// by whichever task happened to finish first would make it differ from run
 /// to run for the same project.
@@ -229,6 +240,7 @@ pub enum BeamStatus {
 pub struct RunSummary {
     pub succeeded: Vec<BeamId>,
     pub cached: Vec<BeamId>,
+    pub unchanged: Vec<BeamId>,
     pub failed: Vec<BeamId>,
     pub failed_allowed: Vec<BeamId>,
     pub cancelled: Vec<BeamId>,
@@ -259,6 +271,7 @@ impl RunSummary {
         match status {
             BeamStatus::Succeeded => self.succeeded.push(id),
             BeamStatus::Cached => self.cached.push(id),
+            BeamStatus::Unchanged => self.unchanged.push(id),
             BeamStatus::Failed { .. } => self.failed.push(id),
             BeamStatus::FailedAllowed { .. } => self.failed_allowed.push(id),
             BeamStatus::Cancelled => self.cancelled.push(id),

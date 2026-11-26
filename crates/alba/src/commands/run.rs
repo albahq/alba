@@ -185,6 +185,9 @@ async fn execute(
         }),
         ambient_env: ambient_env(),
         definitions: alba_core::definitions(project, sources, &root),
+        changes: None,
+        unresolved_base: false,
+        sources: sources.clone(),
         extra_env: Vec::new(),
     };
 
@@ -293,6 +296,9 @@ async fn watch_execute(
         ambient_env: ambient_env(),
         // A session computes them for each run, from the project it just loaded.
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
         extra_env: Vec::new(),
     };
 
@@ -406,6 +412,9 @@ async fn tui_execute(
         ambient_env: ambient_env(),
         // A session computes them for each run, from the project it just loaded.
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
         extra_env: if colour {
             vec![
                 ("FORCE_COLOR".to_string(), "1".to_string()),
@@ -1518,13 +1527,20 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![beam.clone()],
                 affected_by: None,
+                base: None,
                 beams: vec![beam.clone()],
                 edges: Vec::new(),
                 details: Vec::new(),
             },
             now,
         );
-        state.apply(&RunEvent::BeamStarted { id: beam.clone() }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: beam.clone(),
+                mode: None,
+            },
+            now,
+        );
         state.apply(
             &RunEvent::CommandStarted {
                 id: beam.clone(),

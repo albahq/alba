@@ -537,6 +537,7 @@ mod tests {
         RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: Vec::new(),
             details: Vec::new(),
@@ -684,7 +685,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started(&["bad"]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("bad") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("bad"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(
             &RunEvent::BeamNotice {
                 id: id("bad"),
@@ -732,11 +739,23 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started(&["bad", "good"]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("bad") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("bad"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("bad", "boom 1"), now);
         state.apply(&output("bad", "boom 2"), now);
         state.apply(&finished("bad", BeamStatus::Failed { exit_code: 1 }), now);
-        state.apply(&RunEvent::BeamStarted { id: id("good") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("good"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("good", "fine"), now);
         state.apply(&finished("good", BeamStatus::Succeeded), now);
         state.apply(&summary_event(&["bad"], &["good"]), now);
@@ -766,7 +785,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started(&["chatty", "short"]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("chatty") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("chatty"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(
             &RunEvent::CommandStarted {
                 id: id("chatty"),
@@ -781,7 +806,13 @@ mod tests {
             &finished("chatty", BeamStatus::Failed { exit_code: 1 }),
             now,
         );
-        state.apply(&RunEvent::BeamStarted { id: id("short") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("short"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("short", "boom"), now);
         state.apply(&finished("short", BeamStatus::Failed { exit_code: 1 }), now);
         state.apply(&summary_event(&["chatty", "short"], &[]), now);
@@ -985,7 +1016,13 @@ mod tests {
     fn entering_copy_mode_anchors_at_the_panes_top_line() {
         let (commands, _receiver) = commands();
         let mut state = running(&["build"]);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, Instant::now());
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            Instant::now(),
+        );
         for index in 0..30 {
             state.apply(&output("build", &format!("line {index}")), Instant::now());
         }
@@ -1013,7 +1050,13 @@ mod tests {
     fn a_mouse_drag_in_copy_mode_selects_by_pane_row() {
         let (commands, _receiver) = commands();
         let mut state = running(&["build"]);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, Instant::now());
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            Instant::now(),
+        );
         for index in 0..5 {
             state.apply(&output("build", &format!("line {index}")), Instant::now());
         }
@@ -1090,7 +1133,13 @@ mod tests {
     fn a_release_outside_the_log_pane_still_stages_the_copy() {
         let (commands, _receiver) = commands();
         let mut state = running(&["build"]);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, Instant::now());
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            Instant::now(),
+        );
         state.apply(&output("build", "alpha"), Instant::now());
         dispatch(&mut state, &commands, Action::EnterCopy, size());
 
@@ -1290,7 +1339,13 @@ mod tests {
         let (commands, _receiver) = commands();
         let mut state = running(&["build"]);
         let now = Instant::now();
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         for index in 0..50 {
             state.apply(&output("build", &format!("line {index}")), now);
         }
@@ -1355,6 +1410,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("codegen")],
                 affected_by: None,
+                base: None,
                 beams: vec![id("codegen")],
                 edges: Vec::new(),
                 details: Vec::new(),

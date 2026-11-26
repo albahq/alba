@@ -244,6 +244,15 @@ pub fn merge_base(cwd: &Path, reference: &str) -> Result<String, GitError> {
 /// its own options (`--output=<file>` writes a file), not as a revision.
 pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitError> {
     let base = merge_base(cwd, reference)?;
+    changed_files_since(cwd, &base)
+}
+
+/// [`changed_files`] from `commit` itself rather than from its merge base
+/// with `HEAD`: for a caller that already computed the merge base and
+/// must not ask git for it twice. `commit` is refused when it starts with
+/// `-`, as a reference is.
+pub fn changed_files_since(cwd: &Path, commit: &str) -> Result<Vec<PathBuf>, GitError> {
+    refuse_option_like(commit)?;
     let prefix = git_output(cwd, &["rev-parse", "--show-prefix"])?;
     let prefix = String::from_utf8_lossy(&prefix)
         .trim_end_matches(['\n', '\r'])
@@ -253,7 +262,7 @@ pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitErr
     // Both list paths relative to the top level: `diff` without
     // `--relative` always does, `ls-files` once told `--full-name` and
     // the `:/` pathspec (the top level, wherever `cwd` is).
-    let diff = git_output(cwd, &["diff", "--name-only", "-z", &base, "--"])?;
+    let diff = git_output(cwd, &["diff", "--name-only", "-z", commit, "--"])?;
     let untracked = git_output(
         cwd,
         &[

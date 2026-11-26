@@ -202,6 +202,17 @@ impl Scope {
         }
     }
 
+    /// Whether `git.changes(glob)` lists nothing in this scope: incremental
+    /// mode and no changed file matching `glob` still exists. The engine
+    /// asks this to tell a beam with nothing to process from one to run,
+    /// through the same listing its commands render, so the two cannot
+    /// disagree. A listing that fails (a name that is not valid UTF-8) is
+    /// not empty: the beam then renders, and its render reports the name.
+    pub fn lists_no_change(&self, glob: &str) -> bool {
+        self.git_changes(glob, Span::new(0, 0))
+            .is_ok_and(|listed| listed.is_empty())
+    }
+
     /// `git.changes(glob)`, evaluated: see [`BeamChanges::list`]. `span`
     /// is the call's, for a path that cannot be rendered as text.
     fn git_changes(&self, glob: &str, span: Span) -> Result<Vec<String>, CoreError> {

@@ -218,6 +218,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("build")],
                 affected_by: None,
+                base: None,
                 beams: vec![
                     id("codegen"),
                     id("国国国国国国国国国国国国国国"),
@@ -228,7 +229,13 @@ mod tests {
             },
             now,
         );
-        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("codegen"),
+                mode: None,
+            },
+            now,
+        );
         for index in 0..200 {
             state.apply(
                 &RunEvent::BeamOutput {
@@ -321,6 +328,7 @@ mod tests {
         RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: Vec::new(),
             details: beams
@@ -566,6 +574,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("beam19")],
                 affected_by: None,
+                base: None,
                 beams: names,
                 edges: Vec::new(),
                 details: Vec::new(),
@@ -603,6 +612,7 @@ mod tests {
         state.apply(
             &RunEvent::BeamStarted {
                 id: id("国国国国国国国国国国国国国国"),
+                mode: None,
             },
             now,
         );

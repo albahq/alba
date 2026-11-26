@@ -209,6 +209,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("build")],
                 affected_by: None,
+                base: None,
                 beams: vec![id("build")],
                 edges: Vec::new(),
                 details: Vec::new(),

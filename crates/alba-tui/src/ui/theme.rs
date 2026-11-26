@@ -139,8 +139,8 @@ pub fn remap_ansi(style: Style, mode: ColourMode) -> Style {
     Style { fg, ..style }
 }
 
-/// The token a beam's status is drawn in; pending and cancelled beams
-/// are muted.
+/// The token a beam's status is drawn in; pending, unchanged and
+/// cancelled beams are muted.
 pub fn status_token(state: &BeamState) -> Token {
     match state {
         BeamState::Pending => Token::TextMuted,
@@ -149,7 +149,7 @@ pub fn status_token(state: &BeamState) -> Token {
             BeamStatus::Succeeded => Token::Success,
             BeamStatus::Cached => Token::Cached,
             BeamStatus::Failed { .. } | BeamStatus::FailedAllowed { .. } => Token::Error,
-            BeamStatus::Cancelled => Token::TextMuted,
+            BeamStatus::Unchanged | BeamStatus::Cancelled => Token::TextMuted,
         },
     }
 }

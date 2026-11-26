@@ -247,6 +247,9 @@ fn spawn(
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
     };
     let handle = tokio::spawn({
         let executor = Arc::clone(&executor);
@@ -1374,6 +1377,9 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
         definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        sources: Default::default(),
     };
     let handle = tokio::spawn({
         let executor = Arc::clone(&executor);
