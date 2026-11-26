@@ -1235,7 +1235,7 @@ mod tests {
         let state = started("test");
         assert_eq!(
             title_row(&state).trim_end(),
-            format!("OUTPUT / test    EXECUTOR shell (embedded) ● following")
+            "OUTPUT / test    EXECUTOR shell (embedded) ● following"
         );
         assert_eq!(buffer_fg(&state, 80, TEXT + 9), ACCENT, "the beam name");
 
