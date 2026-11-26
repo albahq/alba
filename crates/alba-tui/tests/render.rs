@@ -12,11 +12,12 @@ use std::time::{Duration, Instant};
 use alba_core::BeamId;
 use alba_engine::{BeamDetails, BeamStatus, ExecutorLabel, RunEvent, RunSummary};
 use alba_executors::{OutputLine, Stream};
-use alba_tui::input::{Action, action_for};
+use alba_tui::input::action_for;
 use alba_tui::state::{AppState, Mode};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Size;
 
 fn id(name: &str) -> BeamId {
     BeamId(name.to_string())
@@ -408,29 +409,13 @@ fn sized_for_artboard(state: &mut AppState) {
 }
 
 /// A key pressed in the artboard's terminal: mapped to its action by
-/// the keymap (`input::action_for`), then carried out as `lib::dispatch`
-/// does, the pane sized first. Only the actions these tests press are
-/// carried out; `dispatch` itself needs the session's command channel.
+/// the keymap (`input::action_for`), then carried out by
+/// `alba_tui::apply_action`, the part of the event loop's dispatch that
+/// needs no session.
 fn press(state: &mut AppState, code: KeyCode) {
-    sized_for_artboard(state);
     let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
-    match action_for(&event, &state.mode) {
-        Action::ScrollHalfPageUp => {
-            let pane = alba_tui::ui::log_pane_content_area(state, ARTBOARD_WIDTH, ARTBOARD_HEIGHT)
-                .expect("the artboard is above the size floor");
-            let rows = (pane.height as usize / 2).max(1);
-            let filter = state.effective_filter();
-            let key = state.displayed_log_key();
-            state
-                .logs
-                .entry(key)
-                .or_default()
-                .scroll_up_rows(rows, pane.width as usize, filter);
-        }
-        Action::EnterCopy => state.enter_copy(),
-        Action::Key(key) => state.handle_modal_key(key),
-        other => panic!("{code:?} maps to {other:?}, which these tests do not press"),
-    }
+    let action = action_for(&event, &state.mode);
+    alba_tui::apply_action(state, action, Size::new(ARTBOARD_WIDTH, ARTBOARD_HEIGHT));
 }
 
 fn artboard(state: &AppState, now: Instant) -> String {

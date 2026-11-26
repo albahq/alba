@@ -244,25 +244,8 @@ fn dispatch(
     action: Action,
     terminal_size: Size,
 ) {
-    // Refreshed before every action: `EnterCopy`'s anchor and copy
-    // mode's keyboard-driven scroll-follow both need to know the log
-    // pane's current content geometry, and this is the one place that
-    // reaches the terminal size to compute it.
-    let pane = ui::log_pane_content_area(state, terminal_size.width, terminal_size.height);
-    let (height, width) = pane
-        .map(|area| (area.height as usize, area.width as usize))
-        .unwrap_or((0, 0));
-    state.set_pane_size(height, width);
+    let (height, width) = size_pane(state, terminal_size);
     match action {
-        Action::Quit => {
-            // Quitting on a run in flight abandons it: its summary,
-            // whatever it ends up saying, is not a verdict on the
-            // sources. Outside a run the call is inert (`AppState`
-            // marks nothing when nothing is running), which is what
-            // leaves a finished run's code standing.
-            state.mark_user_cancelled();
-            state.should_quit = true;
-        }
         Action::CancelOrQuit => {
             if state.running() {
                 state.mark_user_cancelled();
@@ -304,6 +287,59 @@ fn dispatch(
             state.watch_enabled = !state.watch_enabled;
             let _ = commands.send(SessionCommand::SetWatch(state.watch_enabled));
         }
+        other => apply_sized(state, other, terminal_size, height, width),
+    }
+}
+
+/// Refreshed before every action: `EnterCopy`'s anchor and copy mode's
+/// keyboard-driven scroll-follow both need to know the log pane's
+/// current content geometry, and this is the one place that reaches the
+/// terminal size to compute it. Returns the pane's `(height, width)`.
+fn size_pane(state: &mut AppState, terminal_size: Size) -> (usize, usize) {
+    let pane = ui::log_pane_content_area(state, terminal_size.width, terminal_size.height);
+    let (height, width) = pane
+        .map(|area| (area.height as usize, area.width as usize))
+        .unwrap_or((0, 0));
+    state.set_pane_size(height, width);
+    (height, width)
+}
+
+/// The part of [`dispatch`] that needs no session: every action that
+/// only changes the state (selection, scrolling, modes, keys, the
+/// mouse), carried out exactly as the event loop does, pane sizing
+/// included. The actions that talk to the session (cancel, rerun,
+/// watch) are inert here. Public for the snapshot tests, which reach
+/// their screens through the same steps as a reader's keys.
+#[doc(hidden)]
+pub fn apply_action(state: &mut AppState, action: Action, terminal_size: Size) {
+    let (height, width) = size_pane(state, terminal_size);
+    apply_sized(state, action, terminal_size, height, width);
+}
+
+/// [`apply_action`] once the pane is sized to `height` x `width`.
+fn apply_sized(
+    state: &mut AppState,
+    action: Action,
+    terminal_size: Size,
+    height: usize,
+    width: usize,
+) {
+    match action {
+        Action::Quit => {
+            // Quitting on a run in flight abandons it: its summary,
+            // whatever it ends up saying, is not a verdict on the
+            // sources. Outside a run the call is inert (`AppState`
+            // marks nothing when nothing is running), which is what
+            // leaves a finished run's code standing.
+            state.mark_user_cancelled();
+            state.should_quit = true;
+        }
+        // These need the session; `dispatch` carries them out.
+        Action::CancelOrQuit
+        | Action::Rerun { .. }
+        | Action::RunSessionTarget
+        | Action::CancelRun
+        | Action::ToggleWatch => {}
         Action::SelectNext => state.select_next(),
         Action::SelectPrevious => state.select_previous(),
         Action::ScrollUp(rows) => {
