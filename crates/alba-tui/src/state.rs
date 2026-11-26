@@ -1065,14 +1065,23 @@ impl AppState {
         }
     }
 
-    /// Translates `current_line` into a `Paused` offset on the selected
-    /// beam's buffer, riding the log pane's existing Following/Paused
-    /// scrolling rather than inventing a second mechanism for search to
-    /// keep its current match on screen. No match (an empty query, or a
+    /// Keeps `current_line` on screen through the displayed buffer's
+    /// existing Following/Paused scrolling rather than a second
+    /// mechanism for search. No match (an empty query, or a
     /// query the buffer no longer contains) resumes `Following`: a
     /// search with nothing to show must not leave the pane pinned to a
     /// stale view.
     fn sync_search_scroll(&mut self, search: &SearchState) {
+        // With the pane's size known, the match is brought into view the
+        // way copy mode's cursor is: not at all when it is already on
+        // screen, otherwise at the nearest edge. Without it (no frame
+        // drawn yet), the match is pinned as the view's last line.
+        if self.pane_height > 0
+            && let Some(line) = search.current_line()
+        {
+            self.sync_copy_scroll(line);
+            return;
+        }
         let id = self.displayed_log_key();
         let Some(buffer) = self.logs.get_mut(&id) else {
             return;
@@ -2215,6 +2224,58 @@ mod tests {
             Some("ERROR here"),
             "the match is scrolled to the bottom of its view"
         );
+    }
+
+    /// With the pane's size known, a match already on screen leaves the
+    /// pane where it is: a short output stays whole and followed rather
+    /// than cut off above the match.
+    #[test]
+    fn a_match_already_in_view_does_not_scroll_the_pane() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "line one"), now);
+        state.apply(&output("build", "ERROR here"), now);
+        for index in 0..4 {
+            state.apply(&output("build", &format!("line {index}")), now);
+        }
+        state.set_pane_size(10, 80);
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+
+        assert_eq!(search_state(&state).current_line(), Some(1));
+        assert!(matches!(
+            state.logs.get("build").unwrap().scroll(),
+            crate::logs::Scroll::Following
+        ));
+    }
+
+    /// A match above the pane comes in at its top edge, the nearest one,
+    /// so the rows below it are filled with what follows it.
+    #[test]
+    fn a_match_above_the_pane_comes_in_at_its_top() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["build"], &[]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(&output("build", "ERROR here"), now);
+        for index in 0..50 {
+            state.apply(&output("build", &format!("line {index}")), now);
+        }
+        state.set_pane_size(10, 80);
+
+        state.enter_search();
+        for character in "error".chars() {
+            state.handle_modal_key(char_key(character));
+        }
+
+        let view = state.logs["build"].view(10, 80, StreamFilter::All);
+        assert_eq!(view.len(), 10);
+        assert_eq!(view[0].text, "ERROR here");
     }
 
     fn search_state(state: &AppState) -> &SearchState {
