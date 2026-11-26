@@ -49,14 +49,14 @@ impl Outcome {
     }
 }
 
-fn options(dir: &Path, force: bool) -> RunOptions {
+fn options(dir: &Path, bypass_cache: bool) -> RunOptions {
     RunOptions {
         jobs: 4,
         keep_going: false,
         params: Vec::new(),
         cache: Some(CacheOptions {
             dir: dir.join(".alba").join("cache"),
-            force,
+            bypass_cache,
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
@@ -592,7 +592,7 @@ beam gen {
 }
 
 #[tokio::test]
-async fn force_reruns_and_rewrites_the_manifest() {
+async fn bypassing_the_cache_reruns_and_rewrites_the_manifest() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "data.txt", "v1");
 
@@ -604,7 +604,7 @@ async fn force_reruns_and_rewrites_the_manifest() {
         FakeExecutor::new(),
     )
     .await;
-    let forced = run_once(
+    let uncached = run_once(
         GEN,
         "gen",
         dir.path(),
@@ -621,11 +621,11 @@ async fn force_reruns_and_rewrites_the_manifest() {
     )
     .await;
 
-    assert_eq!(forced.executed().len(), 1, "--force must execute");
-    assert!(forced.summary.cached.is_empty());
+    assert_eq!(uncached.executed().len(), 1, "--no-cache must execute");
+    assert!(uncached.summary.cached.is_empty());
     assert!(
         after.executed().is_empty(),
-        "the forced run must have rewritten the entry"
+        "the uncached run must have rewritten the entry"
     );
 }
 

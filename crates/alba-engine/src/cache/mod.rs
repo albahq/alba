@@ -12,10 +12,10 @@ pub(crate) use fingerprint::{BeamFacts, fingerprint, hash_file, static_contribut
 pub(crate) use store::{ALBA_VERSION, CacheStore, FORMAT_VERSION, Manifest, OutputFile};
 
 /// Caller-facing cache configuration: where the state lives and whether
-/// this run ignores it when reading. `force` still *writes*: a forced run
+/// this run ignores it when reading. `bypass_cache` still *writes*: such a run
 /// rewrites every successful beam's entry.
 #[derive(Debug, Clone)]
 pub struct CacheOptions {
     pub dir: PathBuf,
-    pub force: bool,
+    pub bypass_cache: bool,
 }

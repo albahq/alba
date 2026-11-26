@@ -200,6 +200,7 @@ Common to every subcommand:
 | `[PARAM]...` | Positional arguments bound, in order, to the parameters the beam declares (`beam deploy(target)` takes one). |
 | `--jobs <N>` | How many beams may run at once. At least 1; defaults to the machine's available parallelism. |
 | `--keep-going` | Keep going after a beam fails, instead of cancelling the beams that have not started. |
+| `--no-cache` | Ignore the cache when reading: run every beam, and rewrite the cache entries of the ones that succeed. `--force` is a deprecated spelling of this flag: it still works, and warns on stderr. See [Caching](#caching). |
 | `--output <STYLE>` | How text output is laid out: `interleaved` (every line as it happens, prefixed with the beam it came from) or `grouped` (each beam's output held back and printed as one block when it ends). Defaults to `interleaved` on a terminal and `grouped` otherwise. Ignored with `--log-format json`. |
 | `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line). Defaults to `text`. See [The JSON stream](#the-json-stream). |
 | `--watch` | Keep running: re-run the beam whenever the files its subgraph declares as `inputs` change, or a loaded Beamfile changes. Ctrl-C ends the session. See [Watch mode](#watch-mode). |
@@ -371,11 +372,12 @@ different: it names its file outright, ignored or not, so `inputs
 Affected runs cannot see such a file, though: git reports no change to
 a path it ignores.
 
-`alba run <beam> --force` ignores the cache on the way in: the beam runs
+`alba run <beam> --no-cache` ignores the cache on the way in: the beam runs
 regardless of what changed. If it succeeds, its result is written back to
-the cache for the next invocation to read; a forced run that fails leaves
-the previous entry untouched. Use it to force a rebuild without clearing
-history for every other beam.
+the cache for the next invocation to read; such a run that fails leaves
+the previous entry untouched. Use it to rebuild without clearing history
+for every other beam. `--force`, the flag's former name, is still accepted
+as a deprecated spelling and prints a warning on stderr.
 
 The cache itself lives on disk under `<beamfile directory>/.alba/cache`.
 It replays the logs of each beam's last successful run, so on unix the
@@ -442,7 +444,7 @@ On a terminal, this session starts inside the interactive interface (see
 text this section describes: the interface already lets `w` turn watching
 on or off mid-session, so `--watch` there only chooses the state it starts
 in. Everything below still describes the session itself: what counts as a
-change, what a broken Beamfile does to it, how `--force` and debouncing
+change, what a broken Beamfile does to it, how `--no-cache` and debouncing
 behave. It holds regardless of which front end is showing it; only the
 paragraphs about clearing the screen and the JSON stream are specific to
 the plain text renderers.
@@ -474,9 +476,9 @@ resumes on its own. While it sits there, the diagnostic is printed once
 rather than once per file change: it is reprinted only when a save actually
 changes the answer.
 
-`--force` only applies to the run the session starts with. Every run the
-watcher triggers afterward reads the cache normally; forcing those too
-would mean rerunning the whole subgraph on every keystroke, which defeats
+`--no-cache` only applies to the run the session starts with. Every run
+the watcher triggers afterward reads the cache normally; bypassing it there
+too would mean rerunning the whole subgraph on every keystroke, which defeats
 the point of having a cache at all.
 
 Changes are debounced for a built-in 200 ms before they trigger a run

@@ -45,7 +45,7 @@ fn options(dir: &Path) -> RunOptions {
         params: Vec::new(),
         cache: Some(CacheOptions {
             dir: dir.join(".alba").join("cache"),
-            force: false,
+            bypass_cache: false,
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),

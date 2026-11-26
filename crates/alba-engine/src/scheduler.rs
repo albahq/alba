@@ -415,7 +415,10 @@ async fn run_once(
         .cache
         .as_ref()
         .map(|options| Arc::new(CacheStore::new(options.dir.clone())));
-    let force = options.cache.as_ref().is_some_and(|options| options.force);
+    let bypass_cache = options
+        .cache
+        .as_ref()
+        .is_some_and(|options| options.bypass_cache);
     let ambient_env: Arc<HashMap<String, String>> =
         Arc::new(options.ambient_env.iter().cloned().collect());
 
@@ -473,7 +476,7 @@ async fn run_once(
             stop: stop.clone(),
             keep_going: options.keep_going,
             cache: cache.clone(),
-            force,
+            bypass_cache,
             ambient_env: Arc::clone(&ambient_env),
             extra_env: options.extra_env.clone(),
         };
@@ -678,7 +681,7 @@ struct BeamTask {
     /// Where cache entries live; `None` when caching is disabled.
     cache: Option<Arc<CacheStore>>,
     /// Ignore any stored entry when reading, but still write one.
-    force: bool,
+    bypass_cache: bool,
     /// What `env_inputs` read from: see [`RunOptions::ambient_env`].
     ambient_env: Arc<HashMap<String, String>>,
     /// The run's ambient environment, added to every command under the
@@ -950,7 +953,7 @@ async fn assess(
             .collect(),
         args: task.args.clone(),
         needs,
-        force: task.force,
+        bypass_cache: task.bypass_cache,
         executor: executor_label(&task.beam.executor),
         executor_identity,
     };
@@ -983,7 +986,7 @@ struct CacheableBeam {
     env_inputs: Vec<(String, Option<String>)>,
     args: Vec<String>,
     needs: Vec<String>,
-    force: bool,
+    bypass_cache: bool,
     executor: String,
     executor_identity: String,
 }
@@ -1037,7 +1040,7 @@ impl CacheableBeam {
             executor_identity: &self.executor_identity,
         });
 
-        let hit = (!self.force)
+        let hit = (!self.bypass_cache)
             .then(|| self.store.load(&self.id))
             .flatten()
             .filter(|manifest| manifest.fingerprint == fingerprint)

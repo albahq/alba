@@ -141,7 +141,7 @@ fn json_log_format_emits_one_json_object_per_line() {
 
 /// The whole cache loop through the real binary: a first run executes and
 /// stores, an unchanged second run is cached and replays the output, a
-/// changed input runs again, and `--force` bypasses the read side.
+/// changed input runs again, and `--no-cache` bypasses the read side.
 #[test]
 fn an_unchanged_run_is_cached_and_replays_its_output() {
     let dir = project("beam gen { inputs [\"data.txt\"] run \"echo generated\" }\n");
@@ -182,11 +182,112 @@ fn an_unchanged_run_is_cached_and_replays_its_output() {
         "a changed input must rerun:\n{third}"
     );
 
-    let forced = run(&["--force"]);
+    let uncached = run(&["--no-cache"]);
     assert!(
-        !forced.contains("cached"),
-        "--force must execute:\n{forced}"
+        !uncached.contains("cached"),
+        "--no-cache must execute:\n{uncached}"
     );
+}
+
+/// `--no-cache` still *writes*: the entry it rewrites serves the next
+/// ordinary run, and the flag itself is silent on stderr.
+#[test]
+fn no_cache_runs_every_beam_and_still_refreshes_the_cache() {
+    let dir = project("beam gen { inputs [\"data.txt\"] run \"echo generated\" }\n");
+    std::fs::write(dir.path().join("data.txt"), "v1").unwrap();
+    alba()
+        .current_dir(&dir)
+        .args(["run", "gen"])
+        .assert()
+        .success();
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "gen", "--no-cache"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stdout.contains("cached"),
+        "--no-cache must execute:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("deprecated"),
+        "--no-cache is the current spelling and must not warn:\n{stderr}"
+    );
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "gen"])
+        .assert()
+        .success();
+    let next = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        next.contains("cached"),
+        "the entry --no-cache rewrote must serve the next run:\n{next}"
+    );
+}
+
+/// `--force` is the deprecated spelling of `--no-cache`: it still bypasses
+/// the cache, says on stderr that it is deprecated and what replaces it,
+/// and stays out of `--help`.
+#[test]
+fn force_is_a_deprecated_alias_of_no_cache() {
+    let dir = project("beam gen { inputs [\"data.txt\"] run \"echo generated\" }\n");
+    std::fs::write(dir.path().join("data.txt"), "v1").unwrap();
+    alba()
+        .current_dir(&dir)
+        .args(["run", "gen"])
+        .assert()
+        .success();
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "gen", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stdout.contains("cached"),
+        "--force must still bypass the cache:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("warning: --force is deprecated; use --no-cache"),
+        "--force must warn on stderr:\n{stderr}"
+    );
+
+    let help = alba().args(["run", "--help"]).assert().success();
+    let help = String::from_utf8(help.get_output().stdout.clone()).unwrap();
+    assert!(
+        help.contains("--no-cache"),
+        "--no-cache must be documented:\n{help}"
+    );
+    assert!(
+        !help.contains("--force"),
+        "--force must stay hidden:\n{help}"
+    );
+}
+
+/// The deprecation warning lands on stderr only, so a `--log-format json`
+/// stream on stdout stays one JSON object per line.
+#[test]
+fn the_force_warning_keeps_the_json_stream_clean() {
+    let dir = project("beam gen { run \"echo generated\" }\n");
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "gen", "--force", "--log-format", "json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    for line in stdout.lines() {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|error| panic!("not JSON ({error}): {line}"));
+    }
+    assert!(stderr.contains("warning: --force is deprecated; use --no-cache"));
 }
 
 /// The JSON stream's cache contract: a `beam_cached` event, and replayed

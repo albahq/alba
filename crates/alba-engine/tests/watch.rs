@@ -137,8 +137,8 @@ enum ObservedError {
     Run,
 }
 
-fn start(beamfile: &str, target: &str, executor: FakeExecutor, force: bool) -> Session {
-    start_reporting_to(beamfile, target, executor, force, |_| unrendered())
+fn start(beamfile: &str, target: &str, executor: FakeExecutor, bypass_cache: bool) -> Session {
+    start_reporting_to(beamfile, target, executor, bypass_cache, |_| unrendered())
 }
 
 /// The answer of a `render_error` callback whose text nobody reads.
@@ -175,10 +175,18 @@ fn start_reporting_to(
     beamfile: &str,
     target: &str,
     executor: FakeExecutor,
-    force: bool,
+    bypass_cache: bool,
     render_error: impl FnMut(&SessionError) -> RenderedError + Send + 'static,
 ) -> Session {
-    spawn(beamfile, target, executor, force, true, None, render_error)
+    spawn(
+        beamfile,
+        target,
+        executor,
+        bypass_cache,
+        true,
+        None,
+        render_error,
+    )
 }
 
 /// A session a driver can talk to: the same scripted project, plus the
@@ -206,7 +214,7 @@ fn spawn(
     beamfile: &str,
     target: &str,
     executor: FakeExecutor,
-    force: bool,
+    bypass_cache: bool,
     watch_enabled: bool,
     commands: Option<UnboundedReceiver<SessionCommand>>,
     mut render_error: impl FnMut(&SessionError) -> RenderedError + Send + 'static,
@@ -234,7 +242,7 @@ fn spawn(
         params: Vec::new(),
         cache: Some(CacheOptions {
             dir: dir.path().join(".alba").join("cache"),
-            force,
+            bypass_cache,
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
@@ -327,10 +335,10 @@ fn is_broken(event: &RunEvent) -> bool {
     matches!(event, RunEvent::ProjectBroken { .. })
 }
 
-fn run_beam(id: &str, force: bool) -> SessionCommand {
+fn run_beam(id: &str, bypass_cache: bool) -> SessionCommand {
     SessionCommand::RunBeam {
         id: BeamId(id.to_string()),
-        force,
+        bypass_cache,
     }
 }
 
@@ -585,17 +593,17 @@ async fn a_rescan_triggers_a_run_with_no_paths() {
     session.finish().await;
 }
 
-/// `--force` empties the cache's read side for the *initial* run only: a
+/// `--no-cache` empties the cache's read side for the *initial* run only: a
 /// triggered run with unchanged inputs comes back cached.
 #[tokio::test]
-async fn force_applies_to_the_initial_run_only() {
+async fn bypassing_the_cache_applies_to_the_initial_run_only() {
     let mut session = start(TWO_BEAMS, "docs", FakeExecutor::new(), true);
     session.event_matching(is_waiting).await;
     let first_calls = session.executor.calls().len();
     assert_eq!(first_calls, 2);
 
     // Rewrite an input with identical content: relevant (it changed on
-    // disk), but fingerprint-identical — cached unless force leaked.
+    // disk), but fingerprint-identical — cached unless bypass_cache leaked.
     let changed = session.touch("src/main.rs", "fn main() {}");
     session.send(vec![changed]);
     session.event_matching(is_triggered).await;
@@ -1252,10 +1260,10 @@ async fn a_dropped_command_channel_ends_the_session() {
     assert!(matches!(session.ended().await, WatchExit::Interrupted));
 }
 
-/// `force` is the CLI's `--force` scoped to one command: it empties the
-/// cache's read side for that run and for no other.
+/// `bypass_cache` is the CLI's `--no-cache` scoped to one command: it
+/// empties the cache's read side for that run and for no other.
 #[tokio::test]
-async fn a_forced_run_beam_command_ignores_the_cache() {
+async fn a_run_beam_command_bypassing_the_cache_ignores_it() {
     let build = vec![BeamId("build".to_string())];
     let (mut session, commands) = start_commandable(ONE_BEAM, "build", FakeExecutor::new(), false);
     let summary = finished_summary(session.event_matching(is_run_finished).await);
@@ -1267,7 +1275,10 @@ async fn a_forced_run_beam_command_ignores_the_cache() {
 
     commands.send(run_beam("build", true)).unwrap();
     let summary = finished_summary(session.event_matching(is_run_finished).await);
-    assert_eq!(summary.succeeded, build, "force empties the read side");
+    assert_eq!(
+        summary.succeeded, build,
+        "bypass_cache empties the read side"
+    );
 
     commands.send(run_beam("build", false)).unwrap();
     let summary = finished_summary(session.event_matching(is_run_finished).await);

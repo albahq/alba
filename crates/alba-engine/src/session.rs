@@ -78,10 +78,10 @@ use crate::watch::{
 #[derive(Debug)]
 pub enum SessionCommand {
     /// Run `id` and its subgraph now. Retargets the session: subsequent
-    /// watch triggers re-run `id` too. `force` empties the cache's read
+    /// watch triggers re-run `id` too. `bypass_cache` empties the cache's read
     /// side for that one run. A run already in flight is cancelled first —
     /// same rule as a watch trigger, latest request wins.
-    RunBeam { id: BeamId, force: bool },
+    RunBeam { id: BeamId, bypass_cache: bool },
     /// Cancel the run in flight; the session stays alive, waiting.
     CancelRun,
     /// Turn filesystem watching on or off. Does not touch a run in flight;
@@ -167,11 +167,14 @@ async fn drive(
     render_error: &mut (dyn FnMut(&SessionError) -> RenderedError + Send),
 ) -> WatchExit {
     let root = beamfile_dir(beamfile);
-    // `--force` empties the cache's read side for the initial run only:
+    // `--no-cache` empties the cache's read side for the initial run only:
     // applying it to every triggered run would re-run the whole subgraph
     // on every keystroke, which is exactly what the cache is here to
     // prevent.
-    let mut force_next = options.cache.as_ref().is_some_and(|cache| cache.force);
+    let mut bypass_cache_next = options
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.bypass_cache);
 
     loop {
         // Rebuilt for each run: the set caches the files its patterns
@@ -212,8 +215,9 @@ async fn drive(
                     } => {
                         (project, sources) = (fresh_project, fresh_sources);
                         match commanded {
-                            Some((id, force)) => {
-                                (selection, force_next) = (Selection::Beam(id), force);
+                            Some((id, bypass_cache)) => {
+                                (selection, bypass_cache_next) =
+                                    (Selection::Beam(id), bypass_cache);
                             }
                             None => announce_recovery(&events),
                         }
@@ -260,8 +264,9 @@ async fn drive(
                     } => {
                         (project, sources) = (fresh_project, fresh_sources);
                         match commanded {
-                            Some((id, force)) => {
-                                (selection, force_next) = (Selection::Beam(id), force);
+                            Some((id, bypass_cache)) => {
+                                (selection, bypass_cache_next) =
+                                    (Selection::Beam(id), bypass_cache);
                             }
                             None => announce_recovery(&events),
                         }
@@ -276,9 +281,9 @@ async fn drive(
         let run_cancel = cancel.child_token();
         let mut run_options = options.clone();
         if let Some(cache) = run_options.cache.as_mut() {
-            cache.force = force_next;
+            cache.bypass_cache = bypass_cache_next;
         }
-        force_next = false;
+        bypass_cache_next = false;
         // From this run's own project and sources: a reload may have moved
         // or rewritten any beam.
         run_options.definitions = alba_core::definitions(&project, &sources, &root);
@@ -305,8 +310,8 @@ async fn drive(
                 tokio::select! {
                     result = &mut run_future => break result,
                     command = next_command(&mut commands) => match command {
-                        SessionCommand::RunBeam { id, force } => {
-                            commanded = Some((id, force));
+                        SessionCommand::RunBeam { id, bypass_cache } => {
+                            commanded = Some((id, bypass_cache));
                             run_cancel.cancel();
                         }
                         SessionCommand::CancelRun => run_cancel.cancel(),
@@ -358,8 +363,8 @@ async fn drive(
         // A command that arrived during the run has already decided the
         // next one, so there is nothing left to wait for: retarget and go.
         let commanded_run = commanded.is_some();
-        if let Some((id, force)) = commanded {
-            (selection, force_next) = (Selection::Beam(id), force);
+        if let Some((id, bypass_cache)) = commanded {
+            (selection, bypass_cache_next) = (Selection::Beam(id), bypass_cache);
         }
 
         let trigger = match pending.take() {
@@ -375,8 +380,8 @@ async fn drive(
                     tokio::select! {
                         () = cancel.cancelled() => return WatchExit::Interrupted,
                         command = next_command(&mut commands) => match command {
-                            SessionCommand::RunBeam { id, force } => {
-                                (selection, force_next) = (Selection::Beam(id), force);
+                            SessionCommand::RunBeam { id, bypass_cache } => {
+                                (selection, bypass_cache_next) = (Selection::Beam(id), bypass_cache);
                                 break None;
                             }
                             // Nothing is in flight to cancel.
@@ -451,8 +456,9 @@ async fn drive(
                         } => {
                             (project, sources) = (fresh_project, fresh_sources);
                             match commanded {
-                                Some((id, force)) => {
-                                    (selection, force_next) = (Selection::Beam(id), force);
+                                Some((id, bypass_cache)) => {
+                                    (selection, bypass_cache_next) =
+                                        (Selection::Beam(id), bypass_cache);
                                 }
                                 None => announce_recovery(&events),
                             }
@@ -562,7 +568,7 @@ fn announce_recovery(events: &UnboundedSender<RunEvent>) {
 enum Reloaded {
     /// A project the session can work from again, and the sources it came
     /// from. `commanded` is set when a `RunBeam` is what ended the park:
-    /// the beam to run, and whether to force it.
+    /// the beam to run, and whether to bypass the cache.
     Project {
         project: Project,
         sources: SourceMap,
@@ -646,14 +652,14 @@ async fn park_until_the_project_changes(
                 // on a renamed beam is waiting for exactly that — so a load
                 // that comes back byte-for-byte what was rejected is still
                 // news here. One that fails again simply re-parks.
-                SessionCommand::RunBeam { id, force } => {
+                SessionCommand::RunBeam { id, bypass_cache } => {
                     if let Some((project, sources)) =
                         retry_load(beamfile, &mut rejected, events, render_error)
                     {
                         return Reloaded::Project {
                             project,
                             sources,
-                            commanded: Some((id, force)),
+                            commanded: Some((id, bypass_cache)),
                         };
                     }
                 }

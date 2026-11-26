@@ -267,7 +267,7 @@ fn dispatch(
                 state.quit_via_interrupt();
             }
         }
-        Action::Rerun { force } => {
+        Action::Rerun { bypass_cache } => {
             if let Some(beam) = state.selected_beam() {
                 let id = BeamId(beam.id.clone());
                 // The session cancels the run in flight for us; the state
@@ -275,7 +275,7 @@ fn dispatch(
                 // when no run is in flight, so re-running from an idle
                 // session does not disown the run that just finished.
                 state.mark_user_cancelled();
-                let _ = commands.send(SessionCommand::RunBeam { id, force });
+                let _ = commands.send(SessionCommand::RunBeam { id, bypass_cache });
             }
         }
         Action::RunSessionTarget => {
@@ -284,11 +284,14 @@ fn dispatch(
             // good): re-running the target the session was started for
             // puts its whole graph back in the tree, and makes it what
             // later watch triggers re-run again. Same abandonment rule
-            // as `r`, and never forced — the way back is not a request
-            // to rebuild everything from scratch.
+            // as `r`, and never bypasses the cache — the way back is not
+            // a request to rebuild everything from scratch.
             let id = BeamId(state.session_target.clone());
             state.mark_user_cancelled();
-            let _ = commands.send(SessionCommand::RunBeam { id, force: false });
+            let _ = commands.send(SessionCommand::RunBeam {
+                id,
+                bypass_cache: false,
+            });
         }
         Action::CancelRun => {
             if state.running() {
@@ -1211,20 +1214,27 @@ mod tests {
         dispatch(
             &mut state,
             &commands,
-            Action::Rerun { force: false },
+            Action::Rerun {
+                bypass_cache: false,
+            },
             size(),
         );
-        dispatch(&mut state, &commands, Action::Rerun { force: true }, size());
+        dispatch(
+            &mut state,
+            &commands,
+            Action::Rerun { bypass_cache: true },
+            size(),
+        );
 
         match &sent(&mut receiver)[..] {
             [
                 SessionCommand::RunBeam {
                     id: first,
-                    force: false,
+                    bypass_cache: false,
                 },
                 SessionCommand::RunBeam {
                     id: second,
-                    force: true,
+                    bypass_cache: true,
                 },
             ] => {
                 assert_eq!(first, &id("build"));
@@ -1244,7 +1254,9 @@ mod tests {
         dispatch(
             &mut state,
             &commands,
-            Action::Rerun { force: false },
+            Action::Rerun {
+                bypass_cache: false,
+            },
             size(),
         );
 
@@ -1261,7 +1273,9 @@ mod tests {
         dispatch(
             &mut state,
             &commands,
-            Action::Rerun { force: false },
+            Action::Rerun {
+                bypass_cache: false,
+            },
             size(),
         );
 
@@ -1356,9 +1370,17 @@ mod tests {
         dispatch(&mut state, &commands, Action::RunSessionTarget, size());
 
         match &sent(&mut receiver)[..] {
-            [SessionCommand::RunBeam { id: asked, force }] => {
+            [
+                SessionCommand::RunBeam {
+                    id: asked,
+                    bypass_cache,
+                },
+            ] => {
                 assert_eq!(asked, &id("build"));
-                assert!(!force, "the way back is not a request to force");
+                assert!(
+                    !bypass_cache,
+                    "the way back is not a request to bypass the cache"
+                );
             }
             other => panic!("expected one RunBeam for the session's target, got {other:?}"),
         }
