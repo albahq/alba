@@ -330,6 +330,46 @@ fn the_replay_keeps_colour_on_a_terminal_and_drops_it_under_no_color() {
     );
 }
 
+/// A beam whose template does not render at run time: `env(NAME)`
+/// without a default is resolved that late.
+const BROKEN: &str =
+    "version \"1\"\n\nbeam broken {\n  run \"echo {env('ALBA_MISSING_VAR_XYZ')}\"\n}\n";
+
+/// A beam that failed before running anything, on a template that does
+/// not render, is replayed with the reason, the very line the headless
+/// renderer prints for it, rather than as a bare header.
+#[test]
+fn the_replay_keeps_the_error_that_failed_a_beam() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("Beamfile"), BROKEN).unwrap();
+    let headless = assert_cmd::Command::cargo_bin("alba")
+        .unwrap()
+        .current_dir(project.path())
+        .args(["run", "broken"])
+        .env("NO_COLOR", "1")
+        .env_remove("ALBA_MISSING_VAR_XYZ")
+        .output()
+        .unwrap();
+    let headless = String::from_utf8_lossy(&headless.stderr).to_string()
+        + &String::from_utf8_lossy(&headless.stdout);
+    let reason = headless
+        .lines()
+        .find(|line| line.contains("ALBA_MISSING_VAR_XYZ"))
+        .unwrap_or_else(|| panic!("the headless run states no reason: {headless:?}"))
+        .to_string();
+
+    let (_, after_quit, status) = drive(BROKEN, "broken", &[("NO_COLOR", "1")]);
+
+    assert_eq!(status.exit_code(), 1);
+    let replay = &after_quit[after_quit
+        .find("── broken ──")
+        .unwrap_or_else(|| panic!("no replay header; got after q: {after_quit:?}"))..];
+    assert!(
+        replay.contains(&format!("{reason}\r\n")) || replay.contains(&format!("{reason}\n")),
+        "the reason {reason:?} is not replayed; got: {replay:?}"
+    );
+}
+
 /// A `SIGTERM` (a CI cancellation, `docker stop`) or `SIGHUP` (the
 /// terminal closing) reaches the interface too, which reads Ctrl-C as a
 /// key but cannot read these: it must stop the run's commands, restore the

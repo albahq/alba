@@ -22,7 +22,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
-use alba_engine::{RunEvent, RunSummary, SessionCommand};
+use alba_engine::{NoticeLevel, RunEvent, RunSummary, SessionCommand};
 use crossterm::event::{MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::layout::Size;
@@ -78,7 +78,8 @@ pub struct TuiOutcome {
     pub last_run_code: Option<i32>,
     pub last_summary: Option<RunSummary>,
     /// The last summary's failed beams, in its order, for the CLI's exit
-    /// replay.
+    /// replay: each one's process output and error notices, never the
+    /// command echo, the info notices or the end line.
     pub failed_logs: Vec<FailedLog>,
 }
 
@@ -490,6 +491,13 @@ pub fn outcome(state: &AppState) -> TuiOutcome {
     }
 }
 
+/// The lines the exit replay prints for `beam`: what its processes wrote,
+/// and the error notices that say why it failed (a template that does not
+/// render, an executor that cannot open, a command that cannot spawn).
+/// Those were stderr lines before Alba had notices, and the headless
+/// renderers still print them, so the replay keeps them where they were.
+/// The command echo, the info notices and the end line are the
+/// interface's own decoration and stay behind with it.
 fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
     state
         .logs
@@ -497,7 +505,12 @@ fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
         .map(|buffer| {
             buffer
                 .lines()
-                .filter(|line| matches!(line.kind, LineKind::Output(_)))
+                .filter(|line| {
+                    matches!(
+                        line.kind,
+                        LineKind::Output(_) | LineKind::Notice(NoticeLevel::Error)
+                    )
+                })
                 .map(|line| ReplayLine {
                     raw: line.raw.clone(),
                     text: line.text.clone(),
@@ -658,21 +671,17 @@ mod tests {
         );
     }
 
-    /// The replay is for the terminal the TUI just left: only what the
-    /// processes wrote, never Alba's own echo, notices or end lines.
+    /// The replay is for the terminal the TUI just left: what the
+    /// processes wrote, and the error notices that say why a beam failed
+    /// (a template that does not render, a command that cannot spawn),
+    /// which were stderr lines before notices existed. Never Alba's echo,
+    /// its info notices or its end lines.
     #[test]
-    fn the_replay_after_quitting_holds_only_process_output() {
+    fn the_replay_after_quitting_holds_process_output_and_error_notices() {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started(&["bad"]), now);
         state.apply(&RunEvent::BeamStarted { id: id("bad") }, now);
-        state.apply(
-            &RunEvent::CommandStarted {
-                id: id("bad"),
-                command: "make".to_string(),
-            },
-            now,
-        );
         state.apply(
             &RunEvent::BeamNotice {
                 id: id("bad"),
@@ -681,13 +690,35 @@ mod tests {
             },
             now,
         );
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("bad"),
+                command: "make".to_string(),
+            },
+            now,
+        );
         state.apply(&output("bad", "boom"), now);
+        state.apply(
+            &RunEvent::BeamNotice {
+                id: id("bad"),
+                level: alba_engine::NoticeLevel::Error,
+                text: "failed to spawn\nmake: not found".to_string(),
+            },
+            now,
+        );
         state.apply(&finished("bad", BeamStatus::Failed { exit_code: 2 }), now);
         state.apply(&summary_event(&["bad"], &[]), now);
 
         assert_eq!(
             outcome(&state).failed_logs,
-            vec![failed_log("bad", vec![replay_line("boom")])]
+            vec![failed_log(
+                "bad",
+                vec![
+                    replay_line("boom"),
+                    replay_line("failed to spawn"),
+                    replay_line("make: not found"),
+                ]
+            )]
         );
     }
 
