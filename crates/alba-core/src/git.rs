@@ -171,9 +171,15 @@ pub fn repository_root(cwd: &Path) -> Result<PathBuf, GitError> {
         .map_err(|error| GitError(format!("cannot canonicalize repository root: {error}")))
 }
 
+/// The full SHA `HEAD` points at, without the rest of [`head`]: no
+/// working-tree scan.
+pub fn head_sha(cwd: &Path) -> Result<String, GitError> {
+    git(cwd, &["rev-parse", "HEAD"])
+}
+
 pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
     let branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let sha = git(cwd, &["rev-parse", "HEAD"])?;
+    let sha = head_sha(cwd)?;
     let short_sha = git(cwd, &["rev-parse", "--short", "HEAD"])?;
     let status = git(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
     Ok(GitHead {

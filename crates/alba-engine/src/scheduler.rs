@@ -125,7 +125,8 @@ impl RunOptions {
     /// a reference git cannot resolve (the run goes full, saying why), or
     /// a `git` block git could not evaluate. The one place a run's
     /// reference becomes its change set, for a single run as for every
-    /// run of a session.
+    /// run of a session. Reads `self.sources` for the project's Beamfiles,
+    /// so set them to `project`'s first.
     pub fn diff_from(&mut self, project: &Project, root: &Path, source: &ReferenceSource) {
         self.changes = None;
         self.unresolved_base = false;
@@ -139,7 +140,7 @@ impl RunOptions {
         let Some(reference) = source.reference(project) else {
             return;
         };
-        match resolve_changes(root, reference) {
+        match resolve_changes(root, &self.sources, reference) {
             Ok(changes) => self.changes = Some(changes),
             Err(error) => {
                 self.unresolved_base = true;

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use alba_core::git::{changed_files, changed_files_since, head, merge_base};
+use alba_core::git::{changed_files, changed_files_since, head_sha, merge_base};
 use alba_core::{
     Beam, BeamId, ChangeMode, FullReason, Project, SourceId, SourceMap, execution_subgraph,
 };
@@ -46,15 +46,39 @@ impl Selection {
 /// Every beam affected by what changed since `reference`, in project
 /// order: the beams whose `inputs` match a changed path or whose Beamfile
 /// changed, closed over their dependents. `root` is the project root git
-/// runs from; changes anywhere in its repository count.
+/// runs from; changes anywhere in its repository count, except Alba's own
+/// state (see [`without_alba_state`]).
 pub fn affected(
     project: &Project,
     sources: &SourceMap,
     root: &Path,
     reference: &str,
 ) -> Result<Vec<BeamId>, EngineError> {
-    let changed = changed_files(root, reference)?;
+    let changed = without_alba_state(sources, changed_files(root, reference)?);
     Ok(affected_beams(project, sources, &changed))
+}
+
+/// `changed` without what Alba itself writes: everything under the
+/// `.alba/` directory beside each of the project's Beamfiles, where the
+/// cache and the installed hooks live (the cache directory is always
+/// `.alba/cache` beside the root Beamfile). Unless the project ignores
+/// it, git reports that directory as untracked work, and a run would
+/// then see its own previous run as a change: a beam reading every file
+/// would be affected by its cache, and the target branch would never
+/// look clean.
+///
+/// Compared in the same absolute, lexically normal form as
+/// [`beamfiles_changed`], without touching the disk.
+fn without_alba_state(sources: &SourceMap, mut changed: Vec<PathBuf>) -> Vec<PathBuf> {
+    let state: Vec<PathBuf> = sources
+        .paths()
+        .filter_map(|path| {
+            let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            Some(alba_core::lexically_normal(path.parent()?).join(".alba"))
+        })
+        .collect();
+    changed.retain(|path| !state.iter().any(|dir| path.starts_with(dir)));
+    changed
 }
 
 /// [`affected`] narrowed to one run's targets. `Beam` is validated here
@@ -156,12 +180,14 @@ pub struct RunChanges {
     pub reference: String,
     /// The full SHA of the merge base of `reference` and `HEAD`.
     pub merge_base: String,
-    /// The merge base is `HEAD` and the working tree is clean: the run is
-    /// on the target branch itself, with nothing of its own to narrow to.
+    /// The merge base is `HEAD` and the working tree is clean, Alba's own
+    /// state aside: the run is on the target branch itself, with nothing
+    /// of its own to narrow to.
     pub on_target_branch: bool,
     /// Every changed path of the repository since the merge base,
-    /// untracked ones included, absolute and lexically normal, in the
-    /// form the beams' directories are in (see [`resolve_changes`]).
+    /// untracked ones included and Alba's own state left out, absolute
+    /// and lexically normal, in the form the beams' directories are in
+    /// (see [`resolve_changes`]).
     pub changed: Arc<Vec<PathBuf>>,
 }
 
@@ -171,18 +197,28 @@ pub struct RunChanges {
 /// directories to it: the changed paths are joined onto it as given,
 /// never onto a canonicalized form, so they compare equal to
 /// `beam.dir`-anchored patterns even where the temporary directory is a
-/// symbolic link (`/var` and `/private/var` on macOS).
+/// symbolic link (`/var` and `/private/var` on macOS). `sources` names
+/// the project's Beamfiles, whose `.alba/` directories are left out of
+/// the change set (see [`without_alba_state`]).
+///
+/// The tree counts as clean when that change set is empty: with the
+/// merge base at `HEAD`, it is exactly the uncommitted work, so Alba's
+/// cache from a previous run never makes the target branch look edited.
 ///
 /// Any git failure is returned: the caller decides whether it is a
 /// warning and a full run (a declared `base`) or an error (an explicit
 /// `--affected <ref>`).
-pub fn resolve_changes(root: &Path, reference: &str) -> Result<RunChanges, EngineError> {
+pub fn resolve_changes(
+    root: &Path,
+    sources: &SourceMap,
+    reference: &str,
+) -> Result<RunChanges, EngineError> {
     let merge_base = merge_base(root, reference)?;
-    let changed = changed_files_since(root, &merge_base)?;
-    let head = head(root)?;
+    let changed = without_alba_state(sources, changed_files_since(root, &merge_base)?);
+    let head = head_sha(root)?;
     Ok(RunChanges {
         reference: reference.to_string(),
-        on_target_branch: head.sha == merge_base && !head.dirty,
+        on_target_branch: head == merge_base && changed.is_empty(),
         merge_base,
         changed: Arc::new(changed),
     })

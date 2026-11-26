@@ -199,8 +199,8 @@ fn run_affected_outside_a_repository_exits_2() {
 
 /// A project declaring `main` as its base, committed on `main` and checked
 /// out on a fresh `feature` branch: the Beamfile itself is part of the
-/// merge base, so it never forces full mode, and `.alba/` is ignored so
-/// the cache directory is no untracked change.
+/// merge base, so it never forces full mode. Nothing ignores `.alba/`:
+/// the cache Alba writes inside the tree is no change of the branch.
 const BASED: &str = "\
 git { base 'main' }
 beam lint { inputs [\"src/**\"] run \"echo files: {git.changes('src/**')}\" }
@@ -219,7 +219,6 @@ fn based_repository(beamfile: &str) -> tempfile::TempDir {
         &["config", "core.excludesFile", ".git/no-global-excludes"],
     );
     std::fs::write(dir.path().join("Beamfile"), beamfile).unwrap();
-    std::fs::write(dir.path().join(".gitignore"), ".alba/\n").unwrap();
     for file in ["src/a", "src/b", "docs/a"] {
         let path = dir.path().join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -612,4 +611,102 @@ fn an_unchanged_beam_reads_unchanged_in_both_text_layouts() {
         .assert()
         .success()
         .stdout(predicates::str::contains("○ unchanged"));
+}
+
+/// A repository on `main` declaring `main` as its base, with nothing
+/// ignoring `.alba/`: the cache Alba writes beside the Beamfile is an
+/// untracked directory git reports.
+fn target_branch_repository(beamfile: &str, files: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
+    std::fs::write(dir.path().join("Beamfile"), beamfile).unwrap();
+    for file in files {
+        let path = dir.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "v1").unwrap();
+    }
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+    dir
+}
+
+/// Alba's own cache, untracked inside the repository, is not the
+/// branch's work: after a first run on the target branch, a commit that
+/// changes an input still finds the tree clean, so the next run is full
+/// and runs the beam instead of ending it `unchanged`.
+#[test]
+fn the_cache_inside_the_repository_keeps_the_target_branch_full() {
+    let dir = target_branch_repository(
+        "git { base 'main' }\n\
+         beam lint { inputs [\"src/**/*.php\"] run \"echo files: {git.changes('src/**/*.php')}\" }\n",
+        &["src/a.php"],
+    );
+    alba()
+        .current_dir(&dir)
+        .args(["run", "lint"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("files: src\n"));
+    assert!(dir.path().join(".alba/cache").is_dir());
+
+    std::fs::write(dir.path().join("src/a.php"), "v2").unwrap();
+    // Only the input: `git add -A` would commit the cache and clean the
+    // tree by accident.
+    git(dir.path(), &["add", "src/a.php"]);
+    git(dir.path(), &["commit", "-q", "-m", "change"]);
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "lint", "--log-format", "json"])
+        .assert()
+        .success();
+    let events = json_lines(&stdout_of(&assert));
+    let finished = events
+        .iter()
+        .find(|event| event["event"] == "beam_finished" && event["beam"] == "lint")
+        .unwrap();
+    assert_eq!(finished["status"], "succeeded", "{finished}");
+    let started = events
+        .iter()
+        .find(|event| event["event"] == "beam_started" && event["beam"] == "lint")
+        .unwrap();
+    assert_eq!(started["mode"], "full", "{started}");
+    assert_eq!(started["full_reason"], "on_target_branch", "{started}");
+}
+
+/// The affected selection ignores Alba's own state the same way: a beam
+/// reading every file of the project is not affected by the cache its
+/// own run wrote.
+#[test]
+fn the_cache_inside_the_repository_affects_nothing() {
+    let dir = target_branch_repository(
+        "beam all { inputs [\"**\"] run \"echo ran-all\" }\n",
+        &["src/a"],
+    );
+    alba()
+        .current_dir(&dir)
+        .args(["run", "all"])
+        .assert()
+        .success();
+    assert!(dir.path().join(".alba/cache").is_dir());
+
+    alba()
+        .current_dir(&dir)
+        .args(["affected", "HEAD"])
+        .assert()
+        .success()
+        .stdout("");
+    alba()
+        .current_dir(&dir)
+        .args(["run", "--affected", "HEAD"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("nothing affected by HEAD"));
 }

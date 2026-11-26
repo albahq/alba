@@ -164,7 +164,7 @@ async fn run_incremental(dir: &Path, target: &str) -> Outcome {
         .base
         .clone()
         .expect("the Beamfile declares a base");
-    let changes = resolve_changes(dir, &reference).expect("the base resolves");
+    let changes = resolve_changes(dir, &sources, &reference).expect("the base resolves");
     run_with(&project, target, options(Some(changes), false, sources)).await
 }
 
@@ -545,7 +545,8 @@ async fn unresolved_base_runs_full_with_a_warning() {
         ],
     );
 
-    let error = resolve_changes(&clone, "origin/main")
+    let (project, sources) = load(&clone);
+    let error = resolve_changes(&clone, &sources, "origin/main")
         .expect_err("a merge base the shallow clone does not hold cannot resolve");
     let message = error.to_string();
     assert!(
@@ -554,7 +555,6 @@ async fn unresolved_base_runs_full_with_a_warning() {
     );
     assert!(message.contains("shallow"), "says why: {message}");
 
-    let (project, sources) = load(&clone);
     let outcome = run_with(&project, "phpcs", options(None, true, sources)).await;
 
     assert_eq!(outcome.stdout("phpcs"), ["src"]);
@@ -570,7 +570,8 @@ async fn unresolved_base_runs_full_with_a_warning() {
 async fn an_unknown_reference_cannot_resolve() {
     let dir = repository(PHPCS);
 
-    let error = resolve_changes(dir.path(), "origin/develop")
+    let (_, sources) = load(dir.path());
+    let error = resolve_changes(dir.path(), &sources, "origin/develop")
         .expect_err("a reference the repository does not have cannot resolve");
 
     assert!(

@@ -1791,12 +1791,10 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A repository whose `feature` branch forked from `main`, holding the
-/// `PHPCS` Beamfile and two PHP sources. Its cache lives outside it, in
-/// `cache`: an untracked cache directory inside the tree would count as a
-/// change.
-fn feature_branch() -> (tempfile::TempDir, tempfile::TempDir) {
+/// `PHPCS` Beamfile and two PHP sources. Nothing ignores `.alba/`: the
+/// cache lives inside the tree, untracked, and is no change of its own.
+fn feature_branch() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let cache = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(dir.path(), &["config", "user.email", "alba@example.com"]);
     git(dir.path(), &["config", "user.name", "Alba"]);
@@ -1813,19 +1811,19 @@ fn feature_branch() -> (tempfile::TempDir, tempfile::TempDir) {
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
     git(dir.path(), &["checkout", "-q", "-b", "feature"]);
-    (dir, cache)
+    dir
 }
 
-/// Runs `phpcs` with a cache in `cache`, against `main` when `incremental`
-/// and with no reference otherwise.
-async fn run_phpcs(dir: &Path, cache: &Path, incremental: bool) -> Outcome {
+/// Runs `phpcs` with its cache in `dir`'s `.alba/cache`, against `main`
+/// when `incremental` and with no reference otherwise.
+async fn run_phpcs(dir: &Path, incremental: bool) -> Outcome {
     let (project, sources) =
         alba_core::load_project(&dir.join("Beamfile")).expect("the test Beamfile must load");
     let executor = Arc::new(FakeExecutor::new());
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut options = options(cache, false);
-    options.changes =
-        incremental.then(|| alba_engine::resolve_changes(dir, "main").expect("`main` resolves"));
+    let mut options = options(dir, false);
+    options.changes = incremental
+        .then(|| alba_engine::resolve_changes(dir, &sources, "main").expect("`main` resolves"));
     options.sources = sources;
     let summary = run(
         &project,
@@ -1853,32 +1851,32 @@ async fn run_phpcs(dir: &Path, cache: &Path, incremental: bool) -> Outcome {
 /// command, so the two runs never share a fingerprint.
 #[tokio::test]
 async fn an_incremental_pass_does_not_answer_a_full_run() {
-    let (dir, cache) = feature_branch();
+    let dir = feature_branch();
     write(dir.path(), "src/A.php", "<?php // a2");
 
-    let incremental = run_phpcs(dir.path(), cache.path(), true).await;
+    let incremental = run_phpcs(dir.path(), true).await;
     assert_eq!(incremental.executed(), ["echo src/A.php"]);
     assert_eq!(ids(&incremental.summary.succeeded), ["phpcs"]);
 
-    let full = run_phpcs(dir.path(), cache.path(), false).await;
+    let full = run_phpcs(dir.path(), false).await;
     assert_eq!(full.executed(), ["echo src"], "the full run must execute");
     assert!(full.summary.cached.is_empty());
 
     // Each mode still answers itself from the cache.
-    let again = run_phpcs(dir.path(), cache.path(), false).await;
+    let again = run_phpcs(dir.path(), false).await;
     assert_eq!(ids(&again.summary.cached), ["phpcs"]);
 }
 
 #[tokio::test]
 async fn an_unchanged_beam_writes_no_cache_entry() {
-    let (dir, cache) = feature_branch();
+    let dir = feature_branch();
     write(dir.path(), "docs/index.md", "docs 2");
 
-    let outcome = run_phpcs(dir.path(), cache.path(), true).await;
+    let outcome = run_phpcs(dir.path(), true).await;
 
     assert_eq!(ids(&outcome.summary.unchanged), ["phpcs"]);
     assert!(outcome.executed().is_empty());
-    let cache_dir = cache.path().join(".alba").join("cache");
+    let cache_dir = dir.path().join(".alba").join("cache");
     let entries = std::fs::read_dir(&cache_dir)
         .map(|entries| entries.count())
         .unwrap_or(0);

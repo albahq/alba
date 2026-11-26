@@ -244,6 +244,10 @@ async fn drive(
         // the reference its source names, not the one it started with.
         // Computed before the selection, which reuses it: one diff per run.
         let mut run_options = options.clone();
+        // From this run's own sources: a reload may have imported a
+        // Beamfile from a new directory, whose `.alba/` the change set
+        // must leave out too.
+        run_options.sources = sources.clone();
         run_options.diff_from(&project, &root, &reference);
         let targets =
             match follow_declared_base(&mut selection, &project, &reference).and_then(|()| {
@@ -312,7 +316,6 @@ async fn drive(
         // From this run's own project and sources: a reload may have moved
         // or rewritten any beam.
         run_options.definitions = alba_core::definitions(&project, &sources, &root);
-        run_options.sources = sources.clone();
 
         // A batch that lands while the run is in flight cancels it and is
         // held here, so the wait phase below starts the next run at once
