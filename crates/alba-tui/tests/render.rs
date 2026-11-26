@@ -107,7 +107,10 @@ fn a_parked_session_renders_at_the_forty_column_floor() {
 /// and the scroll position it left behind stay exactly as they were:
 /// `last_search` is what keeps them alive, and the key hints go back
 /// to Normal mode's own (offering `G follow`, since the search left the
-/// pane scrolled away from the end).
+/// pane scrolled away from the end). The pane is sized as `dispatch`
+/// sizes it, so each keystroke scrolls only as far as its match needs:
+/// `e` already matches `line 0` and takes the pane to the top, where
+/// `ERROR one` is in view.
 #[test]
 fn a_committed_search_keeps_its_highlights_in_normal_mode() {
     let mut state = AppState::new("build", false);
@@ -135,6 +138,7 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
         state.apply(&output("build", &format!("line {index}")), now);
     }
 
+    sized(&mut state, 80, 24);
     state.enter_search();
     for character in "error".chars() {
         state.handle_modal_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
@@ -391,11 +395,16 @@ fn drawn_at(state: &AppState, width: u16, height: u16, now: Instant) -> String {
 }
 
 /// What `lib::dispatch` does before every action: tell the state the
-/// output pane's size, which search and copy scroll against.
-fn sized_for_artboard(state: &mut AppState) {
-    let pane = alba_tui::ui::log_pane_content_area(state, ARTBOARD_WIDTH, ARTBOARD_HEIGHT)
-        .expect("the artboard is above the size floor");
+/// output pane's size in a `width` x `height` terminal, which search
+/// and copy scroll against.
+fn sized(state: &mut AppState, width: u16, height: u16) {
+    let pane = alba_tui::ui::log_pane_content_area(state, width, height)
+        .expect("the terminal is above the size floor");
     state.set_pane_size(pane.height as usize, pane.width as usize);
+}
+
+fn sized_for_artboard(state: &mut AppState) {
+    sized(state, ARTBOARD_WIDTH, ARTBOARD_HEIGHT);
 }
 
 fn artboard(state: &AppState, now: Instant) -> String {
