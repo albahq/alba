@@ -60,14 +60,26 @@ pub struct ReplayLine {
     pub text: String,
 }
 
+/// One failed beam's material for the exit replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedLog {
+    pub beam: String,
+    pub lines: Vec<ReplayLine>,
+    /// Whether the beam's buffer dropped its oldest lines past
+    /// [`logs::MAX_LINES`], so `lines` is not the whole log. Read from
+    /// the buffer itself: the cap counts Alba's own lines too, so the
+    /// length of `lines` cannot tell.
+    pub truncated: bool,
+}
+
 #[derive(Debug)]
 pub struct TuiOutcome {
     /// `Some(code)` iff the last run ran to completion un-abandoned.
     pub last_run_code: Option<i32>,
     pub last_summary: Option<RunSummary>,
-    /// `(beam id, its buffered lines)` for the last summary's failed
-    /// beams, for the CLI's exit replay.
-    pub failed_logs: Vec<(String, Vec<ReplayLine>)>,
+    /// The last summary's failed beams, in its order, for the CLI's exit
+    /// replay.
+    pub failed_logs: Vec<FailedLog>,
 }
 
 /// Drives the interface until the user quits or the session ends.
@@ -457,12 +469,19 @@ fn selected_buffer_mut(state: &mut AppState) -> Option<&mut LogBuffer> {
 
 /// What the CLI needs once the screen is gone: the exit code the session
 /// earned, and enough of the log to replay the failures on stderr.
-fn outcome(state: &AppState) -> TuiOutcome {
+pub fn outcome(state: &AppState) -> TuiOutcome {
     let failed_logs = state
         .last_summary
         .iter()
         .flat_map(|summary| &summary.failed)
-        .map(|id| (id.0.clone(), buffered_lines(state, &id.0)))
+        .map(|id| FailedLog {
+            beam: id.0.clone(),
+            lines: buffered_lines(state, &id.0),
+            truncated: state
+                .logs
+                .get(&id.0)
+                .is_some_and(|buffer| buffer.truncated() > 0),
+        })
         .collect();
     TuiOutcome {
         last_run_code: state.exit_outcome(),
@@ -516,6 +535,15 @@ mod tests {
                 text: text.to_string(),
             },
             replayed: false,
+        }
+    }
+
+    /// An untruncated failed beam's replay material.
+    fn failed_log(beam: &str, lines: Vec<ReplayLine>) -> FailedLog {
+        FailedLog {
+            beam: beam.to_string(),
+            lines,
+            truncated: false,
         }
     }
 
@@ -659,7 +687,7 @@ mod tests {
 
         assert_eq!(
             outcome(&state).failed_logs,
-            vec![("bad".to_string(), vec![replay_line("boom")])]
+            vec![failed_log("bad", vec![replay_line("boom")])]
         );
     }
 
@@ -684,8 +712,8 @@ mod tests {
         assert_eq!(outcome.last_run_code, Some(1));
         assert_eq!(
             outcome.failed_logs,
-            vec![(
-                "bad".to_string(),
+            vec![failed_log(
+                "bad",
                 vec![replay_line("boom 1"), replay_line("boom 2")]
             )],
             "only the failed beam's lines, and all of them"
@@ -694,6 +722,45 @@ mod tests {
             outcome.last_summary.expect("a run finished").failed,
             vec![id("bad")]
         );
+    }
+
+    /// A failed beam that printed past the buffer's cap is flagged as
+    /// cut, even though Alba's own lines took part of the cap and the
+    /// replayed output alone stays under it.
+    #[test]
+    fn a_failed_beam_past_the_cap_is_flagged_truncated() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started(&["chatty", "short"]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("chatty") }, now);
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("chatty"),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        for index in 0..logs::MAX_LINES {
+            state.apply(&output("chatty", &format!("line {index}")), now);
+        }
+        state.apply(
+            &finished("chatty", BeamStatus::Failed { exit_code: 1 }),
+            now,
+        );
+        state.apply(&RunEvent::BeamStarted { id: id("short") }, now);
+        state.apply(&output("short", "boom"), now);
+        state.apply(&finished("short", BeamStatus::Failed { exit_code: 1 }), now);
+        state.apply(&summary_event(&["chatty", "short"], &[]), now);
+
+        let outcome = outcome(&state);
+
+        let chatty = &outcome.failed_logs[0];
+        assert_eq!(chatty.beam, "chatty");
+        assert!(chatty.lines.len() < logs::MAX_LINES, "precondition");
+        assert!(chatty.truncated, "the buffer dropped its oldest lines");
+        let short = &outcome.failed_logs[1];
+        assert_eq!(short.beam, "short");
+        assert!(!short.truncated, "nothing was dropped");
     }
 
     /// An event channel holding `events` and already closed, so a drain
@@ -744,7 +811,7 @@ mod tests {
         assert_eq!(outcome.last_run_code, None, "an abandoned run cannot vouch");
         assert_eq!(
             outcome.failed_logs,
-            vec![("bad".to_string(), vec![replay_line("boom")])],
+            vec![failed_log("bad", vec![replay_line("boom")])],
             "the drain still collects the replay's material"
         );
         assert!(outcome.last_summary.is_some());
@@ -822,7 +889,7 @@ mod tests {
 
         let outcome = outcome(&state);
 
-        assert_eq!(outcome.failed_logs, vec![("bad".to_string(), Vec::new())]);
+        assert_eq!(outcome.failed_logs, vec![failed_log("bad", Vec::new())]);
     }
 
     /// `?`: now that help has a renderer too, entering it actually flips

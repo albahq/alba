@@ -608,9 +608,10 @@ struct SessionFailure {
 /// print, so the two front ends cannot describe the same run differently.
 ///
 /// The logs come from the interface's per-beam ring buffers, which are
-/// capped: a beam that produced more than [`alba_tui::logs::MAX_LINES`]
-/// lines is replayed from wherever the buffer starts, and says so rather
-/// than passing a partial log off as the whole one. `colour` picks which
+/// capped: a beam whose buffer dropped lines past
+/// [`alba_tui::logs::MAX_LINES`] is replayed from wherever the buffer
+/// starts, and says so ([`alba_tui::FailedLog::truncated`]) rather than
+/// passing a partial log off as the whole one. `colour` picks which
 /// side of each buffered [`alba_tui::ReplayLine`] gets printed: `raw` on a
 /// terminal, `text` (already stripped) under `NO_COLOR`.
 ///
@@ -633,9 +634,14 @@ fn replay<W: std::io::Write>(
         crate::render::print_summary(err, summary, affected_by);
     }
 
-    for (beam, lines) in &outcome.failed_logs {
+    for alba_tui::FailedLog {
+        beam,
+        lines,
+        truncated,
+    } in &outcome.failed_logs
+    {
         err.line(&format!("\u{2500}\u{2500} {beam} \u{2500}\u{2500}"));
-        if lines.len() >= alba_tui::logs::MAX_LINES {
+        if *truncated {
             err.line(&format!(
                 "(the interface keeps at most {} lines per beam; anything earlier is not replayed)",
                 alba_tui::logs::MAX_LINES
@@ -1398,6 +1404,7 @@ mod tests {
             .collect()
     }
 
+    /// An outcome whose failed beams kept their whole log.
     fn outcome(
         summary: Option<RunSummary>,
         failed_logs: Vec<(String, Vec<alba_tui::ReplayLine>)>,
@@ -1405,7 +1412,14 @@ mod tests {
         alba_tui::TuiOutcome {
             last_run_code: summary.as_ref().map(RunSummary::exit_code),
             last_summary: summary,
-            failed_logs,
+            failed_logs: failed_logs
+                .into_iter()
+                .map(|(beam, lines)| alba_tui::FailedLog {
+                    beam,
+                    lines,
+                    truncated: false,
+                })
+                .collect(),
         }
     }
 
@@ -1460,16 +1474,16 @@ mod tests {
             failed: vec![BeamId("chatty".to_string())],
             ..RunSummary::default()
         };
-        let logs = vec![(
-            "chatty".to_string(),
-            plain_lines(
-                (0..alba_tui::logs::MAX_LINES)
-                    .map(|index| format!("line {index}"))
-                    .collect::<Vec<_>>(),
-            ),
-        )];
+        let mut outcome = outcome(
+            Some(summary),
+            vec![(
+                "chatty".to_string(),
+                plain_lines(vec!["line 1".to_string(), "line 2".to_string()]),
+            )],
+        );
+        outcome.failed_logs[0].truncated = true;
 
-        let lines = replayed(&outcome(Some(summary), logs), None);
+        let lines = replayed(&outcome, None);
 
         assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
         assert!(
@@ -1477,8 +1491,78 @@ mod tests {
             "the disclosure comes before the lines themselves, got: {:?}",
             lines[2]
         );
-        assert_eq!(lines[3], "line 0");
-        assert_eq!(lines.len(), 3 + alba_tui::logs::MAX_LINES);
+        assert_eq!(&lines[3..], ["line 1", "line 2"]);
+    }
+
+    /// The replay read from a real session state: a failed beam that
+    /// printed `MAX_LINES` lines after its command echo lost its oldest
+    /// lines to the cap (the echo and the end line count too), so the
+    /// replay says so even though fewer than `MAX_LINES` lines remain.
+    #[test]
+    fn a_session_whose_failed_beam_overflowed_discloses_it_on_exit() {
+        use alba_engine::{BeamStatus, RunEvent};
+        use std::time::{Duration, Instant};
+
+        let beam = BeamId("chatty".to_string());
+        let now = Instant::now();
+        let mut state = alba_tui::state::AppState::new("chatty", false);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![beam.clone()],
+                affected_by: None,
+                beams: vec![beam.clone()],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            now,
+        );
+        state.apply(&RunEvent::BeamStarted { id: beam.clone() }, now);
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: beam.clone(),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        for index in 0..alba_tui::logs::MAX_LINES {
+            state.apply(
+                &RunEvent::BeamOutput {
+                    id: beam.clone(),
+                    line: alba_executors::OutputLine {
+                        stream: alba_executors::Stream::Stdout,
+                        text: format!("line {index}"),
+                    },
+                    replayed: false,
+                },
+                now,
+            );
+        }
+        state.apply(
+            &RunEvent::BeamFinished {
+                id: beam.clone(),
+                status: BeamStatus::Failed { exit_code: 1 },
+                duration: Duration::from_secs(1),
+            },
+            now,
+        );
+        state.apply(
+            &RunEvent::RunFinished {
+                summary: RunSummary {
+                    failed: vec![beam],
+                    ..RunSummary::default()
+                },
+            },
+            now,
+        );
+
+        let lines = replayed(&alba_tui::outcome(&state), None);
+
+        assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
+        assert!(
+            lines[2].contains(&format!("at most {} lines", alba_tui::logs::MAX_LINES)),
+            "the disclosure comes before the lines themselves, got: {:?}",
+            lines[2]
+        );
     }
 
     /// A session that quit before any run finished has nothing to say:
