@@ -157,6 +157,8 @@ mod tests {
         format!("{:?}", color_for(id))
     }
 
+    /// The property that matters: an id's colour is a function of the id
+    /// alone, so it cannot vary with the order beams are encountered in.
     #[test]
     fn a_beam_id_always_gets_the_same_color() {
         assert_eq!(color_name("build"), color_name("build"));
