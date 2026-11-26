@@ -59,14 +59,17 @@ pub(super) struct PaneLayout {
 /// The parts of an output pane occupying `pane`. The definition row is
 /// kept only when the body has the rows of a terminal 16 rows high; the
 /// blank row that separates it from the output goes with it, since it
-/// has nothing left to separate.
-pub(super) fn layout(pane: Rect) -> PaneLayout {
+/// has nothing left to separate. A `parked` pane shows the diagnostic,
+/// which no beam defines: no definition row, only the blank row the
+/// structured diagnostic leaves under its title, so both start `error:`
+/// on the same row.
+pub(super) fn layout(pane: Rect, parked: bool) -> PaneLayout {
     let row = |offset: u16| Rect::new(pane.x + 1, pane.y + offset, pane.width.saturating_sub(1), 1);
     let title = row(0);
-    let (definition, above) = if has_definition_row(pane.height) {
-        (Some(row(1)), 3)
-    } else {
-        (None, 1)
+    let (definition, above) = match (has_definition_row(pane.height), parked) {
+        (true, false) => (Some(row(1)), 3),
+        (true, true) => (None, 2),
+        (false, _) => (None, 1),
     };
     let y = pane.y + above.min(pane.height);
     let height = pane.height.saturating_sub(above);
@@ -184,7 +187,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
         diagnostic::draw(frame, area, report, state.colour);
         return;
     }
-    let parts = layout(area);
+    let parts = layout(area, matches!(state.phase, Phase::Parked));
     let mode = state.colour;
     let pane_state = pane_state(state);
     frame.render_widget(

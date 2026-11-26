@@ -2,8 +2,10 @@
 //! session is parked on a Beamfile that does not load and the failure
 //! points at a span.
 //!
-//! Top to bottom: the title row (`DIAGNOSTIC / path:line:column`), the
-//! `error:` line, a blank row, the source snippet with its line-number
+//! Top to bottom: the title row (`DIAGNOSTIC / path:line:column`), a
+//! blank row (on a pane tall enough for the output's definition row,
+//! and the first row to go when the pane is short), the `error:` line,
+//! a blank row, the source snippet with its line-number
 //! gutter, a blank row and the `help:` line. A failure with no span
 //! carries no report and keeps the plain-string log pane (`output.rs`).
 //!
@@ -51,6 +53,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, report: &DiagnosticReport, mod
             report,
             width as usize,
             body.height as usize,
+            super::output::has_definition_row(area.height),
             mode,
         )),
         body,
@@ -74,10 +77,14 @@ fn title_line(report: &DiagnosticReport, width: usize, mode: ColourMode) -> Line
     Line::from(spans)
 }
 
+/// The rows under the title. `spaced` asks for a blank row first, as
+/// the beams pane leaves under its title, so `error:` is level with
+/// the first beam.
 fn body_lines(
     report: &DiagnosticReport,
     width: usize,
     height: usize,
+    spaced: bool,
     mode: ColourMode,
 ) -> Vec<Line<'static>> {
     let mut error = labelled(
@@ -101,6 +108,7 @@ fn body_lines(
         faulty,
         mut after,
     } = snippet_lines(report, width, mode);
+    let mut top = spaced;
     let mut blanks = true;
     let total = |error: &[Line], before: &[Line], after: &[Line], help: &[Line], blanks: bool| {
         let spacing = if blanks {
@@ -110,12 +118,15 @@ fn body_lines(
         };
         error.len() + before.len() + faulty.len() + after.len() + help.len() + spacing
     };
-    // Short panes lose, in order: the context before the faulty line,
-    // the context after it, the blank rows, the wrapped rows of the
-    // message and of the help, then the message itself. The faulty line,
-    // its caret and the help are what stay.
-    while total(&error, &before, &after, &help, blanks) > height {
-        if !before.is_empty() {
+    // Short panes lose, in order: the blank row under the title, the
+    // context before the faulty line, the context after it, the blank
+    // rows, the wrapped rows of the message and of the help, then the
+    // message itself. The faulty line, its caret and the help are what
+    // stay.
+    while usize::from(top) + total(&error, &before, &after, &help, blanks) > height {
+        if top {
+            top = false;
+        } else if !before.is_empty() {
             before.remove(0);
         } else if !after.is_empty() {
             after.pop();
@@ -131,8 +142,13 @@ fn body_lines(
             break;
         }
     }
-    let mut lines = error;
-    if blanks && !lines.is_empty() {
+    let mut lines = Vec::new();
+    if top {
+        lines.push(Line::default());
+    }
+    let has_error = !error.is_empty();
+    lines.extend(error);
+    if blanks && has_error {
         lines.push(Line::default());
     }
     lines.extend(before);
@@ -701,6 +717,54 @@ mod tests {
         let all = rows(&drawn(&state, 100, 24));
         assert!(!all.iter().any(|row| row.contains('^')), "{all:#?}");
         assert!(all.iter().any(|row| row.contains("unknown field")));
+    }
+
+    /// A blank row under the title, as the beams pane leaves under its
+    /// own, so `error:` is level with the first beam.
+    #[test]
+    fn the_error_sits_a_blank_row_under_the_title() {
+        let report = report(
+            &[
+                (4, "beam build {", false),
+                (5, "    tset = 1", true),
+                (6, "}", false),
+            ],
+            4..8,
+        );
+        let buffer = drawn(&parked(Some(report)), 80, 24);
+        assert_eq!(row_with(&buffer, "DIAGNOSTIC"), 5);
+        assert_eq!(row_with(&buffer, "error:"), 7);
+    }
+
+    /// When rows run short, that blank row is the first thing to go,
+    /// before any context line.
+    #[test]
+    fn the_blank_row_under_the_title_goes_first() {
+        let report = report(
+            &[
+                (3, "beam check {", false),
+                (4, "  description \"x\"", false),
+                (5, "  tset = 1", true),
+                (6, "  run \"y\"", false),
+                (7, "}", false),
+            ],
+            2..6,
+        );
+        // A pane of 11 rows: the title, then ten rows of body, one short
+        // of the blank row under the title.
+        let buffer = drawn(&parked(Some(report)), 80, 19);
+        assert_eq!(row_with(&buffer, "error:"), 6);
+        assert!(rows(&buffer).iter().any(|row| row.contains("3 │")));
+    }
+
+    /// Without a report the plain text starts on the same row as the
+    /// structured `error:` would: a blank row under the title where the
+    /// terminal is tall enough, none on a short one.
+    #[test]
+    fn without_a_report_the_text_starts_where_the_error_would() {
+        let state = parked(None);
+        assert_eq!(row_with(&drawn(&state, 80, 24), "error: unknown field"), 7);
+        assert_eq!(row_with(&drawn(&state, 80, 15), "error: unknown field"), 6);
     }
 
     #[test]

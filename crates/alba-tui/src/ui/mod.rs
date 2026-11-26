@@ -23,7 +23,7 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::state::{AppState, Mode};
+use crate::state::{AppState, Mode, Phase};
 
 use theme::{ColourMode, Token, fill, style};
 
@@ -192,7 +192,7 @@ pub(crate) fn format_duration(duration: Duration) -> String {
 /// out of sync with what `draw` actually painted.
 pub fn log_pane_content_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
     let (_, output_pane) = panes(body_area(width, height)?, state, width);
-    Some(output::layout(output_pane).text)
+    Some(output::layout(output_pane, matches!(state.phase, Phase::Parked)).text)
 }
 
 #[cfg(test)]
