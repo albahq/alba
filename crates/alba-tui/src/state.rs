@@ -245,17 +245,20 @@ fn end_line(status: &BeamStatus, duration: Duration, skipped: bool) -> (EndTone,
 /// `git.changes()` diffs from follows as `· base <ref>`, unless the label
 /// already named it.
 fn run_label(targets: &[BeamId], affected_by: Option<&str>, base: Option<&str>) -> String {
-    let label = match (targets, affected_by) {
-        ([], Some(reference)) => return format!("nothing affected by {reference}"),
-        (targets, _) => targets
-            .iter()
-            .map(|id| id.0.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
+    let (label, named) = match (targets, affected_by) {
+        ([], Some(reference)) => (format!("nothing affected by {reference}"), Some(reference)),
+        (targets, _) => (
+            targets
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            None,
+        ),
     };
     match base {
-        Some(reference) => format!("{label} · base {reference}"),
-        None => label,
+        Some(reference) if named != Some(reference) => format!("{label} · base {reference}"),
+        _ => label,
     }
 }
 
@@ -1296,6 +1299,11 @@ mod tests {
         assert_eq!(
             label(started(&[], Some("main"), base("main"))),
             "nothing affected by main"
+        );
+        // A label naming another reference still shows the base.
+        assert_eq!(
+            label(started(&[], Some("main"), base("origin/develop"))),
+            "nothing affected by main · base origin/develop"
         );
     }
 
