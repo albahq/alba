@@ -139,9 +139,13 @@ fn highlighted(state: &AppState) -> usize {
 /// Draws the pane into `area` (the divider's left neighbour). The
 /// scrollbar's thumb goes on the divider column right of `area`.
 pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
+    // A blank row under the title while the output pane has its
+    // definition row, so the list starts level with the output.
+    let blank = u16::from(super::output::has_definition_row(area.height));
     let rows = Layout::vertical([
-        Constraint::Length(1), // title row
-        Constraint::Min(0),    // one row per beam
+        Constraint::Length(1),     // title row
+        Constraint::Length(blank), // blank row
+        Constraint::Min(0),        // one row per beam
     ])
     .split(area);
 
@@ -150,7 +154,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState, now: Instant) {
         rows[0],
     );
 
-    let list = rows[1];
+    let list = rows[2];
     let height = list.height as usize;
     let highlighted = highlighted(state);
     let visible = window(highlighted, state.beams.len(), height);
@@ -582,5 +586,46 @@ mod tests {
         let check = rows.iter().find(|row| row.contains("check")).unwrap();
         assert!(test.trim_end().ends_with("2.0s"), "{test:?}");
         assert!(check.trim_end().ends_with(NO_DURATION), "{check:?}");
+    }
+
+    /// Where the definition row is drawn, the beams pane leaves the row
+    /// under its title empty, so the list starts with the output; under
+    /// 16 rows both give that row back.
+    #[test]
+    fn the_list_starts_under_a_blank_row_when_the_output_has_its_definition() {
+        use alba_core::BeamId;
+        use alba_engine::RunEvent;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = AppState::new("build", false);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![BeamId("build".to_string())],
+                affected_by: None,
+                beams: vec![BeamId("build".to_string())],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            Instant::now(),
+        );
+        let first_row = |height: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
+            terminal
+                .draw(|frame| super::super::draw(frame, &state, Instant::now()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (5..height)
+                .find(|&y| {
+                    (2..20)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("build")
+                })
+                .unwrap()
+        };
+        // The title sits on row 5, the first body row.
+        assert_eq!(first_row(16), 7);
+        assert_eq!(first_row(15), 6);
     }
 }

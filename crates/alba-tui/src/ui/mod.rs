@@ -413,7 +413,7 @@ mod tests {
                 }
                 let badge = y == 1 && (2..8).contains(&x);
                 // The selected beam's row is the accent bar, 40 cells here.
-                let bar = with_bar && y == 6 && (2..42).contains(&x);
+                let bar = with_bar && y == 7 && (2..42).contains(&x);
                 let expected = if badge || bar {
                     Some(Color::Rgb(0xF3, 0xC2, 0x80))
                 } else {
@@ -424,7 +424,7 @@ mod tests {
         }
     }
 
-    /// 20 beams in a 7-row list: the divider turns into the scrollbar
+    /// 20 beams in a 6-row list: the divider turns into the scrollbar
     /// (the thumb on the divider column, the junctions on the
     /// separators untouched) and the window follows the selection.
     #[test]
@@ -449,14 +449,16 @@ mod tests {
             "{}",
             row(&buffer, 5)
         );
-        let shown: Vec<String> = (6..13)
+        // A blank row under the title, then six rows of the list.
+        assert!(row(&buffer, 6)[2..22].trim().is_empty());
+        let shown: Vec<String> = (7..13)
             .map(|y| row(&buffer, y)[2..22].to_string())
             .collect();
         assert!(shown[0].contains("beam07"), "{shown:?}");
         assert!(shown[3].contains("beam10"), "{shown:?}");
-        assert!(shown[6].contains("beam13"), "{shown:?}");
+        assert!(shown[5].contains("beam12"), "{shown:?}");
         let divider: Vec<&str> = (4..14).map(|y| buffer[(22, y)].symbol()).collect();
-        assert_eq!(divider, ["┬", "│", "│", "│", "┃", "┃", "│", "│", "│", "┴"]);
+        assert_eq!(divider, ["┬", "│", "│", "│", "│", "┃", "┃", "│", "│", "┴"]);
         // A list that fits draws no thumb.
         let fits = drawn(&running(now), 80, 24, now);
         assert!((5..21).all(|y| fits[(34, y)].symbol() != "┃"));
@@ -475,13 +477,13 @@ mod tests {
             now,
         );
         let buffer = drawn(&state, 80, 24, now);
-        let line: String = (2..34).map(|x| buffer[(x, 7)].symbol()).collect();
+        let line: String = (2..34).map(|x| buffer[(x, 8)].symbol()).collect();
         assert!(line.contains("国"), "{line:?}");
         assert!(
             line.ends_with("s"),
             "the duration ends at the divider: {line:?}"
         );
-        assert_eq!(buffer[(34, 7)].symbol(), "│");
+        assert_eq!(buffer[(34, 8)].symbol(), "│");
     }
 
     /// The graph keeps the beams pane on the left, the divider and its
@@ -522,9 +524,9 @@ mod tests {
         assert!(row(&buffer, 5).contains("BEAMS"), "{:?}", row(&buffer, 5));
         assert!(row(&buffer, 5).contains("3/3"), "{:?}", row(&buffer, 5));
         let accent = Color::Rgb(0xF3, 0xC2, 0x80);
-        assert!(row(&buffer, 8).contains("build"), "{:?}", row(&buffer, 8));
-        assert_eq!(buffer[(6, 8)].bg, accent, "the focused beam's row");
-        assert_ne!(buffer[(6, 6)].bg, accent, "the selected beam's row");
+        assert!(row(&buffer, 9).contains("build"), "{:?}", row(&buffer, 9));
+        assert_eq!(buffer[(6, 9)].bg, accent, "the focused beam's row");
+        assert_ne!(buffer[(6, 7)].bg, accent, "the selected beam's row");
         assert_eq!(state.selected, 0);
     }
 

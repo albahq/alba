@@ -35,6 +35,12 @@ const DEFINITION_MIN_HEIGHT: u16 = 16;
 /// The pane's body height at that terminal height.
 const DEFINITION_MIN_ROWS: u16 = DEFINITION_MIN_HEIGHT - ROWS_ABOVE_BODY - ROWS_BELOW_BODY;
 
+/// Whether a pane `height` rows high keeps the definition row. The
+/// beams pane follows it, so both lists start below the same rows.
+pub(super) fn has_definition_row(height: u16) -> bool {
+    height >= DEFINITION_MIN_ROWS
+}
+
 /// Below this pane width the position badge would cover most of the
 /// line it sits on, so it is not drawn.
 const BADGE_MIN_WIDTH: u16 = 20;
@@ -57,7 +63,7 @@ pub(super) struct PaneLayout {
 pub(super) fn layout(pane: Rect) -> PaneLayout {
     let row = |offset: u16| Rect::new(pane.x + 1, pane.y + offset, pane.width.saturating_sub(1), 1);
     let title = row(0);
-    let (definition, above) = if pane.height >= DEFINITION_MIN_ROWS {
+    let (definition, above) = if has_definition_row(pane.height) {
         (Some(row(1)), 3)
     } else {
         (None, 1)
