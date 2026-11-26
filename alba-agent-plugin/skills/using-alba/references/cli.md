@@ -90,7 +90,7 @@ subgraph, and `git.changes()` lists the files changed since the declared
 | --- | --- | --- |
 | `alba run [beam]`, `base` declared | the subgraph | incremental against `base` |
 | `alba run [beam]`, no `base` | the subgraph | full |
-| `alba run --affected [beam]` | affected against `base` (exit `2` without one) | incremental against `base` |
+| `alba run [beam] --affected` | affected against `base` (exit `2` without one) | incremental against `base` |
 | `alba run --affected <ref> [beam]` | affected against `<ref>` | incremental against `<ref>` |
 | `alba run --no-affected [beam]` | the subgraph | full |
 

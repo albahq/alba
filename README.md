@@ -579,8 +579,17 @@ full, is carried by its `beam_started` event in the JSON stream (see
 [The JSON stream](#the-json-stream)), so a surprising full run can be
 diagnosed.
 
+Only paths git reports count as changes, so a change to an input git
+ignores never switches a beam to full mode. A local `phpcs.xml` beside a
+committed `phpcs.xml.dist`, listed in `inputs`, moves the cache
+fingerprint but not the mode: the beam reruns, in incremental mode, when
+its list holds files, and ends `unchanged`, running nothing, when it holds
+none. Run `--no-affected` to check the whole tree against such a change.
+
 A beam in incremental mode whose every `git.changes()` call is empty (none
-of its files changed, or only deleted ones) does not run. It ends
+of its files changed, or only deleted ones) does not run. Only the calls
+its commands actually evaluate count: a call in a `match` or `if` branch
+its parameters do not take on this run is ignored. It ends
 `○ unchanged`: it satisfies the `needs` of its dependents, like a cached
 beam; it neither reads nor writes a cache entry, since nothing ran; and it
 does not affect the exit code. A beam with several calls runs as soon as
@@ -595,7 +604,7 @@ did not move:
 | --- | --- | --- |
 | `alba run [beam]`, a `base` declared | the subgraph | incremental against `base` |
 | `alba run [beam]`, no `base` | the subgraph | full |
-| `alba run --affected [beam]` | affected against `base`; an error without one | incremental against `base` |
+| `alba run [beam] --affected` | affected against `base`; an error without one | incremental against `base` |
 | `alba run --affected <ref> [beam]` | affected against `<ref>` | incremental against `<ref>` |
 | `alba run --no-affected [beam]` | the subgraph | full |
 
@@ -642,7 +651,9 @@ too) and native `\` separators. An element starting with `-` is written
 `--autoload-file=evil.php` reaches the tool as a path, never as an option.
 An empty list renders as nothing. A path whose name is not valid UTF-8
 fails the run with an error naming it, rather than reaching the tool
-mangled.
+mangled. Never put a list inside quotes of your own: `run "tool
+'{git.changes(...)}'"` nests the list's quoting inside yours and hands the
+tool wrongly split names.
 
 A list is only accepted as a whole `{...}` interpolation of `run` or `env`:
 using one where a string or a boolean is required (`+`, `==`, an `if`

@@ -124,7 +124,9 @@ beam phpstan {
   reference or `--no-affected`, a reference git cannot resolve (a warning),
   merge base at `HEAD` on a clean tree, the beam's Beamfile changed, a beam
   it `needs` is affected, or a changed path matches an input outside every
-  `git.changes()` glob (`phpcs.xml` above). Otherwise incremental.
+  `git.changes()` glob (`phpcs.xml` above). Otherwise incremental. Only
+  paths git reports count: a change to a gitignored input never forces
+  full mode.
 - `.dirs(glob)` maps each element to its shortest prefix matching `glob`
   (`*` never crosses `/`), keeps unmatched elements as they are, drops
   duplicates and elements under another kept one, and sorts. In full mode
@@ -135,9 +137,10 @@ beam phpstan {
   `system_shell` on Windows. Plain names (letters, digits, `_ . / : @ % + =
   , -`) stay bare; an element starting with `-` gets a `./` prefix. A
   list anywhere a string or boolean is required (`+`, `==`, `if`, `match`
-  subject, `inputs`, `cwd`) is a load error.
-- A beam whose every `git.changes()` call is empty in incremental mode
-  does not run and ends `unchanged`. See `cli.md` for the flags.
+  subject, `inputs`, `cwd`) is a load error. Never wrap a list in quotes
+  of your own (`"tool '{git.changes(...)}'"` nests the quoting wrongly).
+- A beam whose every `git.changes()` call its render reaches is empty in
+  incremental mode does not run and ends `unchanged`. See `cli.md` for the flags.
 
 ## Embedded shell (the default executor)
 
