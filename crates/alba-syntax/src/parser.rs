@@ -163,6 +163,12 @@ impl<'a> Parser<'a> {
         tok
     }
 
+    /// The end offset of the last token consumed, for spans that cover a
+    /// whole construct (a `match` arm) rather than a single token.
+    pub(crate) fn prev_end(&self) -> usize {
+        self.tokens[self.pos.saturating_sub(1)].span.end
+    }
+
     pub(crate) fn check(&self, kind: &TokenKind) -> bool {
         &self.peek().kind == kind
     }
@@ -658,14 +664,6 @@ fn reject_reserved(name: &Spanned<String>) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// The [`describe`] text for [`TokenKind::Eof`], exposed so `template.rs`
-/// can recognize (and correct) it when its own synthetic end-of-body
-/// sentinel — which reuses `TokenKind::Eof` as the sub-parser's
-/// end-of-input marker, but really means "the interpolation's closing
-/// `}`" — surfaces in an error message. Kept as a single source of truth
-/// rather than a string duplicated in both places, so the two can't drift.
-pub(crate) const EOF_DESCRIPTION: &str = "end of input";
-
 /// A short, human-readable description of a token kind for error messages.
 fn describe(kind: &TokenKind) -> String {
     match kind {
@@ -683,6 +681,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::KwTrue => "`true`".to_string(),
         TokenKind::KwFalse => "`false`".to_string(),
         TokenKind::KwHook => "`hook`".to_string(),
+        TokenKind::KwMatch => "`match`".to_string(),
         TokenKind::LBrace => "`{`".to_string(),
         TokenKind::RBrace => "`}`".to_string(),
         TokenKind::LBracket => "`[`".to_string(),
@@ -696,11 +695,13 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::NotEq => "`!=`".to_string(),
         TokenKind::AndAnd => "`&&`".to_string(),
         TokenKind::OrOr => "`||`".to_string(),
+        TokenKind::Pipe => "`|`".to_string(),
+        TokenKind::FatArrow => "`=>`".to_string(),
         TokenKind::Plus => "`+`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
         TokenKind::Star => "`*`".to_string(),
         TokenKind::Newline => "a newline".to_string(),
-        TokenKind::Eof => EOF_DESCRIPTION.to_string(),
+        TokenKind::Eof => "end of input".to_string(),
     }
 }
 

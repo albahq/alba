@@ -75,6 +75,43 @@ straight from the source, so `"{env(\"VAR\")}"` is a syntax error while
 `"{env('VAR')}"` is what you want. Escapes work normally everywhere else in
 the string, and `{{` / `}}` produce literal braces.
 
+An interpolation ends where its expression ends, so an expression holding
+braces of its own, such as a `match`, can be interpolated directly:
+`run "deploy {match git.branch { 'main' => 'prod' _ => 'staging' }}"`.
+
+### Choosing a value
+
+`if cond then a else b` picks between two values. `match` picks one value
+from a string, by glob pattern:
+
+```
+let target = match git.branch {
+  'hotfix/*' | 'master' => 'production'
+  'release/*'           => 'staging'
+  _                     => 'review'
+}
+```
+
+Arms are tried in order and the first one whose pattern matches the subject
+wins; `_` catches everything else. Each arm holds one or more patterns
+separated by `|`. Arms need no separator beyond whitespace or a newline, and
+may end with an optional comma.
+
+- The subject must be a string; matching a boolean is an error.
+- Patterns use the glob syntax of `inputs`, except that `*` never crosses a
+  `/`: `'hotfix/*'` matches `hotfix/urgent` but not `hotfix/urgent/part-2`,
+  which `'hotfix/**'` matches. A glob alternation written with braces needs
+  them doubled, as in any string: `'{{main,master}}'`.
+- Patterns must be known when the Beamfile loads, so they cannot contain an
+  interpolation. Every pattern is checked at load time, in every arm, even
+  one the subject does not select on this machine.
+- `_` is required and must be the last arm. A missing `_`, an arm after it,
+  and a pattern written twice are all errors pointing at the offending text.
+- Arm values are full expressions, validated like both branches of an `if`.
+
+`match` is a reserved word: it cannot name a `let` binding, a parameter, or
+a beam.
+
 ### Reading the environment
 
 `env("NAME", "fallback")` reads an environment variable, using the fallback

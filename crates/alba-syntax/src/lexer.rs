@@ -174,6 +174,9 @@ impl<'src> Lexer<'src> {
                 if self.peek_char() == Some('=') {
                     self.chars.next();
                     Ok(Token::new(TokenKind::EqEq, Span::new(start, start + 2)))
+                } else if self.peek_char() == Some('>') {
+                    self.chars.next();
+                    Ok(Token::new(TokenKind::FatArrow, Span::new(start, start + 2)))
                 } else {
                     single(TokenKind::Eq)
                 }
@@ -205,10 +208,7 @@ impl<'src> Lexer<'src> {
                     self.chars.next();
                     Ok(Token::new(TokenKind::OrOr, Span::new(start, start + 2)))
                 } else {
-                    Err(LexError::new(
-                        "unexpected character '|'",
-                        Span::new(start, start + 1),
-                    ))
+                    single(TokenKind::Pipe)
                 }
             }
             other => Err(LexError::new(
@@ -234,6 +234,7 @@ fn keyword_kind(text: &str) -> Option<TokenKind> {
         "else" => TokenKind::KwElse,
         "true" => TokenKind::KwTrue,
         "false" => TokenKind::KwFalse,
+        "match" => TokenKind::KwMatch,
         _ => return None,
     })
 }
@@ -340,7 +341,8 @@ mod tests {
 
     #[test]
     fn lexes_all_keywords() {
-        let tokens = lex_kinds("version import as let default beam if then else true false hook");
+        let tokens =
+            lex_kinds("version import as let default beam if then else true false hook match");
         assert_eq!(
             tokens,
             vec![
@@ -356,6 +358,7 @@ mod tests {
                 TokenKind::KwTrue,
                 TokenKind::KwFalse,
                 TokenKind::KwHook,
+                TokenKind::KwMatch,
                 TokenKind::Eof,
             ]
         );
@@ -402,6 +405,26 @@ mod tests {
                 TokenKind::Ident("api".into()),
                 TokenKind::Colon,
                 TokenKind::Ident("build".into()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_match_punctuation_without_changing_or() {
+        let tokens = lex_kinds("a || b | c => d = e");
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::OrOr,
+                TokenKind::Ident("b".into()),
+                TokenKind::Pipe,
+                TokenKind::Ident("c".into()),
+                TokenKind::FatArrow,
+                TokenKind::Ident("d".into()),
+                TokenKind::Eq,
+                TokenKind::Ident("e".into()),
                 TokenKind::Eof,
             ]
         );

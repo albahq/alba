@@ -67,7 +67,7 @@ use std::sync::{Arc, OnceLock};
 
 use alba_syntax::{
     AliasPattern, BeamDecl, BeamPattern, BeamRef, BinOp, ExecutorDecl, ExecutorOptionValue, Expr,
-    File, NeedRef, ParseError, Span, Spanned, StringTemplate, TemplatePart,
+    File, MatchArm, NeedRef, ParseError, Span, Spanned, StringTemplate, TemplatePart,
 };
 
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
@@ -205,9 +205,9 @@ impl Scope {
 
 /// The most precise span available for `expr`, per `alba_syntax`'s span
 /// policy: `Str` (via its `StringTemplate`), `Var`, and `Call` (via their
-/// name) carry one; `Bool`, `Binary`, and `If` do not. Callers fall back to
-/// an enclosing span (a `StringTemplate`'s span, or a fallback threaded
-/// down from one) when this returns `None`.
+/// name), `Field`, and `Match` carry one; `Bool`, `Binary`, and `If` do
+/// not. Callers fall back to an enclosing span (a `StringTemplate`'s span,
+/// or a fallback threaded down from one) when this returns `None`.
 fn expr_span(expr: &Expr) -> Option<Span> {
     match expr {
         Expr::Str(t) => Some(t.span),
@@ -215,7 +215,55 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Call { name, .. } => Some(name.span),
         Expr::Bool(_) | Expr::Binary { .. } | Expr::If { .. } => None,
         Expr::Field { object, field } => Some(Span::new(object.span.start, field.span.end)),
+        Expr::Match { span, .. } => Some(*span),
     }
+}
+
+/// Compiles one `match` pattern. `literal_separator` keeps `*` within one
+/// path segment, so `'hotfix/*'` matches `hotfix/x` but not `hotfix/x/y`,
+/// while `'hotfix/**'` matches both.
+fn compile_match_pattern(pattern: &Spanned<String>) -> Result<globset::GlobMatcher, CoreError> {
+    globset::GlobBuilder::new(&pattern.value)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|error| {
+            CoreError::new(
+                format!(
+                    "invalid `match` pattern `{}`: {}",
+                    pattern.value,
+                    error.kind()
+                ),
+                pattern.span,
+            )
+        })
+}
+
+/// Requires a `match` subject to be a string: its arms are glob patterns,
+/// which only a string can be matched against.
+fn expect_match_subject(value: Value, span: Span) -> Result<String, CoreError> {
+    match value {
+        Value::Str(subject) => Ok(subject),
+        other => Err(CoreError::new(
+            format!("expected a string, found {}", other.type_name()),
+            span,
+        )
+        .with_help("a `match` subject must be a string, matched against each arm's glob patterns")),
+    }
+}
+
+/// The index of the first arm with a pattern matching `subject`, or `None`
+/// for the default arm. Compiles the patterns it tries, so an invalid one
+/// is an error rather than a silent non-match.
+fn select_match_arm(arms: &[MatchArm], subject: &str) -> Result<Option<usize>, CoreError> {
+    for (index, arm) in arms.iter().enumerate() {
+        for pattern in &arm.patterns {
+            if compile_match_pattern(pattern)?.is_match(subject) {
+                return Ok(Some(index));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// `object.field`: only `git` has fields, and only the four values below
@@ -391,6 +439,21 @@ fn eval_with_fallback(expr: &Expr, scope: &Scope, fallback: Span) -> Result<Valu
             }
         }
         Expr::Field { object, field } => eval_field(object, field, scope),
+        Expr::Match {
+            subject,
+            arms,
+            default,
+            span,
+        } => {
+            let subject_span = expr_span(subject).unwrap_or(*span);
+            let value = eval_with_fallback(subject, scope, subject_span)?;
+            let subject = expect_match_subject(value, subject_span)?;
+            let chosen = match select_match_arm(arms, &subject)? {
+                Some(index) => &arms[index].value,
+                None => default.as_ref(),
+            };
+            eval_with_fallback(chosen, scope, expr_span(chosen).unwrap_or(*span))
+        }
     }
 }
 
@@ -708,6 +771,45 @@ fn check_expr(
             check_field(object, field)?;
             Ok(StaticValue::Unknown)
         }
+        // Like `if`: the subject, every pattern, every arm value, and the
+        // default are validated whichever arm the subject selects, so a
+        // bad pattern or a typo in an arm not taken on this machine still
+        // fails the load.
+        Expr::Match {
+            subject,
+            arms,
+            default,
+            span,
+        } => {
+            let subject_span = expr_span(subject).unwrap_or(*span);
+            let subject = match check_expr(subject, lets, params, timing, subject_span)? {
+                StaticValue::Known(value) => Some(expect_match_subject(value, subject_span)?),
+                StaticValue::Unknown => None,
+            };
+            let matchers = arms
+                .iter()
+                .map(|arm| arm.patterns.iter().map(compile_match_pattern).collect())
+                .collect::<Result<Vec<Vec<_>>, _>>()?;
+            let mut results = Vec::with_capacity(arms.len());
+            for arm in arms {
+                let arm_span = expr_span(&arm.value).unwrap_or(*span);
+                results.push(check_expr(&arm.value, lets, params, timing, arm_span)?);
+            }
+            let default_span = expr_span(default).unwrap_or(*span);
+            let default_result = check_expr(default, lets, params, timing, default_span)?;
+            match subject {
+                Some(subject) => {
+                    let chosen = matchers
+                        .iter()
+                        .position(|arm| arm.iter().any(|matcher| matcher.is_match(&subject)));
+                    Ok(match chosen {
+                        Some(index) => results.swap_remove(index),
+                        None => default_result,
+                    })
+                }
+                None => Ok(StaticValue::Unknown),
+            }
+        }
     }
 }
 
@@ -831,6 +933,17 @@ fn reject_param_references(expr: &Expr, params: &[String], field: &str) -> Resul
             reject_param_references(otherwise, params, field)
         }
         Expr::Field { .. } => Ok(()),
+        Expr::Match {
+            subject,
+            arms,
+            default,
+            ..
+        } => {
+            reject_param_references(subject, params, field)?;
+            arms.iter()
+                .try_for_each(|arm| reject_param_references(&arm.value, params, field))?;
+            reject_param_references(default, params, field)
+        }
     }
 }
 
