@@ -191,6 +191,13 @@ pub enum RunEvent {
         diagnostic: String,
         report: Option<DiagnosticReport>,
     },
+    /// Something about this run the user should know, that does not stop
+    /// it: today, a reference `git.changes()` could not diff from, so the
+    /// run goes in full mode. Sent right after the run's `RunStarted`, once
+    /// per run, so every run of a session repeats what still holds for it.
+    Warning {
+        message: String,
+    },
 }
 
 /// What a session's `render_error` callback answers: the diagnostic as the

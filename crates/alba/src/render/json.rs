@@ -143,6 +143,10 @@ enum WireEvent<'a> {
     WatchTriggered {
         paths: &'a [String],
     },
+    /// Something the run warns about without stopping, once per run.
+    Warning {
+        message: &'a str,
+    },
     ProjectBroken {
         diagnostic: &'a str,
     },
@@ -224,6 +228,7 @@ impl<'a> WireEvent<'a> {
             RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
             RunEvent::WatchTriggered { paths } => WireEvent::WatchTriggered { paths },
             RunEvent::ProjectBroken { diagnostic, .. } => WireEvent::ProjectBroken { diagnostic },
+            RunEvent::Warning { message } => WireEvent::Warning { message },
         })
     }
 }
@@ -616,6 +621,23 @@ mod tests {
         assert_eq!(
             line,
             r#"{"event":"project_broken","diagnostic":"error: oh no\n"}"#
+        );
+    }
+
+    /// A warning is one line of the stream, and only there: stderr keeps
+    /// carrying nothing but broken-project diagnostics.
+    #[test]
+    fn a_warning_is_an_event_of_its_own() {
+        let event = RunEvent::Warning {
+            message: "cannot diff from `origin/nope`: no merge base; running in full mode"
+                .to_string(),
+        };
+        assert_eq!(
+            json(&event),
+            serde_json::json!({
+                "event": "warning",
+                "message": "cannot diff from `origin/nope`: no merge base; running in full mode",
+            })
         );
     }
 }

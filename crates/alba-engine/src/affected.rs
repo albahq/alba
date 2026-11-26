@@ -66,13 +66,32 @@ pub fn select(
     root: &Path,
     selection: &Selection,
 ) -> Result<Targets, EngineError> {
+    select_with_changes(project, sources, root, selection, None)
+}
+
+/// [`select`], reusing the run's change set when it was computed against
+/// the reference an affected selection names, so a run asks git for its
+/// diff once, for the selection and for `git.changes()` alike. Any other
+/// `changes` (none, or another reference) leaves [`select`] to ask git.
+pub fn select_with_changes(
+    project: &Project,
+    sources: &SourceMap,
+    root: &Path,
+    selection: &Selection,
+    changes: Option<&RunChanges>,
+) -> Result<Targets, EngineError> {
     match selection {
         Selection::Beam(id) => {
             execution_subgraph(project, id)?;
             Ok(Targets::beam(id.clone()))
         }
         Selection::Affected { reference, within } => {
-            let affected = affected(project, sources, root, reference)?;
+            let affected = match changes {
+                Some(changes) if changes.reference == *reference => {
+                    affected_beams(project, sources, &changes.changed)
+                }
+                _ => affected(project, sources, root, reference)?,
+            };
             let beams = match within {
                 // Closure over dependents means: if anything in the
                 // subgraph is affected, so is its root. The subgraph then
@@ -101,6 +120,30 @@ pub fn select(
                 beams,
                 affected_by: Some(reference.clone()),
             })
+        }
+    }
+}
+
+/// Where a run's git reference comes from: the caller's policy, read
+/// against the project of each run, so a session that reloads its
+/// Beamfile follows an edited `base`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferenceSource {
+    /// No reference: every beam calling `git.changes()` runs in full mode.
+    Off,
+    /// The `base` the project's `git` block declares, if it declares one.
+    Declared,
+    /// A reference the caller named; it holds whatever the project says.
+    Explicit(String),
+}
+
+impl ReferenceSource {
+    /// The reference in effect for `project`, if any.
+    pub fn reference<'a>(&'a self, project: &'a Project) -> Option<&'a str> {
+        match self {
+            ReferenceSource::Off => None,
+            ReferenceSource::Declared => project.git.base.as_deref(),
+            ReferenceSource::Explicit(reference) => Some(reference),
         }
     }
 }

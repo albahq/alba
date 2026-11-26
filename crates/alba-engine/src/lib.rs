@@ -23,7 +23,9 @@ mod scheduler;
 mod session;
 mod watch;
 
-pub use affected::{RunChanges, Selection, affected, resolve_changes, select};
+pub use affected::{
+    ReferenceSource, RunChanges, Selection, affected, resolve_changes, select, select_with_changes,
+};
 pub use cache::CacheOptions;
 pub use event::{
     BeamDetails, BeamStatus, ExecutorLabel, NoticeLevel, RenderedError, RunEvent, RunSummary,

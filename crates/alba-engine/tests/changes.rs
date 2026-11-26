@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use alba_core::{BeamId, ChangeMode, FullReason, Project, SourceMap, load_project};
 use alba_engine::{
-    BeamStatus, Executors, RunChanges, RunEvent, RunOptions, RunSummary, Targets, resolve_changes,
-    run,
+    BeamStatus, Executors, RunChanges, RunEvent, RunOptions, RunSummary, Selection, Targets,
+    resolve_changes, run, select_with_changes,
 };
 use alba_executors::{EmbeddedShellExecutor, Stream};
 use tokio_util::sync::CancellationToken;
@@ -93,6 +93,7 @@ fn options(changes: Option<RunChanges>, unresolved_base: bool, sources: SourceMa
         definitions: Default::default(),
         changes,
         unresolved_base,
+        warnings: Vec::new(),
         sources,
     }
 }
@@ -576,4 +577,39 @@ async fn an_unknown_reference_cannot_resolve() {
         error.to_string().contains("origin/develop"),
         "names the reference: {error}"
     );
+}
+
+/// An affected selection reuses the run's change set when it was computed
+/// against the same reference: git is not asked again. Shown outside any
+/// repository, where asking git would fail.
+#[test]
+fn an_affected_selection_reuses_the_runs_change_set() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "beam lint { inputs [\"src/**\"] run \"echo lint\" }\n\
+         beam docs { inputs [\"docs/**\"] run \"echo docs\" }\n",
+    );
+    let (project, sources) = load(dir.path());
+    let selection = Selection::Affected {
+        reference: "main".to_string(),
+        within: None,
+    };
+    let changes = RunChanges {
+        reference: "main".to_string(),
+        merge_base: "0".repeat(40),
+        on_target_branch: false,
+        changed: Arc::new(vec![dir.path().join("src/a")]),
+    };
+
+    let targets =
+        select_with_changes(&project, &sources, dir.path(), &selection, Some(&changes)).unwrap();
+    assert_eq!(ids(&targets.beams), ["lint"]);
+
+    // Another reference is not this run's diff: git is asked, and fails here.
+    let other = RunChanges {
+        reference: "develop".to_string(),
+        ..changes
+    };
+    assert!(select_with_changes(&project, &sources, dir.path(), &selection, Some(&other)).is_err());
 }

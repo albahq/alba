@@ -52,6 +52,7 @@ fn options(dir: &Path) -> RunOptions {
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     }
 }

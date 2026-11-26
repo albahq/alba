@@ -41,7 +41,7 @@
 //! `stop` is a child token, the caller's cancellation implies it too.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,7 +58,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
-use crate::affected::{RunChanges, beam_modes};
+use crate::affected::{ReferenceSource, RunChanges, beam_modes, resolve_changes};
 use crate::cache::{
     ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
     fingerprint, hash_file, static_contribution,
@@ -100,18 +100,55 @@ pub struct RunOptions {
     /// only, never read by a run itself. A beam without an entry is
     /// announced with no location and no commands.
     pub definitions: HashMap<BeamId, BeamDefinition>,
-    /// The change set `git.changes()` answers from, computed by the
-    /// caller with [`crate::resolve_changes`]. `None` runs every beam
-    /// that calls it in full mode, for want of a reference.
+    /// The change set `git.changes()` answers from, set by
+    /// [`RunOptions::diff_from`] (a session calls it before each run).
+    /// `None` runs every beam that calls it in full mode, for want of a
+    /// reference.
     pub changes: Option<RunChanges>,
     /// The caller had a reference but could not resolve it (and warned
     /// about it): with no `changes`, the full mode it gives then says so.
     pub unresolved_base: bool,
+    /// What the run warns about, each sent as a [`RunEvent::Warning`]
+    /// right after `RunStarted`. [`RunOptions::diff_from`] fills it with
+    /// why there is no change set, alongside `changes`.
+    pub warnings: Vec<String>,
     /// The project's sources, as [`alba_core::load_project`] returned
     /// them: where each beam's Beamfile is, to tell whether it changed.
     /// Only read with `changes`; a beam whose Beamfile is missing from it
     /// runs in full mode.
     pub sources: SourceMap,
+}
+
+impl RunOptions {
+    /// Sets the change set of a run of `project` from `source`, and what
+    /// the run warns about when there is none although one was wanted:
+    /// a reference git cannot resolve (the run goes full, saying why), or
+    /// a `git` block git could not evaluate. The one place a run's
+    /// reference becomes its change set, for a single run as for every
+    /// run of a session.
+    pub fn diff_from(&mut self, project: &Project, root: &Path, source: &ReferenceSource) {
+        self.changes = None;
+        self.unresolved_base = false;
+        self.warnings.clear();
+        if *source == ReferenceSource::Declared
+            && let Some(message) = &project.git.warning
+        {
+            self.warnings
+                .push(format!("{message}; no reference declared for this run"));
+        }
+        let Some(reference) = source.reference(project) else {
+            return;
+        };
+        match resolve_changes(root, reference) {
+            Ok(changes) => self.changes = Some(changes),
+            Err(error) => {
+                self.unresolved_base = true;
+                self.warnings.push(format!(
+                    "cannot diff from `{reference}`: {error}; running in full mode"
+                ));
+            }
+        }
+    }
 }
 
 /// The executors a run can dispatch to, chosen per beam.
@@ -424,6 +461,11 @@ async fn run_once(
             })
             .collect(),
     });
+    for message in &options.warnings {
+        let _ = events.send(RunEvent::Warning {
+            message: message.clone(),
+        });
+    }
 
     let slots = Arc::new(Semaphore::new(options.jobs.max(1)));
     let stop = cancel.child_token();

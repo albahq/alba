@@ -98,6 +98,7 @@ impl Renderer for InterleavedRenderer {
             RunEvent::ProjectBroken { diagnostic, .. } => {
                 self.err.line(diagnostic.trim_end());
             }
+            RunEvent::Warning { message } => self.err.line(&super::warning_line(message)),
         }
     }
 }

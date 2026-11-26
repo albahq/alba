@@ -92,7 +92,13 @@ fn run(cli: Cli) -> i32 {
         Some(Command::Affected {
             reference,
             log_format,
-        }) => commands::affected::run(&project, &sources, &beamfile, &reference, log_format),
+        }) => commands::affected::run(
+            &project,
+            &sources,
+            &beamfile,
+            reference.as_deref(),
+            log_format,
+        ),
         // A named beam is taken as-is; an omitted one falls back to the
         // declared `default`, the same target bare `alba` would have run —
         // so `alba run` gains the run flags without losing that shortcut.
@@ -101,12 +107,20 @@ fn run(cli: Cli) -> i32 {
             params,
             flags,
         }) => {
-            let selection = match flags.affected.clone() {
-                Some(reference) => Selection::Affected {
-                    reference,
+            // The reference rule is `commands::run`'s, so the selection and
+            // the change set every run computes from it cannot disagree.
+            let rule = commands::run::reference_rule(&flags);
+            let selection = match rule.source.reference(&project) {
+                Some(reference) if rule.drives_selection => Selection::Affected {
+                    reference: reference.to_string(),
                     within: beam.map(alba_core::BeamId),
                 },
-                None => match beam.map(alba_core::BeamId).or_else(|| {
+                None if rule.drives_selection => {
+                    LineSink::stderr()
+                        .line(&commands::run::missing_base(&project, "`--affected <REF>`"));
+                    return EXIT_ALBA_ERROR;
+                }
+                _ => match beam.map(alba_core::BeamId).or_else(|| {
                     project
                         .default
                         .as_ref()

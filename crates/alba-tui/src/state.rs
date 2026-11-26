@@ -164,6 +164,9 @@ pub struct AppState {
     /// watch trigger that follows a completed run is told apart from one
     /// that superseded a run still going.
     waiting_seen: bool,
+    /// What the run in flight warned about, in arrival order; cleared
+    /// when the next run starts. Drawn under the header.
+    pub warnings: Vec<String>,
     /// Beams that began (`BeamStarted` or `BeamCached`) in the run on
     /// screen: a beam that ends `Cancelled` without being in here was
     /// skipped.
@@ -238,15 +241,21 @@ fn end_line(status: &BeamStatus, duration: Duration, skipped: bool) -> (EndTone,
 }
 
 /// What the header calls the run: the target, the targets joined, or the
-/// reference an affected run found nothing for.
-fn run_label(targets: &[BeamId], affected_by: Option<&str>) -> String {
-    match (targets, affected_by) {
-        ([], Some(reference)) => format!("nothing affected by {reference}"),
+/// reference an affected run found nothing for. The reference
+/// `git.changes()` diffs from follows as `· base <ref>`, unless the label
+/// already named it.
+fn run_label(targets: &[BeamId], affected_by: Option<&str>, base: Option<&str>) -> String {
+    let label = match (targets, affected_by) {
+        ([], Some(reference)) => return format!("nothing affected by {reference}"),
         (targets, _) => targets
             .iter()
             .map(|id| id.0.as_str())
             .collect::<Vec<_>>()
             .join(", "),
+    };
+    match base {
+        Some(reference) => format!("{label} · base {reference}"),
+        None => label,
     }
 }
 
@@ -280,6 +289,7 @@ impl AppState {
             outcome: None,
             user_cancelled: false,
             waiting_seen: false,
+            warnings: Vec::new(),
             selection_moved: false,
             jumped_to_failure: false,
             pane_height: 0,
@@ -300,13 +310,17 @@ impl AppState {
             RunEvent::RunStarted {
                 targets,
                 affected_by,
-                base: _,
+                base,
                 beams,
                 edges,
                 details,
             } => {
                 self.start_run(
-                    run_label(targets, affected_by.as_deref()),
+                    run_label(
+                        targets,
+                        affected_by.as_deref(),
+                        base.as_ref().map(|(reference, _)| reference.as_str()),
+                    ),
                     beams,
                     edges,
                     now,
@@ -418,6 +432,7 @@ impl AppState {
                 }
                 self.waiting_seen = false;
             }
+            RunEvent::Warning { message } => self.warnings.push(message.clone()),
             RunEvent::ProjectBroken { diagnostic, report } => {
                 self.phase = Phase::Parked;
                 self.outcome = None;
@@ -1148,6 +1163,7 @@ impl AppState {
             _ => None,
         };
         self.target = label;
+        self.warnings.clear();
         self.beams = beams
             .iter()
             .map(|id| BeamRow {
@@ -1247,6 +1263,40 @@ mod tests {
                 ..RunSummary::default()
             },
         }
+    }
+
+    /// The header names the reference `git.changes()` diffs from, and
+    /// keeps today's label without one.
+    #[test]
+    fn the_run_label_names_the_reference_in_effect() {
+        let base = |reference: &str| Some((reference.to_string(), "abc123".to_string()));
+        let started = |targets: &[&str], affected_by: Option<&str>, base| RunEvent::RunStarted {
+            targets: targets.iter().map(|name| id(name)).collect(),
+            affected_by: affected_by.map(str::to_string),
+            base,
+            beams: targets.iter().map(|name| id(name)).collect(),
+            edges: Vec::new(),
+            details: Vec::new(),
+        };
+        let label = |event: RunEvent| {
+            let mut state = AppState::new("lint", false);
+            state.apply(&event, Instant::now());
+            state.target
+        };
+        assert_eq!(label(started(&["lint"], None, None)), "lint");
+        assert_eq!(
+            label(started(&["lint"], None, base("origin/develop"))),
+            "lint · base origin/develop"
+        );
+        assert_eq!(
+            label(started(&["lint", "docs"], Some("main"), base("main"))),
+            "lint, docs · base main"
+        );
+        // Already named once.
+        assert_eq!(
+            label(started(&[], Some("main"), base("main"))),
+            "nothing affected by main"
+        );
     }
 
     /// RunStarted rebuilds the table: the Beamfile may have changed.

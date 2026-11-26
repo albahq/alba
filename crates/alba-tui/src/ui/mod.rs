@@ -90,6 +90,9 @@ pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
         Paragraph::new(header::line(state, now, width)),
         content_row(1),
     );
+    if let Some(warning) = header::warning(state, width) {
+        frame.render_widget(Paragraph::new(warning), content_row(2));
+    }
     let progress = progress::banner(state, width).unwrap_or_else(|| progress::line(state, width));
     frame.render_widget(Paragraph::new(progress), content_row(3));
     let hints = match &state.last_copy_result {
@@ -266,6 +269,42 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    /// A run's warning shows inside the interface, on the row between the
+    /// header and the progress bar, and the next run clears it.
+    #[test]
+    fn a_run_warning_shows_under_the_header_until_the_next_run() {
+        let now = Instant::now();
+        let mut state = running(now);
+        assert_eq!(row(&drawn(&state, 80, 24, now), 2).trim(), "");
+        state.apply(
+            &RunEvent::Warning {
+                message: "cannot diff from `origin/nope`; running in full mode".to_string(),
+            },
+            now,
+        );
+        assert_eq!(
+            row(&drawn(&state, 80, 24, now), 2).trim(),
+            "⚠ warning: cannot diff from `origin/nope`; running in full mode"
+        );
+        // Cut to the row, never overflowing it.
+        let narrow = row(&drawn(&state, 40, 24, now), 2);
+        assert!(narrow.trim().starts_with("⚠ warning: cannot"), "{narrow}");
+        assert!(narrow.trim_end().ends_with('…'), "{narrow}");
+
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![alba_core::BeamId("build".to_string())],
+                affected_by: None,
+                base: None,
+                beams: vec![alba_core::BeamId("build".to_string())],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            now,
+        );
+        assert_eq!(row(&drawn(&state, 80, 24, now), 2).trim(), "");
     }
 
     #[test]

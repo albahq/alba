@@ -10,14 +10,16 @@ version "1"                          # optional
 import "api/Beamfile" as api         # beams reachable as api:<name>
 let profile = env("PROFILE", "debug")
 default check                        # the beam a bare `alba` runs
+git { base 'origin/develop' }        # the reference git.changes() diffs from
 
 beam <name>[(param, ...)] { ... }
 hook <git-hook-name> { beam <name> }
 ```
 
 Only the root Beamfile's `default` and `hook` declarations count; an
-imported file's are ignored. Namespaces chain: a beam imported through two
-levels is `api:db:migrate`.
+imported file's are ignored. A `git` block is allowed once, in the root
+Beamfile only: anywhere else it is a load error. Namespaces chain: a beam
+imported through two levels is `api:db:migrate`.
 
 In `needs` only (alba 0.3.0 and later), `*` stands for any one import
 alias: `needs [*:test]` depends on the `test` beam of every direct import
@@ -31,7 +33,7 @@ that declares one, in import order. Each `*` matches exactly one level
 | --- | --- | --- |
 | `description` | string template | Shown in listings. |
 | `needs` | `[beam, api:beam, *:beam, ...]` | Prerequisites; all must succeed first. `*` stands for any one import alias. |
-| `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. A glob skips `.gitignore`d files; a literal path is always an input. Turns caching on, and drives `--watch` and `--affected`. |
+| `inputs` | `["src/**/*.rs", ...]` | Globs, relative to the declaring Beamfile's directory; leading `..` components climb out of it (`"../../Dockerfile"`), while `.` or `..` past the start is a load error. A glob skips `.gitignore`d files; a literal path is always an input. Turns caching on, and drives `--watch`, `--affected` and `git.changes()`. |
 | `env_inputs` | `["NODE_ENV", "PATH"]` | Ambient variables whose values (or absence) join the cache fingerprint; the inherited environment is otherwise ignored. Each entry is a variable name (letters, digits, `_`, no leading digit). Requires `inputs`. Needs alba 0.6.0 or later. |
 | `secrets` | `["NPM_TOKEN"]` | Variables (from the beam's `env`, else the environment Alba was started in) whose values are replaced by `***` in the output Alba shows and stores: live, JSON and cached. Masking is line by line, and does not cover what a command writes to a file or sends elsewhere. Needs alba 0.6.0 or later. |
 | `outputs` | `["target/release/alba"]` | Same base directory as `inputs`. The beam reruns when an output is missing, and since alba 0.6.0 also when one was rewritten (size or modification time) or removed from a glob's matches or a directory. |
@@ -79,8 +81,63 @@ give literal braces.
   Usable in every expression position. `git` is a reserved name.
 - Operators, low to high precedence: `||`, `&&`, `==` / `!=`, `+`.
 - `if cond then a else b`, for example `{if git.dirty then '-dirty' else ''}`.
+- `match subject { 'glob' => value  'a' | 'b' => value  _ => value }`: the
+  first arm whose glob matches the string subject wins (`*` never crosses
+  `/`); `_` is required and comes last. Patterns are literals, and every arm
+  is validated at load time, taken or not. `match` is reserved. Usable
+  inside an interpolation:
+  `"{match git.branch { 'main' => 'prod'  _ => 'dev' }}"`.
 - `true`, `false`, and bare identifiers referring to `let` bindings or beam
   parameters.
+
+## The `git` block and incremental beams
+
+```
+git {
+  base env('GITHUB_BASE_REF', match git.branch {
+    'hotfix/*' | 'master' => 'origin/master'
+    _                     => 'origin/develop'
+  })
+}
+
+beam phpcs {
+  inputs ["src/**/*.php", "phpcs.xml"]
+  run "vendor/bin/phpcs {git.changes('src/**/*.php')}"
+}
+
+beam phpstan {
+  inputs ["src/**/*.php", "phpstan.neon"]
+  run "vendor/bin/phpstan analyse {git.changes('src/**/*.php').dirs('src/*')}"
+}
+```
+
+- `base` is evaluated at load time (`env()` needs a default) and may read
+  `git.*` and every `let`. `''` means no reference. `base` is the only key.
+  When git cannot answer while evaluating it (no repository, as in a Docker
+  build context), the project loads with no reference and a warning.
+- `git.changes(glob)` returns a list: the changed files since the merge
+  base of `base` and `HEAD` that match `glob` and still exist, sorted,
+  relative to the beam's `cwd`. Only in `run` and `env`; its argument is a
+  literal or a `let`, and must equal one of the beam's rendered `inputs`.
+- Full mode (the list is the glob's base directory, `src` for
+  `src/**/*.php`, `.` without a literal prefix) whenever in doubt: no
+  reference or `--no-affected`, a reference git cannot resolve (a warning),
+  merge base at `HEAD` on a clean tree, the beam's Beamfile changed, a beam
+  it `needs` is affected, or a changed path matches an input outside every
+  `git.changes()` glob (`phpcs.xml` above). Otherwise incremental.
+- `.dirs(glob)` maps each element to its shortest prefix matching `glob`
+  (`*` never crosses `/`), keeps unmatched elements as they are, drops
+  duplicates and elements under another kept one, and sorts. In full mode
+  `src` stays `src`.
+- A list renders as its elements joined by spaces, each shell-quoted for
+  the executor: POSIX single quoting for the embedded shell, `sh`, docker,
+  compose and plugins; PowerShell quoting and `\` separators for
+  `system_shell` on Windows. Plain names (letters, digits, `_ . / : @ % + =
+  , -`) stay bare; an element starting with `-` gets a `./` prefix. A
+  list anywhere a string or boolean is required (`+`, `==`, `if`, `match`
+  subject, `inputs`, `cwd`) is a load error.
+- A beam whose every `git.changes()` call is empty in incremental mode
+  does not run and ends `unchanged`. See `cli.md` for the flags.
 
 ## Embedded shell (the default executor)
 

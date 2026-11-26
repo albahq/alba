@@ -1,4 +1,5 @@
-//! `alba affected <ref>`: list the beams a git diff affects, run nothing.
+//! `alba affected [ref]`: list the beams a git diff affects, run nothing.
+//! Without a reference, the diff is from the `base` the Beamfile declares.
 
 use alba_core::{Project, SourceMap};
 use std::path::Path;
@@ -11,9 +12,16 @@ pub fn run(
     project: &Project,
     sources: &SourceMap,
     beamfile: &Path,
-    reference: &str,
+    reference: Option<&str>,
     log_format: LogFormat,
 ) -> i32 {
+    // The list is the selection `--affected` would run, so the reference
+    // follows the same rule: given, or declared.
+    let source = super::run::given_or_declared(reference);
+    let Some(reference) = source.reference(project) else {
+        LineSink::stderr().line(&super::run::missing_base(project, "`alba affected <REF>`"));
+        return EXIT_ALBA_ERROR;
+    };
     let root = alba_engine::beamfile_dir(beamfile);
     let affected = match alba_engine::affected(project, sources, &root, reference) {
         Ok(affected) => affected,

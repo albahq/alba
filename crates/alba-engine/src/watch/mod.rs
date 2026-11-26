@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
-use crate::affected::Selection;
+use crate::affected::{ReferenceSource, Selection};
 use crate::event::{RenderedError, RunEvent};
 use crate::scheduler::{Executors, RunOptions};
 use crate::session::session;
@@ -109,6 +109,7 @@ pub async fn watch(
     project: Project,
     sources: SourceMap,
     selection: Selection,
+    reference: ReferenceSource,
     options: RunOptions,
     executors: Executors,
     events: UnboundedSender<RunEvent>,
@@ -121,6 +122,7 @@ pub async fn watch(
         project,
         sources,
         selection,
+        reference,
         options,
         executors,
         events,

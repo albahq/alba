@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RenderedError, RunEvent, RunOptions, Selection,
-    SessionCommand, SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session, watch,
+    CacheOptions, EngineError, Executors, ReferenceSource, RenderedError, RunEvent, RunOptions,
+    Selection, SessionCommand, SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session,
+    watch,
 };
 use alba_executors::{FakeBehavior, FakeEvent, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -249,6 +250,7 @@ fn spawn(
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     };
     let handle = tokio::spawn({
@@ -269,6 +271,7 @@ fn spawn(
                         project,
                         sources,
                         Selection::Beam(target),
+                        ReferenceSource::Off,
                         options,
                         Executors::uniform(executor),
                         events_tx,
@@ -284,6 +287,7 @@ fn spawn(
                         project,
                         sources,
                         Selection::Beam(target),
+                        ReferenceSource::Off,
                         options,
                         Executors::uniform(executor),
                         events_tx,
@@ -1379,6 +1383,7 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     };
     let handle = tokio::spawn({
@@ -1396,6 +1401,7 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
                     reference: "HEAD".to_string(),
                     within: None,
                 },
+                ReferenceSource::Explicit("HEAD".to_string()),
                 options,
                 Executors::uniform(executor),
                 events_tx,
@@ -1433,4 +1439,114 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
         ["docs"]
     );
     session.finish().await;
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// An explicit `--affected <ref>` stays the reference `git.changes()`
+/// diffs from after the interface retargets the session to a plain beam:
+/// the user asked for that reference, and the project declares none.
+#[tokio::test]
+async fn a_retargeted_session_keeps_its_explicit_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a"), "v1").unwrap();
+    std::fs::write(dir.path().join(".gitignore"), ".alba/\n").unwrap();
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam lint { inputs [\"src/**\"] run \"echo {git.changes('src/**')}\" }\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+    std::fs::write(dir.path().join("src/a"), "v2").unwrap();
+
+    let beamfile = dir.path().join("Beamfile");
+    let (project, sources) = load_project(&beamfile).unwrap();
+    let (_batches, batches_rx) = unbounded_channel();
+    let (events_tx, mut events) = unbounded_channel();
+    let (commands, commands_rx) = unbounded_channel();
+    let cancel = CancellationToken::new();
+    let options = RunOptions {
+        jobs: 1,
+        keep_going: false,
+        params: Vec::new(),
+        cache: None,
+        extra_env: Vec::new(),
+        ambient_env: Vec::new(),
+        definitions: Default::default(),
+        changes: None,
+        unresolved_base: false,
+        warnings: Vec::new(),
+        sources: Default::default(),
+    };
+    let handle = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            session(
+                &beamfile,
+                project,
+                sources,
+                Selection::Affected {
+                    reference: "main".to_string(),
+                    within: Some(BeamId("lint".to_string())),
+                },
+                ReferenceSource::Explicit("main".to_string()),
+                options,
+                Executors::uniform(Arc::new(FakeExecutor::new())),
+                events_tx,
+                Some(commands_rx),
+                false,
+                cancel,
+                Box::new(ScriptedWatcher {
+                    batches: batches_rx,
+                }),
+                &mut |_| unrendered(),
+            )
+            .await
+        }
+    });
+
+    let mut next_base = async || loop {
+        let event = tokio::time::timeout(HANG_GUARD, events.recv())
+            .await
+            .expect("no event within the hang guard")
+            .expect("event channel closed");
+        if let RunEvent::RunStarted { base, .. } = event {
+            return base.map(|(reference, _)| reference);
+        }
+    };
+    assert_eq!(next_base().await.as_deref(), Some("main"));
+    commands
+        .send(SessionCommand::RunBeam {
+            id: BeamId("lint".to_string()),
+            bypass_cache: false,
+        })
+        .unwrap();
+    assert_eq!(next_base().await.as_deref(), Some("main"));
+
+    cancel.cancel();
+    tokio::time::timeout(HANG_GUARD, handle)
+        .await
+        .unwrap()
+        .unwrap();
 }

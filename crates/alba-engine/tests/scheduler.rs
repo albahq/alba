@@ -56,6 +56,7 @@ fn options(jobs: usize, keep_going: bool) -> RunOptions {
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     }
 }
@@ -936,6 +937,7 @@ beam deploy(target) {
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     };
     let outcome = run_target(SOURCE, "deploy", options, executor.clone()).await;
@@ -967,6 +969,7 @@ async fn parameter_count_must_match_the_target() {
             definitions: Default::default(),
             changes: None,
             unresolved_base: false,
+            warnings: Vec::new(),
             sources: Default::default(),
         },
         Arc::new(FakeExecutor::new()),

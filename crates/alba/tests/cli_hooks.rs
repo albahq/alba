@@ -286,3 +286,34 @@ fn check_counts_hooks_and_warns_until_they_are_installed() {
         .success()
         .stderr(predicates::str::contains("hooks install").not());
 }
+
+/// A hook beam reads `git.changes()` against the declared base, as
+/// `alba run` does: the commit lists the file the branch changed.
+#[test]
+fn a_hook_beam_runs_incrementally() {
+    let dir = repository(
+        "git { base 'main' }\n\
+         hook pre-commit { beam check }\n\
+         beam check { inputs [\"src/**\"] run \"echo hook-files {git.changes('src/**')}\" }\n",
+    );
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/kept.txt"), "x").unwrap();
+    git_ok(dir.path(), &["add", "-A"]);
+    git_ok(dir.path(), &["commit", "-q", "-m", "kept"]);
+    git_ok(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    alba()
+        .current_dir(&dir)
+        .args(["hooks", "install"])
+        .assert()
+        .success();
+    std::fs::write(dir.path().join("src/new.txt"), "x").unwrap();
+    git_ok(dir.path(), &["add", "src/new.txt"]);
+    let output = git(dir.path(), &["commit", "-q", "-m", "change"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stdout.contains("hook-files src/new.txt\n") || stderr.contains("hook-files src/new.txt\n"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+}

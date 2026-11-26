@@ -63,6 +63,7 @@ fn options(dir: &Path, bypass_cache: bool) -> RunOptions {
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     }
 }
@@ -348,6 +349,7 @@ async fn no_cache_configuration_disables_caching() {
         definitions: Default::default(),
         changes: None,
         unresolved_base: false,
+        warnings: Vec::new(),
         sources: Default::default(),
     };
 

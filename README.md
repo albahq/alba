@@ -213,7 +213,7 @@ rather than an empty dependency. Patterns are only accepted in `needs`:
 alba                # runs the declared `default` beam, or lists beams if none is declared
 alba check          # loads and validates the Beamfile without running anything
 alba run <beam>     # runs a beam and everything it needs
-alba affected <ref> # lists the beams a git diff affects, runs nothing
+alba affected [ref] # lists the beams a git diff affects, runs nothing
 alba update         # replaces this binary with the latest release
 ```
 
@@ -270,7 +270,8 @@ Common to every subcommand:
 | `--output <STYLE>` | How text output is laid out: `interleaved` (every line as it happens, prefixed with the beam it came from) or `grouped` (each beam's output held back and printed as one block when it ends). Defaults to `interleaved` on a terminal and `grouped` otherwise. Ignored with `--log-format json`. |
 | `--log-format <FORMAT>` | What stdout carries: `text` (human-readable, laid out by `--output`) or `json` (one JSON object per event, one per line). Defaults to `text`. See [The JSON stream](#the-json-stream). |
 | `--watch` | Keep running: re-run the beam whenever the files its subgraph declares as `inputs` change, or a loaded Beamfile changes. Ctrl-C ends the session. See [Watch mode](#watch-mode). |
-| `--affected <REF>` | Run only the beams affected by what changed since `<REF>`, and their dependents. With a beam, that beam runs if it is affected and nothing runs otherwise; without one, every affected beam is a target. A beam with no `inputs` is never affected on its own. Composes with `--watch`: the targets are recomputed on every run. See [Affected runs](#affected-runs). |
+| `--affected [<REF>]` | Run only the beams affected by what changed since `<REF>`, and their dependents. Without a value, `<REF>` is the `base` the Beamfile's `git` block declares, and a Beamfile declaring none is an error. With a beam, that beam runs if it is affected and nothing runs otherwise; without one, every affected beam is a target. A beam with no `inputs` is never affected on its own. Composes with `--watch`: the targets are recomputed on every run. To name a beam with the declared base, put the beam before the flag (`alba run lint --affected`) or give the flag an empty value (`alba run --affected= lint`): `alba run --affected lint` reads `lint` as the reference. See [Affected runs](#affected-runs). |
+| `--no-affected` | Run every beam that calls `git.changes()` in full mode, whatever `base` the Beamfile declares. Conflicts with `--affected`. See [Incremental beams](#incremental-beams). |
 | `--ui` | Ask for the interactive interface even though stdout is not a terminal. Since it cannot actually draw there, the run is refused with an error instead of falling back to headless. Has no effect otherwise: on a terminal the interface is already the default, and `--log-format json`, `--output`, or `--no-ui` still choose the text renderers over it. See [Interactive interface](#interactive-interface). |
 | `--no-ui` | Force the plain text renderers on, even on a terminal. |
 
@@ -278,16 +279,18 @@ Common to every subcommand:
 
 `--log-format json` puts one JSON object per line on stdout. Every line
 carries an `event` field naming its kind, so a consumer dispatches on that
-before reading anything else. An ordinary run emits six kinds:
+before reading anything else. An ordinary run emits six kinds, and a
+seventh when it warns:
 
 | `event` | Fields |
 | --- | --- |
-| `run_started` | `targets` (the beams asked for; empty when an `--affected` run found nothing), `affected_by` (the git reference an `--affected` run targeted; omitted otherwise), `beams` (every beam in the run's subgraph, the targets included), `edges` (one `[beam, dependency]` pair per edge between them). Always the first line of the stream, before any beam's own events, so a consumer knows the shape of the run before watching it happen. |
-| `beam_started` | `beam`. |
+| `run_started` | `targets` (the beams asked for; empty when an `--affected` run found nothing), `affected_by` (the git reference an `--affected` run targeted; omitted otherwise), `base` (`{"reference", "merge_base"}`: the reference `git.changes()` diffs from and the full SHA of its merge base with `HEAD`; omitted when the run has none, or could not resolve it), `beams` (every beam in the run's subgraph, the targets included), `edges` (one `[beam, dependency]` pair per edge between them). Always the first line of the stream, before any beam's own events, so a consumer knows the shape of the run before watching it happen. |
+| `beam_started` | `beam`, and for a beam that calls `git.changes()` only, `mode` (`incremental` or `full`); a `full` mode carries `full_reason`, one of `no_reference`, `reference_unresolved`, `on_target_branch`, `beamfile_changed`, `dependency_affected`, `input_outside_changes`. Both are omitted for a beam that does not call `git.changes()`. See [Incremental beams](#incremental-beams). |
 | `beam_cached` | `beam`, for a beam the cache answered instead of running. |
 | `beam_output` | `beam`, `stream` (`stdout` or `stderr`), `text`, `replayed` (`true` for a line replayed from the cache rather than produced now). |
-| `beam_finished` | `beam`, `status`, `exit_code` (`null` unless the beam ran and exited non-zero), `duration_ms`. |
-| `run_finished` | `succeeded`, `cached`, `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned, and `cleanup_errors`, the errors met while releasing what executors held for the run (a non-empty list makes the exit code `1`). Always empty within a `--watch` session, whose executors are shut down only when the session ends: those errors are reported on stderr then, as `cleanup failed: <message>` lines. |
+| `beam_finished` | `beam`, `status` (`succeeded`, `cached`, `unchanged`, `failed`, `failed_allowed` or `cancelled`), `exit_code` (`null` unless the beam ran and exited non-zero), `duration_ms`. An `unchanged` beam had no changed file to process and ran nothing: it gets no `beam_started`. |
+| `run_finished` | `succeeded`, `cached`, `unchanged` (omitted when empty, so a run without `git.changes()` keeps its shape), `failed`, `failed_allowed`, `cancelled` (each a list of beam ids), `duration_ms`, and `exit_code`, what the run's beams earned, and `cleanup_errors`, the errors met while releasing what executors held for the run (a non-empty list makes the exit code `1`). Always empty within a `--watch` session, whose executors are shut down only when the session ends: those errors are reported on stderr then, as `cleanup failed: <message>` lines. |
+| `warning` | `message`, something the run warns about without stopping, such as a reference `git.changes()` cannot diff from (see [Incremental beams](#incremental-beams)). Sent right after `run_started`, once per run, and only on stdout: stderr stays empty of it. Omitted from a run with nothing to warn about. |
 
 A watch session's stream carries three more kinds; see
 [Watch mode](#watch-mode). No run summary is printed to stderr in this
@@ -487,11 +490,19 @@ others still run. Either way, an empty run prints `✓ nothing affected by
 <ref>` and exits `0` rather than reporting an ordinary summary with every
 bucket at zero.
 
-`alba affected <ref>` lists the affected beams without running anything, one
+Without a value, `--affected` diffs from the `base` the Beamfile's `git`
+block declares (see [Declaring the reference](#declaring-the-reference)); a
+Beamfile declaring none, or a declared `base` git cannot resolve, is an
+error (exit `2`), as an unknown `<ref>` is. Since the value is optional,
+`--affected lint` reads `lint` as the reference: put the beam first
+(`alba run lint --affected`) or pass an empty value (`--affected= lint`).
+
+`alba affected [ref]` lists the affected beams without running anything, one
 per line, or `{"beams": [...]}` under `--log-format json`. It exits `0` even
 when the list is empty: the dry run of `--affected`, meant for CI. A
 parameterized beam is listed too, marked `deploy (takes parameters)`, since
-nothing here needs to bind its arguments.
+nothing here needs to bind its arguments. Without `<ref>`, it diffs from
+the declared `base`, and fails without one.
 
 `--affected <ref> --watch` composes: the reference stays fixed while the
 working tree moves. The watched set is the beam's whole subgraph, not only
@@ -563,7 +574,51 @@ A beam runs in full mode whenever there is any doubt:
 - a changed path matches one of the beam's `inputs` but none of the globs
   it passes to `git.changes()`, as a `phpcs.xml` change does above.
 
-Otherwise it runs in incremental mode.
+Otherwise it runs in incremental mode. Each beam's mode, and why it is
+full, is carried by its `beam_started` event in the JSON stream (see
+[The JSON stream](#the-json-stream)), so a surprising full run can be
+diagnosed.
+
+A beam in incremental mode whose every `git.changes()` call is empty (none
+of its files changed, or only deleted ones) does not run. It ends
+`○ unchanged`: it satisfies the `needs` of its dependents, like a cached
+beam; it neither reads nor writes a cache entry, since nothing ran; and it
+does not affect the exit code. A beam with several calls runs as soon as
+one of them is non-empty, the empty ones rendering as nothing.
+
+Which beams run and what `git.changes()` returns are decided separately.
+Only `--affected` narrows the selection; every other run, `alba hook`
+included, runs the subgraph it always did, the cache still skipping what
+did not move:
+
+| Command | Selection | `git.changes()` |
+| --- | --- | --- |
+| `alba run [beam]`, a `base` declared | the subgraph | incremental against `base` |
+| `alba run [beam]`, no `base` | the subgraph | full |
+| `alba run --affected [beam]` | affected against `base`; an error without one | incremental against `base` |
+| `alba run --affected <ref> [beam]` | affected against `<ref>` | incremental against `<ref>` |
+| `alba run --no-affected [beam]` | the subgraph | full |
+
+A declared `base` that only drives the mode never fails a run: when git
+cannot resolve it (an unknown reference, or no merge base, as in a shallow
+CI clone that did not fetch the base branch), the run warns ``cannot diff
+from `<ref>`: <git's message>; running in full mode``, and goes on in full
+mode. When git could not evaluate the `git` block at all, the run warns
+`<git's message>; no reference declared for this run`. A warning is
+printed once per run: on stderr as `warning: <message>` by the text
+renderers, as a `warning` event in the JSON stream, and on the row under
+the header in the interactive interface. When `--affected` asked the
+reference to drive the selection, the same failure is an error (exit `2`).
+
+Under `--watch`, every run of the session, initial or triggered,
+recomputes the merge base, the changed files and each beam's mode, and
+repeats its warning, so the second file a branch touches joins the list on
+the next save, and an edit to `base` takes effect on the run it triggers.
+`--affected` without a value follows that edit too, for the selection as
+for the mode. A session the interface retargets to another beam keeps the
+reference: an explicit `--affected <ref>` stays in effect for the mode.
+The interactive interface shows the reference in effect in its header, as
+`· base <ref>` after the target.
 
 `.dirs(glob)` is a method of a list. Each element becomes the shortest
 prefix of its path, cut at a `/`, that matches `glob`, where `*` never

@@ -142,6 +142,12 @@ pub fn status_label(status: &BeamStatus) -> String {
     }
 }
 
+/// How the text renderers print a run's warning, on stderr: Alba talking
+/// about the run, like the status lines below.
+pub(super) fn warning_line(message: &str) -> String {
+    format!("warning: {message}")
+}
+
 /// The status line a watch event renders to, `None` for every other
 /// event. Shared by the two text renderers so their phrasing cannot
 /// drift; both print it to stderr — it is Alba talking about the run,

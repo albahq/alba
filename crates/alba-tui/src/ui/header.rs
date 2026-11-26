@@ -147,6 +147,22 @@ pub fn line(state: &AppState, now: Instant, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The row under the header while the run warns about something: the
+/// first warning, then how many more, cut with `…` to `width`. `None`
+/// for a run without one, which leaves the row blank as it always was.
+pub fn warning(state: &AppState, width: u16) -> Option<Line<'static>> {
+    let first = state.warnings.first()?;
+    let mut text = format!("⚠ warning: {first}");
+    let more = state.warnings.len() - 1;
+    if more > 0 {
+        text.push_str(&format!(" (+{more} more)"));
+    }
+    Some(Line::from(Span::styled(
+        fit_name(&text, width as usize),
+        style(Token::Accent, state.colour),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
