@@ -614,3 +614,42 @@ fn an_affected_selection_reuses_the_runs_change_set() {
     };
     assert!(select_with_changes(&project, &sources, dir.path(), &selection, Some(&other)).is_err());
 }
+
+/// Whether a beam is `unchanged` is decided on the `git.changes()` calls
+/// its render reached: a call in a branch this invocation's parameters do
+/// not take lists files nobody will process, and must not make the beam
+/// run its tool on an empty list.
+#[tokio::test]
+async fn a_call_in_a_branch_not_taken_does_not_make_the_beam_run() {
+    let dir = repository(
+        "git { base 'main' }\n\
+         beam lint(part) {\n\
+           inputs [\"src/**/*.php\", \"docs/**\"]\n\
+           run \"echo {match part { 'src' => git.changes('src/**/*.php') _ => git.changes('docs/**') }}\"\n\
+         }\n",
+    );
+    branch(dir.path(), "feature");
+    write(dir.path().join("docs/index.md"), "docs 2");
+    commit(dir.path(), "docs only");
+
+    let (project, sources) = load(dir.path());
+    let changes = resolve_changes(dir.path(), &sources, "main").expect("the base resolves");
+    let mut src = options(Some(changes.clone()), false, sources.clone());
+    src.params = vec!["src".to_string()];
+    let outcome = run_with(&project, "lint", src).await;
+
+    assert_eq!(outcome.status("lint"), BeamStatus::Unchanged);
+    assert!(
+        outcome.stdout("lint").is_empty(),
+        "{:?}",
+        outcome.stdout("lint")
+    );
+
+    // The branch that lists the change still runs on it.
+    let mut docs = options(Some(changes), false, sources);
+    docs.params = vec!["docs".to_string()];
+    let outcome = run_with(&project, "lint", docs).await;
+
+    assert_eq!(outcome.status("lint"), BeamStatus::Succeeded);
+    assert_eq!(outcome.stdout("lint"), ["docs/index.md"]);
+}

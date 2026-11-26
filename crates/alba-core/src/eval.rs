@@ -82,7 +82,7 @@ use alba_syntax::{
     File, MatchArm, NeedRef, ParseError, Span, Spanned, StringTemplate, TemplatePart,
 };
 
-use crate::changes::{self, BeamChanges};
+use crate::changes::{self, BeamChanges, CallRecord};
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
 use crate::git::{GitError, GitHead};
 use crate::model::{
@@ -111,6 +111,10 @@ pub struct Scope {
     values: HashMap<String, Value>,
     git: Option<Arc<LazyGit>>,
     changes: Option<Arc<BeamChanges>>,
+    /// What the `git.changes()` calls rendered in this scope listed,
+    /// shared by its clones and started afresh by
+    /// [`Scope::with_changes`].
+    calls: Arc<CallRecord>,
     quoting: Quoting,
 }
 
@@ -178,6 +182,7 @@ impl Scope {
     pub fn with_changes(&self, changes: ChangeSet, beam_dir: &Path, cwd: &Path) -> Self {
         Self {
             changes: Some(Arc::new(BeamChanges::new(changes, beam_dir, cwd))),
+            calls: Arc::default(),
             ..self.clone()
         }
     }
@@ -202,15 +207,16 @@ impl Scope {
         }
     }
 
-    /// Whether `git.changes(glob)` lists nothing in this scope: incremental
-    /// mode and no changed file matching `glob` still exists. The engine
-    /// asks this to tell a beam with nothing to process from one to run,
-    /// through the same listing its commands render, so the two cannot
-    /// disagree. A listing that fails (a name that is not valid UTF-8) is
-    /// not empty: the beam then renders, and its render reports the name.
-    pub fn lists_no_change(&self, glob: &str) -> bool {
-        self.git_changes(glob, Span::new(0, 0))
-            .is_ok_and(|listed| listed.is_empty())
+    /// Whether the templates rendered in this scope since
+    /// [`Scope::with_changes`] reached at least one `git.changes()` call,
+    /// and every one they reached listed nothing. The engine asks this,
+    /// once a beam's `run` and `env` are rendered, to tell a beam with
+    /// nothing to process from one to run: only the calls the render
+    /// actually evaluated count, so a call in a branch this invocation's
+    /// parameters do not take cannot make the beam run its tool on an
+    /// empty list, and the decision cannot disagree with the commands.
+    pub fn listed_nothing(&self) -> bool {
+        self.calls.listed_nothing()
     }
 
     /// `git.changes(glob)`, evaluated: see [`BeamChanges::list`]. `span`
@@ -220,6 +226,9 @@ impl Scope {
             Some(changes) => changes.list(glob),
             None => BeamChanges::without_reference(Path::new("."), Path::new(".")).list(glob),
         };
+        if let Ok(listed) = &listed {
+            self.calls.record(listed.is_empty());
+        }
         listed.map_err(|path| {
             CoreError::new(
                 format!(

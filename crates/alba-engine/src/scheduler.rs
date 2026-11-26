@@ -1332,17 +1332,14 @@ struct RenderedBeam {
     unchanged: bool,
 }
 
-/// Whether the beam, in incremental mode, has nothing to process: every
-/// glob it passes to `git.changes()` lists no file. Asked of the scope its
-/// commands render with, so the decision and the rendered lists cannot
-/// disagree.
-fn is_unchanged(beam: &Beam, changes: Option<&ChangeSet>, scope: &Scope) -> bool {
-    changes.is_some_and(|changes| changes.mode == ChangeMode::Incremental)
-        && !beam.change_globs.is_empty()
-        && beam
-            .change_globs
-            .iter()
-            .all(|glob| scope.lists_no_change(glob))
+/// Whether the beam, in incremental mode, has nothing to process: the
+/// render of its `run` and `env` reached at least one `git.changes()`
+/// call, and every call it reached listed no file. Asked of the scope its
+/// commands rendered with, once they are rendered, so a call in a branch
+/// this invocation does not take never counts, and the decision and the
+/// rendered lists cannot disagree.
+fn is_unchanged(changes: Option<&ChangeSet>, scope: &Scope) -> bool {
+    changes.is_some_and(|changes| changes.mode == ChangeMode::Incremental) && scope.listed_nothing()
 }
 
 /// The scope the beam's `run` and `env` render in, and the directory its
@@ -1404,7 +1401,7 @@ fn render(
     }
 
     Ok(RenderedBeam {
-        unchanged: is_unchanged(beam, changes, &scope),
+        unchanged: is_unchanged(changes, &scope),
         commands,
         env,
         cwd,

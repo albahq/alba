@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use alba_syntax::Span;
 
@@ -27,6 +28,38 @@ pub(crate) struct BeamChanges {
     changed: Arc<Vec<PathBuf>>,
     beam_dir: PathBuf,
     cwd: PathBuf,
+}
+
+/// What the `git.changes()` calls one scope rendered listed: whether any
+/// was reached, and whether any listed a path. Atomic, because a beam's
+/// scope travels to the task that renders it.
+#[derive(Debug, Default)]
+pub(crate) struct CallRecord {
+    reached: AtomicBool,
+    listed: AtomicBool,
+}
+
+impl CallRecord {
+    /// Records one evaluated call, which listed nothing when `empty`.
+    pub(crate) fn record(&self, empty: bool) {
+        self.reached.store(true, Ordering::Relaxed);
+        if !empty {
+            self.listed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// At least one call was reached, and none listed a path.
+    pub(crate) fn listed_nothing(&self) -> bool {
+        self.reached.load(Ordering::Relaxed) && !self.listed.load(Ordering::Relaxed)
+    }
+}
+
+/// A record of what was rendered, not part of what a scope means: two
+/// scopes binding the same values are equal whatever they rendered.
+impl PartialEq for CallRecord {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl BeamChanges {

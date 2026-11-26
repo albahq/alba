@@ -296,13 +296,18 @@ pub(crate) fn beam_modes(
             {
                 ChangeMode::Full(FullReason::DependencyAffected(need.value.clone()))
             } else if let Some(path) = first_outside(&outside, &in_globs, id) {
-                // `change_globs` also holds the globs of calls in a branch
-                // that depends on a parameter, which may not run this
-                // time. A path matching only such a glob then counts as
-                // covered and the beam stays incremental: the list that
-                // call would render is exactly the changed files, so
-                // nothing is hidden from the tool, and no input outside
-                // every `git.changes()` glob is missed.
+                // `change_globs` holds the globs of every call, those in a
+                // branch that depends on a parameter included: modes are
+                // decided before any beam renders, so which calls this
+                // invocation reaches is not known yet. A path matching
+                // only the glob of a call not reached then counts as
+                // covered, and the beam stays incremental rather than
+                // going full. Going full on it instead is not possible
+                // here without the render; what it means is that such a
+                // change is listed by no call that runs, so the beam
+                // either processes the other files it lists or, listing
+                // none, ends `unchanged`. Every change to an input that
+                // no `git.changes()` glob covers still forces full mode.
                 ChangeMode::Full(FullReason::InputOutsideChanges(display_path(
                     root.as_deref(),
                     path,

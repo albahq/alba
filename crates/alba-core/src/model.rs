@@ -219,7 +219,9 @@ pub struct Beam {
     /// Every glob the beam passes to `git.changes()` in `run` or `env`,
     /// rendered, deduplicated, in order of appearance (`run` before `env`).
     /// A call in a branch that depends on a parameter counts too: which
-    /// branch runs is not known until the beam is scheduled.
+    /// branch runs is not known until the beam renders. The beam's mode
+    /// reads these; whether it ends `unchanged` reads only the calls its
+    /// render reaches (see [`crate::Scope::listed_nothing`]).
     pub change_globs: Vec<String>,
     /// The directory of the defining Beamfile, used as the `cwd` base.
     /// Always absolute for a project built by `crate::loader::load_project`
