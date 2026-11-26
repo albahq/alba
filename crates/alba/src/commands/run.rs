@@ -69,6 +69,12 @@ pub fn run(
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
+    // Said first, while stderr is still the plain terminal: the interface
+    // would hide anything written once its alternate screen is up.
+    if flags.deprecated_force {
+        LineSink::stderr().line("warning: --force is deprecated; use --no-cache");
+    }
+
     // Answered before anything is built: a refusal has nothing to run, and
     // resolving it here leaves only the two front ends below.
     let interactive = match ui_enabled(flags, std::io::stdout().is_terminal()) {
@@ -175,7 +181,7 @@ async fn execute(
         params,
         cache: Some(CacheOptions {
             dir: cache_dir(beamfile),
-            force: flags.force,
+            bypass_cache: flags.bypasses_cache(),
         }),
         ambient_env: ambient_env(),
         definitions: alba_core::definitions(project, sources, &root),
@@ -282,7 +288,7 @@ async fn watch_execute(
         params,
         cache: Some(CacheOptions {
             dir: cache_dir(beamfile),
-            force: flags.force,
+            bypass_cache: flags.bypasses_cache(),
         }),
         ambient_env: ambient_env(),
         // A session computes them for each run, from the project it just loaded.
@@ -393,7 +399,7 @@ async fn tui_execute(
         params,
         cache: Some(CacheOptions {
             dir: cache_dir(beamfile),
-            force: flags.force,
+            bypass_cache: flags.bypasses_cache(),
         }),
         // The interface renders ANSI, and commands on a pipe emit none
         // unless told to; a monochrome interface asks for none.

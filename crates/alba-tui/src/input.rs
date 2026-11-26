@@ -21,7 +21,7 @@ pub enum Action {
     SelectNext,
     SelectPrevious,
     Rerun {
-        force: bool,
+        bypass_cache: bool,
     }, // r / f on the selected beam
     RunSessionTarget, // t: back to what the session was started for
     CancelRun,        // c
@@ -118,8 +118,12 @@ fn action_in_normal_mode(event: &Event) -> Action {
             if !has_disallowed_modifiers(key_event.modifiers) {
                 match key_event.code {
                     KeyCode::Char('q') => return Action::Quit,
-                    KeyCode::Char('r') => return Action::Rerun { force: false },
-                    KeyCode::Char('f') => return Action::Rerun { force: true },
+                    KeyCode::Char('r') => {
+                        return Action::Rerun {
+                            bypass_cache: false,
+                        };
+                    }
+                    KeyCode::Char('f') => return Action::Rerun { bypass_cache: true },
                     KeyCode::Char('c') => return Action::CancelRun,
                     KeyCode::Char('t') => return Action::RunSessionTarget,
                     KeyCode::Char('w') => return Action::ToggleWatch,
@@ -261,11 +265,13 @@ mod tests {
         assert_eq!(action_for(&key(KeyCode::Char('q')), &mode), Action::Quit);
         assert_eq!(
             action_for(&key(KeyCode::Char('r')), &mode),
-            Action::Rerun { force: false }
+            Action::Rerun {
+                bypass_cache: false
+            }
         );
         assert_eq!(
             action_for(&key(KeyCode::Char('f')), &mode),
-            Action::Rerun { force: true }
+            Action::Rerun { bypass_cache: true }
         );
         assert_eq!(
             action_for(&key(KeyCode::Char('c')), &mode),

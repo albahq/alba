@@ -22,7 +22,7 @@ text renderers on a terminal.
 | --- | --- |
 | `--jobs <N>` | Max beams at once (default: available parallelism). |
 | `--keep-going` | Do not cancel pending beams after a failure. |
-| `--force` | Ignore the cache for this run; a success is still written back. |
+| `--no-cache` | Ignore the cache for this run; a success is still written back. `--force` is a deprecated spelling that warns on stderr. |
 | `--output interleaved\|grouped` | Text layout. Default `grouped` off a terminal. |
 | `--log-format text\|json` | `json`: one event object per line. |
 | `--watch` | Re-run on changes to the subgraph's `inputs` or any loaded Beamfile. Debounced 200 ms. |

@@ -133,7 +133,7 @@ fn normal_pairs(state: &AppState) -> Vec<(String, String)> {
     ];
     let middle: Vec<(String, String)> = match &state.phase {
         Phase::Running { .. } => vec![pair("r", "rerun"), pair("c", "cancel"), pair("w", watch)],
-        Phase::Finished => vec![pair("r", "rerun"), pair("f", "force"), pair("w", watch)],
+        Phase::Finished => vec![pair("r", "rerun"), pair("f", "no cache"), pair("w", watch)],
         Phase::Waiting { .. } => vec![pair("r", "rerun"), pair("w", watch)],
         Phase::Parked => vec![pair("w", watch)],
     };
@@ -241,7 +241,7 @@ mod tests {
         );
         assert_eq!(
             row(&finished(false)),
-            "↑↓ beam   / search   g graph   v copy   r rerun   f force   w watch   ? help   q quit"
+            "↑↓ beam   / search   g graph   v copy   r rerun   f no cache   w watch   ? help   q quit"
         );
         let mut waiting = finished(true);
         waiting.apply(&RunEvent::WatchWaiting { files: 3 }, Instant::now());

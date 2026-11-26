@@ -155,7 +155,13 @@ pub struct RunFlags {
     /// Ignore the cache when reading: run every beam, and rewrite the
     /// cache entries of the ones that succeed
     #[arg(long)]
-    pub force: bool,
+    pub no_cache: bool,
+
+    /// Deprecated spelling of `--no-cache`, kept so existing scripts keep
+    /// working. Hidden from `--help`; [`crate::commands::run::run`] warns
+    /// on stderr when it is used. Read through [`RunFlags::bypasses_cache`].
+    #[arg(long = "force", hide = true)]
+    pub deprecated_force: bool,
 
     /// How text output is laid out
     ///
@@ -193,6 +199,14 @@ pub struct RunFlags {
     /// Force the headless output, even on a terminal
     #[arg(long)]
     pub no_ui: bool,
+}
+
+impl RunFlags {
+    /// Whether this run ignores the cache when reading, under either
+    /// spelling of the flag.
+    pub fn bypasses_cache(&self) -> bool {
+        self.no_cache || self.deprecated_force
+    }
 }
 
 /// How the text renderers lay a run out.
