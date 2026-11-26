@@ -364,6 +364,9 @@ fn the_replay_keeps_the_error_that_failed_a_beam() {
     let replay = &after_quit[after_quit
         .find("── broken ──")
         .unwrap_or_else(|| panic!("no replay header; got after q: {after_quit:?}"))..];
+    // Windows' pseudo console ends a rewritten line with an erase to
+    // the end of line (`ESC [ K`) before its line break.
+    let replay = replay.replace("\u{1b}[K", "");
     assert!(
         replay.contains(&format!("{reason}\r\n")) || replay.contains(&format!("{reason}\n")),
         "the reason {reason:?} is not replayed; got: {replay:?}"
