@@ -36,8 +36,8 @@ use crate::ui::theme::ColourMode;
 /// project could also declare: a beam id is one or more identifiers
 /// (letters, digits and underscores) joined by `:`, so no real id can
 /// ever contain a space and no project can collide with this key. The
-/// value is never shown — `ui/output.rs` titles the parked pane
-/// `diagnostic` — so it answers to nothing but that constraint.
+/// value is never shown (`ui/output.rs` titles the parked pane
+/// `DIAGNOSTIC`), so it answers to nothing but that constraint.
 pub const DIAGNOSTIC_LOG: &str = "alba diagnostic";
 
 #[derive(Debug, Clone)]
@@ -493,7 +493,7 @@ impl AppState {
 
     /// The selected beam's id, or an empty string when there is none.
     /// Anything that should follow whatever the pane is *currently
-    /// showing* — parked or not, search and scrolling included — uses
+    /// showing* (parked or not, search and scrolling included) uses
     /// `displayed_log_key`, which is this key except while parked.
     fn current_beam_id(&self) -> String {
         self.selected_beam()
@@ -502,9 +502,9 @@ impl AppState {
     }
 
     /// The log key the pane actually shows right now: the diagnostic's
-    /// pseudo-beam while `Phase::Parked` — the diagnostic is the only
+    /// pseudo-beam while `Phase::Parked` (the diagnostic is the only
     /// thing on screen then, and precisely what copy mode's `v`/`y` must
-    /// address — the selected beam otherwise. `ui/output.rs`'s `draw`
+    /// address), the selected beam otherwise. `ui/output.rs`'s `draw`
     /// and every copy-mode entry point resolve their buffer through this
     /// same method, so the highlight and what `y` actually copies can
     /// never disagree about what is on screen.
@@ -653,7 +653,7 @@ impl AppState {
         self.mode = Mode::Graph(GraphState::new(self.selected));
     }
 
-    /// `?`: opens the help overlay. Unlike Search/Copy/Graph it carries
+    /// `?`: opens the help page. Unlike Search/Copy/Graph it carries
     /// no payload of its own — the keymap it lists is fixed, not a
     /// function of anything in `AppState` — so there is nothing to
     /// compute here beyond the mode switch itself.
@@ -666,7 +666,7 @@ impl AppState {
     /// copying, and a search is *cancelled*: nothing is committed, the
     /// highlights go away, and the pane the search pinned while typing
     /// is released back to following the tail — which is what the bottom
-    /// bar, the help overlay and the README have promised all along
+    /// bar, the help page and the README have promised all along
     /// (`Enter commit · Esc cancel`). `Enter`, in `handle_search_key`,
     /// is the only thing that fills `last_search`, and so the only thing
     /// `n`/`N` ever step.
@@ -1810,7 +1810,7 @@ mod tests {
     /// `Esc` (the event loop's `leave_mode`) cancels: nothing is
     /// committed, the highlights go away, and the pane the search pinned
     /// while typing is released back to following — exactly what the
-    /// key hints row, the help overlay and the README promise.
+    /// key hints row, the help page and the README promise.
     #[test]
     fn esc_cancels_the_search_it_leaves() {
         let mut state = AppState::new("build", false);
@@ -2387,7 +2387,7 @@ mod tests {
         }
     }
 
-    /// Each status ends the beam's buffer with the Alba line the spec words.
+    /// Each status ends the beam's buffer with its own Alba end line.
     #[test]
     fn a_finished_beam_ends_with_an_alba_line() {
         let cases = [

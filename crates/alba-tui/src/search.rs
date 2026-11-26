@@ -2,7 +2,7 @@
 //!
 //! This module is pure: no I/O, no terminal, no clock. It knows the
 //! query and the line indices it matches, nothing about how those
-//! indices get drawn or scrolled to — that is `ui/output.rs`'s job, and
+//! indices get drawn or scrolled to. That is `ui/output.rs`'s job, and
 //! the `AppState` methods that carry the buffer's `Paused` offset along
 //! with the search. Matching folds case with `to_ascii_lowercase`
 //! rather than full Unicode case folding: build output is overwhelmingly
@@ -35,7 +35,7 @@ impl SearchState {
 
     /// Recomputes `matches` (line indices, case-insensitive substring)
     /// against the lines of `buffer` that `filter` shows. Callers run
-    /// this after every keystroke and whenever the buffer gains lines —
+    /// this after every keystroke and whenever the buffer gains lines:
     /// `SearchState` itself samples neither the clock nor the buffer on
     /// its own. An empty query matches nothing rather than every line:
     /// `"".contains("")` is true, which would otherwise light up the

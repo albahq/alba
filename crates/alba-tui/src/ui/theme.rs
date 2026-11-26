@@ -20,7 +20,7 @@ pub enum ColourMode {
     Monochrome,
 }
 
-/// The palette's eleven colours, named as the spec names them.
+/// The palette's eleven colours, one token per role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     Surface,

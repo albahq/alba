@@ -36,7 +36,7 @@ impl Outcome {
             .collect()
     }
 
-    /// Every notice this run emitted — where the cache tells the user why
+    /// Every notice this run emitted: where the cache tells the user why
     /// a beam is running uncached.
     fn notices(&self) -> Vec<String> {
         self.events

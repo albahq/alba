@@ -291,10 +291,9 @@ fn status_glyph(status: &BeamStatus) -> &'static str {
     }
 }
 
-/// A running beam's duration ticks live (`now - since`); a pending beam
-/// has none yet and shows the dash.
-/// The duration column: none yet for a pending beam, none at all for
-/// one the engine skipped (it never ran, whatever duration it reports).
+/// The duration column: a running beam's ticks live (`now - since`); a
+/// pending beam has none yet, and one the engine skipped none at all (it
+/// never ran, whatever duration it reports), so both show the dash.
 fn duration_text(state: &BeamState, skipped: bool, now: Instant) -> String {
     match state {
         BeamState::Pending => NO_DURATION.to_string(),
