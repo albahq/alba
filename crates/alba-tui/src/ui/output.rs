@@ -147,15 +147,7 @@ pub fn pane_state(state: &AppState) -> PaneState {
         });
         return PaneState::Copy { lines };
     }
-    let search = match &state.mode {
-        Mode::Search(search) => Some(search),
-        _ => state
-            .last_search
-            .as_ref()
-            .filter(|committed| committed.beam == key)
-            .map(|committed| &committed.search),
-    };
-    if let Some(search) = search {
+    if let Some(search) = state.shown_search() {
         let total = search.matches.len();
         let current = if total == 0 { 0 } else { search.current + 1 };
         return PaneState::Match { current, total };
@@ -214,19 +206,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &AppState) {
     };
     let filter = state.effective_filter();
     let (height, width) = (parts.text.height as usize, parts.text.width as usize);
-    // The search whose matches are marked: the one being typed, or the
-    // last committed one while its own beam is on screen (see
-    // `AppState::last_search`), the same rule `pane_state` counts by.
-    let key = state.displayed_log_key();
-    let search = match &state.mode {
-        Mode::Search(search) => Some(search),
-        _ => state
-            .last_search
-            .as_ref()
-            .filter(|committed| committed.beam == key)
-            .map(|committed| &committed.search),
-    };
-    let marks = search.map(|search| Marks {
+    let marks = state.shown_search().map(|search| Marks {
         query: &search.query,
         current: search.current_line(),
     });

@@ -516,6 +516,23 @@ impl AppState {
         }
     }
 
+    /// The search whose matches the log pane shows: the one being typed,
+    /// or the last committed one while its own beam is on screen (see
+    /// `last_search`). The pane's `i/n` title and its highlights both
+    /// read it, so they can never disagree.
+    pub fn shown_search(&self) -> Option<&SearchState> {
+        match &self.mode {
+            Mode::Search(search) => Some(search),
+            _ => {
+                let key = self.displayed_log_key();
+                self.last_search
+                    .as_ref()
+                    .filter(|committed| committed.beam == key)
+                    .map(|committed| &committed.search)
+            }
+        }
+    }
+
     /// Refreshed by `lib::dispatch` before every action — the one piece
     /// of screen geometry copy mode's keyboard flow needs and `AppState`
     /// has no other way to learn, since it never touches the terminal.
