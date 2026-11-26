@@ -44,8 +44,8 @@ use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RenderedError, RunEvent, RunOptions, RunSummary,
-    Selection, SessionEnd, SessionError, WatchExit,
+    CacheOptions, EngineError, Executors, ReferenceSource, RenderedError, RunEvent, RunOptions,
+    RunSummary, Selection, SessionEnd, SessionError, WatchExit,
 };
 use alba_executors::{ComposeExecutor, DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -118,6 +118,73 @@ pub fn run(
     }
 }
 
+/// Where a run's git reference comes from, and whether it also drives the
+/// selection.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceRule {
+    pub(crate) source: ReferenceSource,
+    /// `--affected` asked for it: the affected beams are the targets, and
+    /// a reference git cannot resolve is a startup error rather than a
+    /// warning and a full run.
+    pub(crate) drives_selection: bool,
+}
+
+/// The one rule for which reference is in effect, read by the selection
+/// `main.rs` builds and by every run's change set
+/// ([`RunOptions::diff_from`]), so the two never disagree.
+///
+/// - `--no-affected`: none, every beam runs in full mode.
+/// - `--affected <REF>`: `<REF>`, for the selection and the mode.
+/// - `--affected` without a value, or with an empty one: the declared
+///   `base`, for both.
+/// - neither flag: the declared `base`, for the mode only.
+pub(crate) fn reference_rule(flags: &RunFlags) -> ReferenceRule {
+    if flags.no_affected {
+        return ReferenceRule {
+            source: ReferenceSource::Off,
+            drives_selection: false,
+        };
+    }
+    match &flags.affected {
+        Some(value) => ReferenceRule {
+            source: given_or_declared(value.as_deref()),
+            drives_selection: true,
+        },
+        None => ReferenceRule {
+            source: ReferenceSource::Declared,
+            drives_selection: false,
+        },
+    }
+}
+
+/// A reference the command line gave, or the declared `base` when it gave
+/// none or an empty one: what `--affected [<REF>]` and `alba affected
+/// [ref]` both mean.
+pub(crate) fn given_or_declared(given: Option<&str>) -> ReferenceSource {
+    match given {
+        Some(reference) if !reference.is_empty() => {
+            ReferenceSource::Explicit(reference.to_string())
+        }
+        _ => ReferenceSource::Declared,
+    }
+}
+
+/// Why a command that needed the declared `base` found none, and how to
+/// give it one. `explicit` is the command-line form that names a
+/// reference directly.
+pub(crate) fn missing_base(project: &Project, explicit: &str) -> String {
+    let mut message = format!(
+        "no git reference to diff from: pass one ({explicit}) \
+         or declare it in the Beamfile with `git {{ base '<REF>' }}`"
+    );
+    if let Some(warning) = &project.git.warning {
+        message.push_str(&format!(
+            "; the declared `base` could not be evaluated: {warning}"
+        ));
+    }
+    message
+}
+
 /// Every run's executor set. Docker mounts the project at the root
 /// Beamfile's directory, resolved through the same helper the watcher
 /// uses so the two never disagree on where the project is rooted.
@@ -175,7 +242,7 @@ async fn execute(
     flags: &RunFlags,
 ) -> i32 {
     let root = alba_engine::beamfile_dir(beamfile);
-    let options = RunOptions {
+    let mut options = RunOptions {
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
         params,
@@ -185,10 +252,26 @@ async fn execute(
         }),
         ambient_env: ambient_env(),
         definitions: alba_core::definitions(project, sources, &root),
+        // Set per run by `RunOptions::diff_from`.
+        changes: None,
+        unresolved_base: false,
+        warnings: Vec::new(),
+        sources: sources.clone(),
         extra_env: Vec::new(),
     };
 
-    let targets = match alba_engine::select(project, sources, &root, selection) {
+    // The run's change set first, its warnings travelling as events; the
+    // selection reuses it, so the run diffs once. A reference `--affected`
+    // named that git cannot resolve leaves no change set, and the
+    // selection then reports git's error, once, as the startup error.
+    options.diff_from(project, &root, &reference_rule(flags).source);
+    let targets = match alba_engine::select_with_changes(
+        project,
+        sources,
+        &root,
+        selection,
+        options.changes.as_ref(),
+    ) {
         Ok(targets) => targets,
         Err(error) => {
             LineSink::stderr().line(render_engine_error(&error, sources).text.trim_end());
@@ -293,6 +376,11 @@ async fn watch_execute(
         ambient_env: ambient_env(),
         // A session computes them for each run, from the project it just loaded.
         definitions: Default::default(),
+        // Set per run by `RunOptions::diff_from`.
+        changes: None,
+        unresolved_base: false,
+        warnings: Vec::new(),
+        sources: Default::default(),
         extra_env: Vec::new(),
     };
 
@@ -307,6 +395,7 @@ async fn watch_execute(
         project.clone(),
         sources.clone(),
         selection.clone(),
+        reference_rule(flags).source,
         options,
         executors(beamfile),
         events,
@@ -406,6 +495,11 @@ async fn tui_execute(
         ambient_env: ambient_env(),
         // A session computes them for each run, from the project it just loaded.
         definitions: Default::default(),
+        // Set per run by `RunOptions::diff_from`.
+        changes: None,
+        unresolved_base: false,
+        warnings: Vec::new(),
+        sources: Default::default(),
         extra_env: if colour {
             vec![
                 ("FORCE_COLOR".to_string(), "1".to_string()),
@@ -434,6 +528,7 @@ async fn tui_execute(
         let project = project.clone();
         let sources = sources.clone();
         let selection = selection.clone();
+        let reference = reference_rule(flags).source;
         let watch = flags.watch;
         async move {
             alba_engine::session(
@@ -441,6 +536,7 @@ async fn tui_execute(
                 project,
                 sources,
                 selection,
+                reference,
                 options,
                 executors(&beamfile),
                 events,
@@ -1117,6 +1213,7 @@ mod tests {
             cwd: None,
             executor: alba_core::ExecutorKind::Shell,
             allow_failure: false,
+            change_globs: Vec::new(),
             dir: PathBuf::from("."),
             span: alba_syntax::Span::new(0, 0),
             source: alba_core::SourceId(0),
@@ -1129,6 +1226,7 @@ mod tests {
             beams,
             default: None,
             hooks: Vec::new(),
+            git: Default::default(),
         }
     }
 
@@ -1516,13 +1614,20 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![beam.clone()],
                 affected_by: None,
+                base: None,
                 beams: vec![beam.clone()],
                 edges: Vec::new(),
                 details: Vec::new(),
             },
             now,
         );
-        state.apply(&RunEvent::BeamStarted { id: beam.clone() }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: beam.clone(),
+                mode: None,
+            },
+            now,
+        );
         state.apply(
             &RunEvent::CommandStarted {
                 id: beam.clone(),

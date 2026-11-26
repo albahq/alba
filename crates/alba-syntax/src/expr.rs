@@ -12,12 +12,17 @@
 //! Precedence, low to high: `||`, `&&`, `==`/`!=`, `+`, atoms. `if cond
 //! then a else b` is parsed as an atom whose three parts each recurse back
 //! into the full expression grammar, so e.g. `else "no" + suffix` parses
-//! the whole `+` expression as the `else` branch.
+//! the whole `+` expression as the `else` branch. `match subject { ... }`
+//! is an atom too: its braces delimit it, so it needs no precedence of its
+//! own. A method call (`receiver.name(args)`) is a postfix on an atom,
+//! binding tighter than everything else, and chains left to right.
+
+use std::collections::HashSet;
 
 use crate::ast::Spanned;
 use crate::parser::{ParseError, Parser};
 use crate::template::{self, StringTemplate};
-use crate::token::TokenKind;
+use crate::token::{Span, TokenKind};
 
 /// An expression, as used in `let` bindings and interpolated `{expr}`
 /// segments of a [`StringTemplate`].
@@ -46,6 +51,39 @@ pub enum Expr {
         object: Spanned<String>,
         field: Spanned<String>,
     },
+    /// `match subject { 'a' | 'b' => x  _ => y }`: the value of the first
+    /// arm whose glob pattern matches the subject, else `default`. The
+    /// patterns are plain strings known at parse time; compiling and
+    /// matching them is `alba-core`'s concern.
+    Match {
+        subject: Box<Expr>,
+        arms: Vec<MatchArm>,
+        default: Box<Expr>,
+        /// From `match` to the closing `}`.
+        span: Span,
+    },
+    /// `receiver.method(args)`: a method call, such as
+    /// `git.changes('src/**/*.php')` or `<list>.dirs('src/*')`. Which
+    /// values have which methods is `alba-core`'s concern, not the
+    /// grammar's. Without parentheses, `object.field` stays a
+    /// [`Expr::Field`].
+    Method {
+        receiver: Box<Expr>,
+        method: Spanned<String>,
+        args: Vec<Expr>,
+        /// From the start of the receiver to the closing `)`.
+        span: Span,
+    },
+}
+
+/// One `'pattern' | 'pattern' => value` arm of an [`Expr::Match`]. The
+/// default `_` arm is not one: it is [`Expr::Match`]'s `default`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    /// The decoded text of each alternative pattern, spanning its string
+    /// literal (quotes included).
+    pub patterns: Vec<Spanned<String>>,
+    pub value: Expr,
 }
 
 /// A binary operator usable in an [`Expr::Binary`].
@@ -134,11 +172,60 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    /// A single atom: a string, boolean, variable, call, or `if/then/else`
-    /// expression. The highest-precedence level.
+    /// A single atom followed by any number of method calls, the
+    /// highest-precedence level: `git.changes('a').dirs('b')` is
+    /// `(git.changes('a')).dirs('b')`. Only `. name (` starts a method
+    /// call, so `git.branch` keeps parsing as a field.
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek().span.start;
+        let mut expr = self.parse_primary()?;
+        while self.method_call_follows() {
+            self.advance();
+            let method = self.eat_ident()?;
+            let args = self.parse_call_args()?;
+            expr = Expr::Method {
+                receiver: Box::new(expr),
+                method,
+                args,
+                span: Span::new(start, self.prev_end()),
+            };
+        }
+        Ok(expr)
+    }
+
+    /// Whether the next tokens are `. identifier (`, the start of a method
+    /// call.
+    fn method_call_follows(&self) -> bool {
+        self.check(&TokenKind::Dot)
+            && matches!(self.peek_at(1).kind, TokenKind::Ident(_))
+            && self.peek_at(2).kind == TokenKind::LParen
+    }
+
+    /// `( args )`: a parenthesized, comma-separated argument list, shared
+    /// by function and method calls.
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.expect(TokenKind::LParen, "`(`")?;
+        let mut args = Vec::new();
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                args.push(self.parse_expr()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    /// A string, boolean, variable, call, field, `match`, or
+    /// `if/then/else` expression.
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::KwIf => self.parse_if(),
+            TokenKind::KwMatch => self.parse_match(),
             TokenKind::Str(_) => {
                 let tok = self.advance();
                 let template = template::parse_template_at(self.source(), tok.span)?;
@@ -154,7 +241,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) => {
                 let name_span = self.advance().span;
-                if self.check(&TokenKind::Dot) {
+                // `git.changes(...)` is a method call on `git`, left to
+                // `parse_atom`'s postfix loop; `git.branch` is a field.
+                if self.check(&TokenKind::Dot) && !self.method_call_follows() {
                     self.advance();
                     let field = self.eat_ident()?;
                     return Ok(Expr::Field {
@@ -163,19 +252,7 @@ impl<'a> Parser<'a> {
                     });
                 }
                 if self.check(&TokenKind::LParen) {
-                    self.advance();
-                    let mut args = Vec::new();
-                    if !self.check(&TokenKind::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if self.check(&TokenKind::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(TokenKind::RParen, "`)`")?;
+                    let args = self.parse_call_args()?;
                     Ok(Expr::Call {
                         name: Spanned::new(name, name_span),
                         args,
@@ -202,6 +279,114 @@ impl<'a> Parser<'a> {
             then: Box::new(then),
             otherwise: Box::new(otherwise),
         })
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// `match subject { arms }`. Arms are tried in order and separated by
+    /// an optional comma (newlines are dropped before parsing). `_` is
+    /// mandatory and last; a missing `_`, an arm after it, or a pattern
+    /// repeated anywhere in the `match` is rejected here, pointing at it.
+    fn parse_match(&mut self) -> Result<Expr, ParseError> {
+        let start = self.expect(TokenKind::KwMatch, "`match`")?.span.start;
+        let subject = self.parse_expr()?;
+        self.expect(TokenKind::LBrace, "`{` to open the `match` arms")?;
+
+        let mut arms = Vec::new();
+        let mut default = None;
+        let mut seen = HashSet::new();
+        loop {
+            if self.check(&TokenKind::RBrace) {
+                let close = self.advance();
+                let Some(default) = default else {
+                    return Err(ParseError {
+                        message: "`match` requires a final `_` arm, found `}`".to_string(),
+                        span: close.span,
+                        help: Some(
+                            "add `_ => value` as the last arm, for a subject no pattern matches"
+                                .to_string(),
+                        ),
+                    });
+                };
+                return Ok(Expr::Match {
+                    subject: Box::new(subject),
+                    arms,
+                    default: Box::new(default),
+                    span: Span::new(start, close.span.end),
+                });
+            }
+
+            let arm_start = self.peek().span.start;
+            let is_default = matches!(&self.peek().kind, TokenKind::Ident(name) if name == "_");
+            let arm = if is_default {
+                self.advance();
+                self.expect(TokenKind::FatArrow, "`=>`")?;
+                None
+            } else {
+                Some(self.parse_match_patterns(&mut seen)?)
+            };
+            let value = self.parse_expr()?;
+
+            if default.is_some() {
+                return Err(ParseError {
+                    message: "unreachable `match` arm after `_`".to_string(),
+                    span: Span::new(arm_start, self.prev_end()),
+                    help: Some(
+                        "`_` matches every subject, so it must be the last arm; move this arm \
+                         above it"
+                            .to_string(),
+                    ),
+                });
+            }
+            match arm {
+                Some(patterns) => arms.push(MatchArm { patterns, value }),
+                None => default = Some(value),
+            }
+
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            }
+        }
+    }
+
+    /// `'a' | 'b' =>`: one or more pattern strings separated by `|`, up to
+    /// and including the `=>`. `seen` holds every pattern of the `match`
+    /// so far, so a repeat is caught across arms as well as within one.
+    fn parse_match_patterns(
+        &mut self,
+        seen: &mut HashSet<String>,
+    ) -> Result<Vec<Spanned<String>>, ParseError> {
+        let mut patterns = Vec::new();
+        loop {
+            if !matches!(self.peek().kind, TokenKind::Str(_)) {
+                let what = if patterns.is_empty() {
+                    "a pattern string, `_`, or `}`"
+                } else {
+                    "a pattern string after `|`"
+                };
+                return Err(self.unexpected(what));
+            }
+            let token = self.advance();
+            let value = template::parse_pattern_at(self.source(), token.span)?;
+            if !seen.insert(value.clone()) {
+                return Err(ParseError {
+                    message: format!("duplicate `match` pattern `{value}`"),
+                    span: token.span,
+                    help: Some(
+                        "this pattern already appears earlier in this `match`; remove one"
+                            .to_string(),
+                    ),
+                });
+            }
+            patterns.push(Spanned::new(value, token.span));
+            if self.check(&TokenKind::Pipe) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(TokenKind::FatArrow, "`|` or `=>`")?;
+        Ok(patterns)
     }
 }
 

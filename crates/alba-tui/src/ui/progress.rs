@@ -51,7 +51,9 @@ impl Counts {
                 BeamState::Pending => counts.not_run += 1,
                 BeamState::Running { .. } => {}
                 BeamState::Done { status, .. } => match status {
-                    BeamStatus::Succeeded => {
+                    // Unchanged had nothing to process, which is a pass:
+                    // it satisfies its dependents and fails nothing.
+                    BeamStatus::Succeeded | BeamStatus::Unchanged => {
                         counts.done += 1;
                         counts.passed += 1;
                     }
@@ -252,6 +254,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("build")],
                 affected_by: None,
+                base: None,
                 beams: beams.iter().map(|name| id(name)).collect(),
                 edges: Vec::new(),
                 details: Vec::new(),
@@ -263,7 +266,13 @@ mod tests {
 
     fn finish(state: &mut AppState, beam: &str, status: BeamStatus) {
         if !matches!(status, BeamStatus::Cancelled) {
-            state.apply(&RunEvent::BeamStarted { id: id(beam) }, Instant::now());
+            state.apply(
+                &RunEvent::BeamStarted {
+                    id: id(beam),
+                    mode: None,
+                },
+                Instant::now(),
+            );
         }
         state.apply(
             &RunEvent::BeamFinished {

@@ -37,6 +37,17 @@ pub struct File {
     pub default: Option<Spanned<String>>,
     pub beams: Vec<BeamDecl>,
     pub hooks: Vec<HookDecl>,
+    /// The `git { ... }` block, at most one per file.
+    pub git: Option<GitDecl>,
+}
+
+/// `git { base <expr> }`: the git settings a project declares. `base` is
+/// absent for an empty block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitDecl {
+    pub base: Option<Expr>,
+    /// From `git` to the closing brace.
+    pub span: Span,
 }
 
 /// `import "path" as alias`.

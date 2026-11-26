@@ -290,3 +290,190 @@ fn an_affected_session_picks_up_a_beam_once_its_input_changes() {
     assert!(started.contains("\"targets\":[\"other\"]"), "{started}");
     session.wait_for("other-ran");
 }
+
+/// A repository declaring `base` (the Beamfile line `git { base ... }`),
+/// committed on `main` and checked out on a `feature` branch, with
+/// `src/first.txt` changed and left uncommitted.
+fn based_watch_project(base: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/first.txt"), "one").unwrap();
+    std::fs::write(dir.path().join("src/second.txt"), "one").unwrap();
+    std::fs::write(dir.path().join(".gitignore"), ".alba/\n").unwrap();
+    std::fs::write(dir.path().join("Beamfile"), based_beamfile(base)).unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "alba@example.com"]);
+    git(dir.path(), &["config", "user.name", "Alba"]);
+    git(dir.path(), &["config", "commit.gpgsign", "false"]);
+    git(
+        dir.path(),
+        &["config", "core.excludesFile", ".git/no-global-excludes"],
+    );
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "init"]);
+    git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.path().join("src/first.txt"), "two").unwrap();
+    dir
+}
+
+fn based_beamfile(base: &str) -> String {
+    format!(
+        "git {{ base '{base}' }}\n\
+         beam lint {{ inputs [\"src/**\"] run \"echo files: {{git.changes('src/**')}}\" }}\n"
+    )
+}
+
+impl WatchProcess {
+    /// How many lines seen so far contain `needle`.
+    fn count(&self, needle: &str) -> usize {
+        self.seen
+            .iter()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+}
+
+/// Every run of a session diffs from the declared base anew: the second
+/// save adds its file to the list the first run saw.
+#[test]
+fn each_watch_run_recomputes_the_changes() {
+    let dir = based_watch_project("main");
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &["run", "lint", "--watch", "--log-format", "json", "--no-ui"],
+    );
+    session.wait_for(r#""text":"files: src/first.txt""#);
+    session.wait_for("watch_waiting");
+    std::fs::write(dir.path().join("src/second.txt"), "two").unwrap();
+    session.wait_for("watch_triggered");
+    session.wait_for(r#""text":"files: src/first.txt src/second.txt""#);
+}
+
+/// A reload that edits `base` moves the diff: the next run names the new
+/// reference.
+#[test]
+fn a_reload_that_edits_the_base_moves_the_diff() {
+    let dir = based_watch_project("main");
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &["run", "lint", "--watch", "--log-format", "json", "--no-ui"],
+    );
+    let started = session.wait_for("run_started");
+    assert!(
+        started.contains(r#""base":{"reference":"main""#),
+        "{started}"
+    );
+    session.wait_for("watch_waiting");
+    std::fs::write(dir.path().join("Beamfile"), based_beamfile("feature")).unwrap();
+    session.wait_for("watch_triggered");
+    let started = session.wait_for("run_started");
+    assert!(
+        started.contains(r#""base":{"reference":"feature""#),
+        "{started}"
+    );
+}
+
+/// A reload that sets a `base` git cannot resolve: that run warns once,
+/// naming the reference, and runs full.
+#[test]
+fn a_reload_to_an_unresolved_base_warns_once_and_runs_full() {
+    let dir = based_watch_project("main");
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &["run", "lint", "--watch", "--log-format", "json", "--no-ui"],
+    );
+    session.wait_for("watch_waiting");
+    assert_eq!(session.count(r#""event":"warning""#), 0);
+    std::fs::write(dir.path().join("Beamfile"), based_beamfile("origin/nope")).unwrap();
+    session.wait_for("watch_triggered");
+    session.wait_for(r#""text":"files: src""#);
+    session.wait_for("run_finished");
+    let warnings: Vec<&String> = session
+        .seen
+        .iter()
+        .filter(|line| line.contains(r#""event":"warning""#))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("origin/nope"), "{warnings:?}");
+}
+
+/// A declared base git cannot resolve warns once per run of a session,
+/// on the stream, with no second copy printed at startup.
+#[test]
+fn an_unresolved_base_warns_once_per_watch_run() {
+    let dir = based_watch_project("origin/nope");
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &["run", "lint", "--watch", "--log-format", "json", "--no-ui"],
+    );
+    session.wait_for("run_finished");
+    session.wait_for("watch_waiting");
+    assert_eq!(session.count(r#""event":"warning""#), 1);
+    std::fs::write(dir.path().join("src/second.txt"), "two").unwrap();
+    session.wait_for("watch_triggered");
+    session.wait_for("run_finished");
+    assert_eq!(session.count(r#""event":"warning""#), 2);
+    let errors = session.errors.lock().unwrap().clone();
+    assert!(!errors.contains("warning:"), "{errors}");
+}
+
+/// `--affected` without a value re-reads the declared base from the
+/// reloaded project on every run, for the selection as for the mode.
+#[test]
+fn a_valueless_affected_session_follows_the_reloaded_base() {
+    let dir = based_watch_project("main");
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &[
+            "run",
+            "--affected",
+            "--watch",
+            "--log-format",
+            "json",
+            "--no-ui",
+        ],
+    );
+    let started = session.wait_for("run_started");
+    assert!(started.contains(r#""affected_by":"main""#), "{started}");
+    session.wait_for("watch_waiting");
+    std::fs::write(dir.path().join("Beamfile"), based_beamfile("feature")).unwrap();
+    session.wait_for("watch_triggered");
+    let started = session.wait_for("run_started");
+    assert!(started.contains(r#""affected_by":"feature""#), "{started}");
+    assert!(
+        started.contains(r#""base":{"reference":"feature""#),
+        "{started}"
+    );
+}
+
+/// A valueless `--affected` session whose reload drops `base` has nothing
+/// to select from: it parks, saying so, and resumes once `base` is back.
+#[test]
+fn a_valueless_affected_session_parks_without_a_base_and_resumes() {
+    let dir = based_watch_project("main");
+    let mut session = WatchProcess::spawn(
+        dir.path(),
+        &[
+            "run",
+            "--affected",
+            "--watch",
+            "--log-format",
+            "json",
+            "--no-ui",
+        ],
+    );
+    session.wait_for("watch_waiting");
+    std::fs::write(
+        dir.path().join("Beamfile"),
+        "beam lint { inputs [\"src/**\"] run \"echo files: {git.changes('src/**')}\" }\n",
+    )
+    .unwrap();
+    let broken = session.wait_for(r#""event":"project_broken""#);
+    assert!(
+        broken.contains("the Beamfile no longer declares a `base` in its `git` block"),
+        "{broken}"
+    );
+    std::fs::write(dir.path().join("Beamfile"), based_beamfile("main")).unwrap();
+    let started = session.wait_for("run_started");
+    assert!(started.contains(r#""affected_by":"main""#), "{started}");
+}

@@ -24,6 +24,7 @@
 
 use std::io::{self, Write};
 
+use alba_core::{ChangeMode, FullReason};
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::Stream;
 use serde::Serialize;
@@ -81,11 +82,27 @@ enum WireEvent<'a> {
         targets: Vec<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         affected_by: Option<&'a str>,
+        /// The reference `git.changes()` diffs from and its merge-base
+        /// commit; absent when the run has none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base: Option<WireBase<'a>>,
         beams: Vec<&'a str>,
         edges: Vec<(&'a str, &'a str)>,
     },
     BeamStarted {
         beam: &'a str,
+        /// `incremental` or `full`, only for a beam calling
+        /// `git.changes()`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<&'static str>,
+        /// Why the mode is `full`; absent otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        full_reason: Option<&'static str>,
+        /// What `full_reason` names, when it names something: the changed
+        /// path (relative to the project root) for `input_outside_changes`,
+        /// the dependency for `dependency_affected`; absent otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        full_reason_detail: Option<&'a str>,
     },
     BeamCached {
         beam: &'a str,
@@ -108,6 +125,10 @@ enum WireEvent<'a> {
     RunFinished {
         succeeded: Vec<&'a str>,
         cached: Vec<&'a str>,
+        /// Beams with no changed file to process; absent when there are
+        /// none, so a run without `git.changes()` keeps its shape.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        unchanged: Vec<&'a str>,
         failed: Vec<&'a str>,
         failed_allowed: Vec<&'a str>,
         cancelled: Vec<&'a str>,
@@ -127,9 +148,19 @@ enum WireEvent<'a> {
     WatchTriggered {
         paths: &'a [String],
     },
+    /// Something the run warns about without stopping, once per run.
+    Warning {
+        message: &'a str,
+    },
     ProjectBroken {
         diagnostic: &'a str,
     },
+}
+
+#[derive(Serialize)]
+struct WireBase<'a> {
+    reference: &'a str,
+    merge_base: &'a str,
 }
 
 #[derive(Serialize)]
@@ -147,19 +178,29 @@ impl<'a> WireEvent<'a> {
             RunEvent::RunStarted {
                 targets,
                 affected_by,
+                base,
                 beams,
                 edges,
                 details: _,
             } => WireEvent::RunStarted {
                 targets: targets.iter().map(|id| id.0.as_str()).collect(),
                 affected_by: affected_by.as_deref(),
+                base: base.as_ref().map(|(reference, merge_base)| WireBase {
+                    reference,
+                    merge_base,
+                }),
                 beams: beams.iter().map(|id| id.0.as_str()).collect(),
                 edges: edges
                     .iter()
                     .map(|(from, to)| (from.0.as_str(), to.0.as_str()))
                     .collect(),
             },
-            RunEvent::BeamStarted { id } => WireEvent::BeamStarted { beam: &id.0 },
+            RunEvent::BeamStarted { id, mode } => WireEvent::BeamStarted {
+                beam: &id.0,
+                mode: mode.as_ref().map(mode_name),
+                full_reason: mode.as_ref().and_then(full_reason_name),
+                full_reason_detail: mode.as_ref().and_then(full_reason_detail),
+            },
             RunEvent::BeamCached { id } => WireEvent::BeamCached { beam: &id.0 },
             RunEvent::BeamOutput { id, line, replayed } => WireEvent::BeamOutput {
                 beam: &id.0,
@@ -193,6 +234,7 @@ impl<'a> WireEvent<'a> {
             RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
             RunEvent::WatchTriggered { paths } => WireEvent::WatchTriggered { paths },
             RunEvent::ProjectBroken { diagnostic, .. } => WireEvent::ProjectBroken { diagnostic },
+            RunEvent::Warning { message } => WireEvent::Warning { message },
         })
     }
 }
@@ -205,6 +247,7 @@ impl<'a> WireEvent<'a> {
         WireEvent::RunFinished {
             succeeded: ids(&summary.succeeded),
             cached: ids(&summary.cached),
+            unchanged: ids(&summary.unchanged),
             failed: ids(&summary.failed),
             failed_allowed: ids(&summary.failed_allowed),
             cancelled: ids(&summary.cancelled),
@@ -219,6 +262,7 @@ fn status_name(status: &BeamStatus) -> &'static str {
     match status {
         BeamStatus::Succeeded => "succeeded",
         BeamStatus::Cached => "cached",
+        BeamStatus::Unchanged => "unchanged",
         BeamStatus::Failed { .. } => "failed",
         BeamStatus::FailedAllowed { .. } => "failed_allowed",
         BeamStatus::Cancelled => "cancelled",
@@ -230,7 +274,40 @@ fn exit_code(status: &BeamStatus) -> Option<i32> {
         BeamStatus::Failed { exit_code } | BeamStatus::FailedAllowed { exit_code } => {
             Some(*exit_code)
         }
-        BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::Cancelled => None,
+        BeamStatus::Succeeded
+        | BeamStatus::Cached
+        | BeamStatus::Unchanged
+        | BeamStatus::Cancelled => None,
+    }
+}
+
+fn mode_name(mode: &ChangeMode) -> &'static str {
+    match mode {
+        ChangeMode::Incremental => "incremental",
+        ChangeMode::Full(_) => "full",
+    }
+}
+
+fn full_reason_name(mode: &ChangeMode) -> Option<&'static str> {
+    let ChangeMode::Full(reason) = mode else {
+        return None;
+    };
+    Some(match reason {
+        FullReason::NoReference => "no_reference",
+        FullReason::ReferenceUnresolved => "reference_unresolved",
+        FullReason::OnTargetBranch => "on_target_branch",
+        FullReason::BeamfileChanged => "beamfile_changed",
+        FullReason::DependencyAffected(_) => "dependency_affected",
+        FullReason::InputOutsideChanges(_) => "input_outside_changes",
+    })
+}
+
+/// What a full mode's reason names, for the reasons that name something.
+fn full_reason_detail(mode: &ChangeMode) -> Option<&str> {
+    match mode {
+        ChangeMode::Full(FullReason::InputOutsideChanges(path)) => Some(path),
+        ChangeMode::Full(FullReason::DependencyAffected(id)) => Some(&id.0),
+        _ => None,
     }
 }
 
@@ -269,6 +346,7 @@ mod tests {
             &mut renderer,
             &RunEvent::BeamStarted {
                 id: BeamId("build".to_string()),
+                mode: None,
             },
         );
         assert!(!renderer.out.writer.is_empty());
@@ -425,6 +503,7 @@ mod tests {
         let event = RunEvent::RunStarted {
             targets: vec![BeamId("build".to_string())],
             affected_by: None,
+            base: None,
             beams: vec![BeamId("codegen".to_string()), BeamId("build".to_string())],
             edges: vec![(BeamId("build".to_string()), BeamId("codegen".to_string()))],
             details: Vec::new(),

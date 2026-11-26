@@ -33,7 +33,7 @@
 //!   a parse error (`duplicate executor option`), for the same reason.
 
 use crate::ast::{
-    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File,
+    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File, GitDecl,
     HookDecl, Import, LetBinding, NamedString, NeedRef, Spanned,
 };
 use crate::expr::Expr;
@@ -148,6 +148,17 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos]
     }
 
+    /// The token after the current one, or `Eof` at the end of input.
+    fn peek_next(&self) -> &Token {
+        self.peek_at(1)
+    }
+
+    /// The token `offset` places after the current one, or `Eof` past the
+    /// end of input.
+    pub(crate) fn peek_at(&self, offset: usize) -> &Token {
+        &self.tokens[(self.pos + offset).min(self.tokens.len() - 1)]
+    }
+
     pub(crate) fn is_eof(&self) -> bool {
         matches!(self.peek().kind, TokenKind::Eof)
     }
@@ -161,6 +172,12 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         tok
+    }
+
+    /// The end offset of the last token consumed, for spans that cover a
+    /// whole construct (a `match` arm) rather than a single token.
+    pub(crate) fn prev_end(&self) -> usize {
+        self.tokens[self.pos.saturating_sub(1)].span.end
     }
 
     pub(crate) fn check(&self, kind: &TokenKind) -> bool {
@@ -596,6 +613,7 @@ impl<'a> Parser<'a> {
         let mut default = None;
         let mut beams = Vec::new();
         let mut hooks = Vec::new();
+        let mut git = None;
 
         while !self.is_eof() {
             match self.peek().kind {
@@ -611,10 +629,26 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwBeam => beams.push(self.parse_beam()?),
                 TokenKind::KwHook => hooks.push(self.parse_hook()?),
+                // `git` is a reserved name, not a keyword: it opens a
+                // block only at the top level, followed by a brace, and
+                // stays an ordinary identifier everywhere else.
+                TokenKind::Ident(ref name)
+                    if name == "git" && self.peek_next().kind == TokenKind::LBrace =>
+                {
+                    let decl = self.parse_git()?;
+                    if git.is_some() {
+                        return Err(ParseError {
+                            message: "duplicate `git` block".to_string(),
+                            span: Span::new(decl.span.start, decl.span.start + "git".len()),
+                            help: Some("declare every `git` setting in one block".to_string()),
+                        });
+                    }
+                    git = Some(decl);
+                }
                 _ => {
-                    return Err(
-                        self.unexpected("`version`, `import`, `let`, `default`, `beam`, or `hook`")
-                    );
+                    return Err(self.unexpected(
+                        "`version`, `import`, `let`, `default`, `beam`, `hook`, or `git`",
+                    ));
                 }
             }
         }
@@ -637,9 +671,47 @@ impl<'a> Parser<'a> {
             default,
             beams,
             hooks,
+            git,
+        })
+    }
+
+    /// `git { base <expr> }`. Every key is optional, and none may repeat.
+    fn parse_git(&mut self) -> Result<GitDecl, ParseError> {
+        let keyword = self.eat_ident()?;
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let mut base = None;
+        while !self.check(&TokenKind::RBrace) {
+            let key = self.eat_ident()?;
+            if key.value != "base" {
+                let help = match closest(&key.value, GIT_KEYS.iter().copied()) {
+                    Some(candidate) => format!("did you mean `{candidate}`?"),
+                    None => "`base` is the only key a `git` block takes".to_string(),
+                };
+                return Err(ParseError {
+                    message: format!("unknown `git` key `{}`", key.value),
+                    span: key.span,
+                    help: Some(help),
+                });
+            }
+            if base.is_some() {
+                return Err(ParseError {
+                    message: "duplicate `git` key `base`".to_string(),
+                    span: key.span,
+                    help: None,
+                });
+            }
+            base = Some(self.parse_expr()?);
+        }
+        let close = self.expect(TokenKind::RBrace, "`}`")?;
+        Ok(GitDecl {
+            base,
+            span: Span::new(keyword.span.start, close.span.end),
         })
     }
 }
+
+/// The keys a `git { ... }` block takes.
+const GIT_KEYS: [&str; 1] = ["base"];
 
 /// `git` names the built-in git object; binding it would shadow every
 /// `git.*` field at once.
@@ -658,14 +730,6 @@ fn reject_reserved(name: &Spanned<String>) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// The [`describe`] text for [`TokenKind::Eof`], exposed so `template.rs`
-/// can recognize (and correct) it when its own synthetic end-of-body
-/// sentinel — which reuses `TokenKind::Eof` as the sub-parser's
-/// end-of-input marker, but really means "the interpolation's closing
-/// `}`" — surfaces in an error message. Kept as a single source of truth
-/// rather than a string duplicated in both places, so the two can't drift.
-pub(crate) const EOF_DESCRIPTION: &str = "end of input";
-
 /// A short, human-readable description of a token kind for error messages.
 fn describe(kind: &TokenKind) -> String {
     match kind {
@@ -683,6 +747,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::KwTrue => "`true`".to_string(),
         TokenKind::KwFalse => "`false`".to_string(),
         TokenKind::KwHook => "`hook`".to_string(),
+        TokenKind::KwMatch => "`match`".to_string(),
         TokenKind::LBrace => "`{`".to_string(),
         TokenKind::RBrace => "`}`".to_string(),
         TokenKind::LBracket => "`[`".to_string(),
@@ -696,23 +761,30 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::NotEq => "`!=`".to_string(),
         TokenKind::AndAnd => "`&&`".to_string(),
         TokenKind::OrOr => "`||`".to_string(),
+        TokenKind::Pipe => "`|`".to_string(),
+        TokenKind::FatArrow => "`=>`".to_string(),
         TokenKind::Plus => "`+`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
         TokenKind::Star => "`*`".to_string(),
         TokenKind::Newline => "a newline".to_string(),
-        TokenKind::Eof => EOF_DESCRIPTION.to_string(),
+        TokenKind::Eof => "end of input".to_string(),
     }
 }
 
 /// Suggests the closest known beam field name to `name`, if any is within
 /// Levenshtein distance 2 (picking the closest on ties by array order).
 fn suggest_field(name: &str) -> Option<&'static str> {
-    BEAM_FIELDS
-        .iter()
-        .map(|&field| (field, levenshtein(name, field)))
+    closest(name, BEAM_FIELDS.iter().copied())
+}
+
+/// The candidate closest to `name`, if any is within Levenshtein distance
+/// 2 (the first of equally close ones).
+fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    candidates
+        .map(|candidate| (candidate, levenshtein(name, candidate)))
         .filter(|&(_, distance)| distance <= 2)
         .min_by_key(|&(_, distance)| distance)
-        .map(|(field, _)| field)
+        .map(|(candidate, _)| candidate)
 }
 
 /// Classic dynamic-programming Levenshtein edit distance between two

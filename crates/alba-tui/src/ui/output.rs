@@ -746,13 +746,20 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id(name)],
                 affected_by: None,
+                base: None,
                 beams: vec![id(name)],
                 edges: Vec::new(),
                 details: vec![details(name)],
             },
             now,
         );
-        state.apply(&RunEvent::BeamStarted { id: id(name) }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id(name),
+                mode: None,
+            },
+            now,
+        );
         state
     }
 
@@ -1031,6 +1038,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("test")],
                 affected_by: None,
+                base: None,
                 beams: vec![id("test"), id("lint")],
                 edges: Vec::new(),
                 details: Vec::new(),
@@ -1038,7 +1046,13 @@ mod tests {
             now,
         );
         for beam in ["test", "lint"] {
-            state.apply(&RunEvent::BeamStarted { id: id(beam) }, now);
+            state.apply(
+                &RunEvent::BeamStarted {
+                    id: id(beam),
+                    mode: None,
+                },
+                now,
+            );
             state.apply(
                 &RunEvent::BeamOutput {
                     id: id(beam),
@@ -1221,6 +1235,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![id("test")],
                 affected_by: None,
+                base: None,
                 beams: vec![id("test")],
                 edges: Vec::new(),
                 details: Vec::new(),

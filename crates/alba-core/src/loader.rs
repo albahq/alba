@@ -102,7 +102,7 @@ use alba_syntax::{File, Span, Spanned};
 
 use crate::error::{CoreError, SourceIdScope};
 use crate::eval::{LazyGit, build_project, parse_error_to_core_error};
-use crate::model::{Beam, BeamId, Hook, Project, SourceId};
+use crate::model::{Beam, BeamId, GitSettings, Hook, Project, SourceId};
 
 /// The path and source text of every file [`load_project`] read, indexed
 /// by [`SourceId`], so a [`CoreError`]'s `source_id` can be turned back
@@ -181,11 +181,12 @@ pub struct LoadError {
 pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
     let mut loader = Loader::default();
     match loader.load_file(root, Span::new(0, 0), true) {
-        Ok((beams, default, hooks)) => {
+        Ok((beams, default, hooks, git)) => {
             let project = Project {
                 beams,
                 default,
                 hooks,
+                git,
             };
             match crate::graph::validate_graph(&project) {
                 Ok(()) => Ok((project, loader.sources)),
@@ -204,8 +205,8 @@ pub fn load_project(root: &Path) -> Result<(Project, SourceMap), LoadError> {
 
 /// What one file's load produced: its own beams and everything it
 /// imports, ids and `needs` namespaced relative to that file itself, plus
-/// its own `default` and `hooks`.
-type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>, Vec<Hook>);
+/// its own `default`, `hooks` and git settings.
+type LoadedFile = (Vec<Beam>, Option<Spanned<BeamId>>, Vec<Hook>, GitSettings);
 
 #[derive(Default)]
 struct Loader {
@@ -377,7 +378,7 @@ impl Loader {
         let mut imported = Vec::new();
         for import in &file.imports {
             let import_path = import_base.join(&import.path.value);
-            let (mut child_beams, _child_default, _child_hooks) =
+            let (mut child_beams, _child_default, _child_hooks, _child_git) =
                 self.load_file(&import_path, import.path.span, false)?;
             let alias = &import.alias.value;
             for beam in &mut child_beams {
@@ -393,7 +394,7 @@ impl Loader {
         let mut beams = local.beams;
         beams.extend(imported);
 
-        Ok((beams, local.default, local.hooks))
+        Ok((beams, local.default, local.hooks, local.git))
     }
 }
 

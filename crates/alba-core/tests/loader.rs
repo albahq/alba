@@ -763,3 +763,25 @@ fn a_pattern_in_an_imported_file_expands_within_that_file() {
     assert_eq!(needs_of(&project, "a:test"), ["a:x:test"]);
     assert_eq!(needs_of(&project, "b:test"), ["b:x:test"]);
 }
+
+#[test]
+fn a_git_block_in_an_imported_beamfile_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("Beamfile"),
+        "import \"api/Beamfile\" as api\nbeam all { needs [api:test] run \"echo ok\" }",
+    );
+    let imported = "beam test { run \"echo t\" }\ngit { base 'origin/main' }";
+    write(dir.path().join("api/Beamfile"), imported);
+
+    let err = load_project(&dir.path().join("Beamfile")).unwrap_err();
+
+    assert_eq!(
+        err.error.message,
+        "a `git` block belongs in the root Beamfile"
+    );
+    assert_eq!(err.error.source_id, SourceId(1));
+    let start = imported.find("git").unwrap();
+    assert_eq!(err.error.span.unwrap().start, start);
+    assert!(err.error.help.is_some());
+}

@@ -44,9 +44,10 @@ pub enum Command {
     /// List the beams affected by what changed since a git reference,
     /// without running anything.
     Affected {
-        /// The git reference to diff the working tree against.
+        /// The git reference to diff the working tree against. Defaults to
+        /// the `base` the Beamfile's `git` block declares.
         #[arg(value_name = "REF")]
-        reference: String,
+        reference: Option<String>,
         /// `text`: one beam per line; `json`: `{"beams": [...]}`.
         #[arg(long, value_name = "FORMAT", value_enum, default_value_t = LogFormat::Text)]
         log_format: LogFormat,
@@ -183,11 +184,23 @@ pub struct RunFlags {
     pub watch: bool,
 
     /// Run only the beams affected by what changed since this git
-    /// reference (their `inputs`, or their Beamfile), and their dependents.
+    /// reference (their `inputs`, or their Beamfile), and their dependents
+    ///
+    /// Without a value, the `base` the Beamfile's `git` block declares.
     /// With a beam, that beam runs if it is affected and nothing runs
-    /// otherwise; without one, every affected beam is a target.
-    #[arg(long, value_name = "REF")]
-    pub affected: Option<String>,
+    /// otherwise; without one, every affected beam is a target. To name a
+    /// beam with the declared base, put the beam first (`alba run lint
+    /// --affected`) or pass an empty value (`--affected= lint`): `--affected
+    /// lint` reads `lint` as the reference.
+    // `Some(None)` is the flag without a value, `Some(Some(""))` the empty
+    // one; both mean the declared base (see `commands::run::reference_rule`).
+    #[arg(long, value_name = "REF", num_args = 0..=1)]
+    pub affected: Option<Option<String>>,
+
+    /// Run every beam in full mode: `git.changes()` lists whole
+    /// directories, whatever the Beamfile's `git` block declares
+    #[arg(long, conflicts_with = "affected")]
+    pub no_affected: bool,
 
     /// Force the interactive interface on, even where it would default off
     ///

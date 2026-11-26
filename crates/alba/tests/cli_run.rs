@@ -374,6 +374,52 @@ fn a_template_that_fails_at_run_time_still_ends_the_json_stream() {
     );
 }
 
+/// A beam calling `git.changes()` announces its mode on `beam_started`;
+/// one that does not, none. Without a reference the mode is full, and
+/// `run_started` carries no `base`.
+#[test]
+fn json_reports_the_mode_of_a_beam_calling_git_changes() {
+    let dir = project(
+        "beam lint {\n\
+           inputs [\"src/**/*.php\"]\n\
+           run \"echo {git.changes('src/**/*.php')}\"\n\
+         }\n\
+         beam all { needs [lint] run \"echo done\" }\n",
+    );
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/A.php"), "<?php").unwrap();
+
+    let assert = alba()
+        .current_dir(&dir)
+        .args(["run", "all", "--log-format", "json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let started = |beam: &str| {
+        events
+            .iter()
+            .find(|event| event["event"] == "beam_started" && event["beam"] == beam)
+            .unwrap_or_else(|| panic!("`{beam}` never started:\n{stdout}"))
+            .clone()
+    };
+
+    let lint = started("lint");
+    assert_eq!(lint["mode"], "full");
+    assert_eq!(lint["full_reason"], "no_reference");
+    let all = started("all");
+    assert!(all.get("mode").is_none(), "{all}");
+    assert!(all.get("full_reason").is_none(), "{all}");
+    assert!(events[0].get("base").is_none(), "{}", events[0]);
+    assert!(
+        stdout.contains(r#""text":"src""#),
+        "full mode lists the glob's base directory:\n{stdout}"
+    );
+}
+
 /// A beam's declared parameter is bound from the run's positional
 /// arguments and interpolated into its `run` template.
 ///

@@ -172,6 +172,17 @@ fn walk(anchor: &Path, patterns: &[String]) -> Vec<PathBuf> {
     files
 }
 
+/// Compiles `pattern` with `*` and `?` kept within one path segment
+/// (`literal_separator`), where only `**` crosses a `/`: the dialect of a
+/// `match` arm, which reads `hotfix/*` as one level of branch name, and
+/// of `.dirs()`, which reads `src/*` as the directories under `src`.
+pub(crate) fn compile_segment_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
+    globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+}
+
 /// `path` with `.` dropped and each `..` folded into the component before
 /// it, without touching the disk: the form in which two spellings of one
 /// path (`/repo/app/../libs` and `/repo/libs`) compare equal, the way
@@ -182,7 +193,7 @@ pub fn lexically_normal(path: &Path) -> PathBuf {
 
 /// `path`'s components with `.` dropped and `..` folded into the component
 /// before it, so two spellings of one path compare equal.
-fn lexical_components(path: &Path) -> Vec<Component<'_>> {
+pub(crate) fn lexical_components(path: &Path) -> Vec<Component<'_>> {
     let mut components = Vec::new();
     for component in path.components() {
         match component {
@@ -199,7 +210,7 @@ fn lexical_components(path: &Path) -> Vec<Component<'_>> {
 /// The shortest '/'-separated path from the base (given as its
 /// [`lexical_components`]) to `path`, climbing with `..` when `path` lies
 /// outside it.
-fn relative_name(base: &[Component<'_>], path: &Path) -> String {
+pub(crate) fn relative_name(base: &[Component<'_>], path: &Path) -> String {
     let path = lexical_components(path);
     let shared = base
         .iter()

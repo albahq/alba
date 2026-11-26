@@ -7,8 +7,9 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::time::Duration;
 
-use alba_engine::RunEvent;
+use alba_engine::{BeamStatus, RunEvent};
 
 use super::{LineSink, Renderer, format_duration, print_summary, status_label};
 
@@ -67,7 +68,7 @@ impl Renderer for GroupedRenderer {
             // so the header is printed for every beam that ran rather
             // than only for the talkative ones. A cache hit is no
             // exception — it still gets its group.
-            RunEvent::BeamStarted { id } | RunEvent::BeamCached { id } => {
+            RunEvent::BeamStarted { id, .. } | RunEvent::BeamCached { id } => {
                 self.buffers.entry(id.0.clone()).or_default();
             }
             RunEvent::BeamOutput { id, line, .. } => {
@@ -88,20 +89,7 @@ impl Renderer for GroupedRenderer {
                 status,
                 duration,
             } => {
-                let header = if matches!(status, alba_engine::BeamStatus::Cached) {
-                    format!(
-                        "\u{2500}\u{2500} {} ({} original run, cached) \u{2500}\u{2500}",
-                        id.0,
-                        format_duration(*duration)
-                    )
-                } else {
-                    format!(
-                        "\u{2500}\u{2500} {} ({}, {}) \u{2500}\u{2500}",
-                        id.0,
-                        format_duration(*duration),
-                        status_label(status)
-                    )
-                };
+                let header = finished_header(&id.0, status, *duration);
                 self.flush(&id.0, &header);
             }
             RunEvent::RunFinished { summary } => {
@@ -129,7 +117,28 @@ impl Renderer for GroupedRenderer {
             RunEvent::ProjectBroken { diagnostic, .. } => {
                 self.err.line(diagnostic.trim_end());
             }
+            RunEvent::Warning { message } => self.err.line(&super::warning_line(message)),
         }
+    }
+}
+
+/// The header a finished beam's buffered lines are flushed under.
+fn finished_header(id: &str, status: &BeamStatus, duration: Duration) -> String {
+    match status {
+        BeamStatus::Cached => format!(
+            "\u{2500}\u{2500} {id} ({} original run, cached) \u{2500}\u{2500}",
+            format_duration(duration)
+        ),
+        // Nothing ran, so there is no duration to report.
+        BeamStatus::Unchanged => format!(
+            "\u{2500}\u{2500} {id} ({}) \u{2500}\u{2500}",
+            status_label(status)
+        ),
+        _ => format!(
+            "\u{2500}\u{2500} {id} ({}, {}) \u{2500}\u{2500}",
+            format_duration(duration),
+            status_label(status)
+        ),
     }
 }
 

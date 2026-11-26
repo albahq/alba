@@ -43,6 +43,11 @@ Alba is a task runner written in Rust, an alternative to `make`, `just`, and
   inside a container; `executor compose { service "..." }` runs in a
   service of the project's Compose file; any other executor name is an
   external plugin binary.
+- **Incremental beams** pass only the files a branch changed to a tool:
+  `git { base 'origin/develop' }` declares the reference, and
+  `{git.changes('src/**/*.php')}` in `run` expands to the changed files
+  matching one of the beam's `inputs`, or to `src` when in doubt (full
+  mode). `--no-affected` forces full mode.
 - **`alba check`** validates the whole project without running anything.
   Run it after every Beamfile edit.
 

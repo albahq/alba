@@ -622,6 +622,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: Vec::new(),
                 affected_by: None,
+                base: None,
                 beams: Vec::new(),
                 edges: Vec::new(),
                 details: Vec::new(),
@@ -724,6 +725,7 @@ mod tests {
             &RunEvent::RunStarted {
                 targets: vec![alba_core::BeamId("build".to_string())],
                 affected_by: None,
+                base: None,
                 beams: vec![alba_core::BeamId("build".to_string())],
                 edges: Vec::new(),
                 details: Vec::new(),

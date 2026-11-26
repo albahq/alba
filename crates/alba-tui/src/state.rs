@@ -164,6 +164,9 @@ pub struct AppState {
     /// watch trigger that follows a completed run is told apart from one
     /// that superseded a run still going.
     waiting_seen: bool,
+    /// What the run in flight warned about, in arrival order; cleared
+    /// when the next run starts. Drawn under the header.
+    pub warnings: Vec<String>,
     /// Beams that began (`BeamStarted` or `BeamCached`) in the run on
     /// screen: a beam that ends `Cancelled` without being in here was
     /// skipped.
@@ -224,6 +227,7 @@ fn end_line(status: &BeamStatus, duration: Duration, skipped: bool) -> (EndTone,
     match status {
         BeamStatus::Succeeded => (EndTone::Success, format!("✓ exit 0 · {time}")),
         BeamStatus::Cached => (EndTone::Cached, format!("↯ restored from cache · {time}")),
+        BeamStatus::Unchanged => (EndTone::Muted, "○ unchanged".to_string()),
         BeamStatus::Failed { exit_code } => {
             (EndTone::Error, format!("✗ exit {exit_code} · {time}"))
         }
@@ -237,15 +241,24 @@ fn end_line(status: &BeamStatus, duration: Duration, skipped: bool) -> (EndTone,
 }
 
 /// What the header calls the run: the target, the targets joined, or the
-/// reference an affected run found nothing for.
-fn run_label(targets: &[BeamId], affected_by: Option<&str>) -> String {
-    match (targets, affected_by) {
-        ([], Some(reference)) => format!("nothing affected by {reference}"),
-        (targets, _) => targets
-            .iter()
-            .map(|id| id.0.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
+/// reference an affected run found nothing for. The reference
+/// `git.changes()` diffs from follows as `· base <ref>`, unless the label
+/// already named it.
+fn run_label(targets: &[BeamId], affected_by: Option<&str>, base: Option<&str>) -> String {
+    let (label, named) = match (targets, affected_by) {
+        ([], Some(reference)) => (format!("nothing affected by {reference}"), Some(reference)),
+        (targets, _) => (
+            targets
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            None,
+        ),
+    };
+    match base {
+        Some(reference) if named != Some(reference) => format!("{label} · base {reference}"),
+        _ => label,
     }
 }
 
@@ -279,6 +292,7 @@ impl AppState {
             outcome: None,
             user_cancelled: false,
             waiting_seen: false,
+            warnings: Vec::new(),
             selection_moved: false,
             jumped_to_failure: false,
             pane_height: 0,
@@ -299,12 +313,17 @@ impl AppState {
             RunEvent::RunStarted {
                 targets,
                 affected_by,
+                base,
                 beams,
                 edges,
                 details,
             } => {
                 self.start_run(
-                    run_label(targets, affected_by.as_deref()),
+                    run_label(
+                        targets,
+                        affected_by.as_deref(),
+                        base.as_ref().map(|(reference, _)| reference.as_str()),
+                    ),
                     beams,
                     edges,
                     now,
@@ -318,7 +337,7 @@ impl AppState {
                     .map(|detail| (detail.id.0.clone(), detail.clone()))
                     .collect();
             }
-            RunEvent::BeamStarted { id } | RunEvent::BeamCached { id } => {
+            RunEvent::BeamStarted { id, .. } | RunEvent::BeamCached { id } => {
                 self.started.insert(id.0.clone());
                 if let Some(row) = self.row_mut(&id.0) {
                     row.state = BeamState::Running { since: now };
@@ -348,9 +367,10 @@ impl AppState {
                 duration,
             } => {
                 let skipped = self.skipped_by(&id.0, status);
-                if skipped {
-                    // Nothing ran this time: the skip is the whole story,
-                    // not a footnote to the previous run's output.
+                if skipped || *status == BeamStatus::Unchanged {
+                    // Nothing ran this time: the skip, or the absence of
+                    // anything to process, is the whole story, not a
+                    // footnote to the previous run's output.
                     self.restart_story(&id.0);
                 }
                 let Some(row) = self.row_mut(&id.0) else {
@@ -415,6 +435,7 @@ impl AppState {
                 }
                 self.waiting_seen = false;
             }
+            RunEvent::Warning { message } => self.warnings.push(message.clone()),
             RunEvent::ProjectBroken { diagnostic, report } => {
                 self.phase = Phase::Parked;
                 self.outcome = None;
@@ -1145,6 +1166,7 @@ impl AppState {
             _ => None,
         };
         self.target = label;
+        self.warnings.clear();
         self.beams = beams
             .iter()
             .map(|id| BeamRow {
@@ -1222,6 +1244,7 @@ mod tests {
         RunEvent::RunStarted {
             targets: vec![id(target)],
             affected_by: None,
+            base: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: edges.iter().map(|(a, b)| (id(a), id(b))).collect(),
             details: Vec::new(),
@@ -1243,6 +1266,45 @@ mod tests {
                 ..RunSummary::default()
             },
         }
+    }
+
+    /// The header names the reference `git.changes()` diffs from, and
+    /// keeps today's label without one.
+    #[test]
+    fn the_run_label_names_the_reference_in_effect() {
+        let base = |reference: &str| Some((reference.to_string(), "abc123".to_string()));
+        let started = |targets: &[&str], affected_by: Option<&str>, base| RunEvent::RunStarted {
+            targets: targets.iter().map(|name| id(name)).collect(),
+            affected_by: affected_by.map(str::to_string),
+            base,
+            beams: targets.iter().map(|name| id(name)).collect(),
+            edges: Vec::new(),
+            details: Vec::new(),
+        };
+        let label = |event: RunEvent| {
+            let mut state = AppState::new("lint", false);
+            state.apply(&event, Instant::now());
+            state.target
+        };
+        assert_eq!(label(started(&["lint"], None, None)), "lint");
+        assert_eq!(
+            label(started(&["lint"], None, base("origin/develop"))),
+            "lint · base origin/develop"
+        );
+        assert_eq!(
+            label(started(&["lint", "docs"], Some("main"), base("main"))),
+            "lint, docs · base main"
+        );
+        // Already named once.
+        assert_eq!(
+            label(started(&[], Some("main"), base("main"))),
+            "nothing affected by main"
+        );
+        // A label naming another reference still shows the base.
+        assert_eq!(
+            label(started(&[], Some("main"), base("origin/develop"))),
+            "nothing affected by main · base origin/develop"
+        );
     }
 
     /// RunStarted rebuilds the table: the Beamfile may have changed.
@@ -1271,7 +1333,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["codegen", "build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("codegen"),
+                mode: None,
+            },
+            now,
+        );
         assert!(matches!(state.beams[0].state, BeamState::Running { .. }));
         state.apply(&finished(BeamStatus::Succeeded, "codegen"), now);
         assert!(matches!(
@@ -1301,7 +1369,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "old line"), now);
         state.apply(&finished(BeamStatus::Succeeded, "build"), now);
         state.apply(&summary_event(&[]), now);
@@ -1315,7 +1389,13 @@ mod tests {
         );
         // second run
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         assert_eq!(state.logs.get("build").unwrap().len(), 0);
     }
 
@@ -1432,7 +1512,13 @@ mod tests {
         state.apply(&run_started("build", &["codegen", "build"], &[]), now);
         state.apply(&RunEvent::BeamCached { id: id("codegen") }, now);
         state.apply(&replayed_output("codegen", "cached line"), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "first"), now);
         state.apply(&output("build", "second"), now);
         assert_eq!(
@@ -1725,7 +1811,13 @@ mod tests {
         let mut state = AppState::new("alba", true);
         let now = Instant::now();
         state.apply(&run_started("alba", &["alba"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("alba") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("alba"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("alba", "the beam's own line"), now);
         state.apply(
             &RunEvent::ProjectBroken {
@@ -1786,7 +1878,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "Compiling api"), now);
         state.apply(&output("build", "warning: unused"), now);
         state.apply(&output("build", "Compiling core"), now);
@@ -1806,7 +1904,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "Compiling api"), now);
 
         state.enter_search();
@@ -1828,7 +1932,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "ERROR here"), now);
         for index in 0..50 {
             state.apply(&output("build", &format!("line {index}")), now);
@@ -1869,7 +1979,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "ERROR here"), now);
         state.apply(&output("build", "ERROR there"), now);
 
@@ -1908,7 +2024,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         for index in 0..50 {
             state.apply(&output("build", &format!("line {index}")), now);
         }
@@ -1937,7 +2059,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "Compiling api"), now);
 
         state.enter_search();
@@ -1961,7 +2089,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "Compiling api"), now);
         state.apply(&output("build", "warning: unused"), now);
         state.apply(&output("build", "Compiling core"), now);
@@ -1982,7 +2116,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "Compiling api"), now);
         state.apply(&output("build", "warning: unused"), now);
         state.apply(&output("build", "Compiling core"), now);
@@ -2032,10 +2172,22 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["codegen", "build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("codegen"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("codegen", "line 0"), now);
         state.apply(&output("codegen", "ERROR in codegen"), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "unrelated line"), now);
         state.apply(&output("build", "another unrelated line"), now);
 
@@ -2089,9 +2241,21 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["codegen", "build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("codegen"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("codegen", "ERROR in codegen"), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "line 0"), now);
         state.apply(&output("build", "ERROR in build"), now);
 
@@ -2120,7 +2284,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "line 0"), now);
         state.apply(&output("build", "ERROR here"), now);
 
@@ -2136,7 +2306,13 @@ mod tests {
         );
 
         // The beam reruns: BeamStarted clears its buffer.
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
 
         assert!(
             state
@@ -2175,7 +2351,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "line 0"), now);
 
         state.enter_search();
@@ -2204,7 +2386,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["codegen", "build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.select(1); // "build"
 
         state.enter_search();
@@ -2224,7 +2412,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "ERROR here"), now);
         for index in 0..50 {
             state.apply(&output("build", &format!("line {index}")), now);
@@ -2259,7 +2453,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "ERROR here"), now);
         for index in 0..50 {
             state.apply(&output("build", &format!("line {index}")), now);
@@ -2288,7 +2488,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "line one"), now);
         state.apply(&output("build", "ERROR here"), now);
         for index in 0..4 {
@@ -2315,7 +2521,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "ERROR here"), now);
         for index in 0..50 {
             state.apply(&output("build", &format!("line {index}")), now);
@@ -2432,7 +2644,13 @@ mod tests {
             let mut state = AppState::new("build", false);
             let now = Instant::now();
             state.apply(&run_started("build", &["build"], &[]), now);
-            state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+            state.apply(
+                &RunEvent::BeamStarted {
+                    id: id("build"),
+                    mode: None,
+                },
+                now,
+            );
             state.apply(&finished_after("build", status, millis), now);
             let last = kinds(&state, "build").pop().expect("an end line");
             assert_eq!(last, (LineKind::End(tone), text.to_string()));
@@ -2452,6 +2670,32 @@ mod tests {
         );
     }
 
+    /// An unchanged beam ran nothing this time: its story is that alone,
+    /// not the previous run's output stacked under it.
+    #[test]
+    fn an_unchanged_beam_replaces_the_previous_runs_output() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started("build", &["lint", "build"], &[]), now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("lint"),
+                mode: None,
+            },
+            now,
+        );
+        state.apply(&output("lint", "old"), now);
+        state.apply(&finished_after("lint", BeamStatus::Succeeded, 1000), now);
+
+        state.apply(&run_started("build", &["lint", "build"], &[]), now);
+        state.apply(&finished_after("lint", BeamStatus::Unchanged, 0), now);
+
+        assert_eq!(
+            kinds(&state, "lint"),
+            vec![(LineKind::End(EndTone::Muted), "○ unchanged".to_string())]
+        );
+    }
+
     /// The engine reports a skipped beam as cancelled; the TUI tells them
     /// apart by the absence of a start.
     #[test]
@@ -2468,7 +2712,13 @@ mod tests {
         // A skipped beam's story is the skip alone, not the previous
         // run's output stacked under it.
         state.apply(&run_started("build", &["lint", "build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("lint") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("lint"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("lint", "old"), now);
         state.apply(&finished_after("lint", BeamStatus::Succeeded, 1000), now);
         state.apply(&run_started("build", &["lint", "build"], &[]), now);
@@ -2480,7 +2730,13 @@ mod tests {
 
         // The next run forgets which beams started.
         state.apply(&run_started("build", &["lint", "build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&finished_after("build", BeamStatus::Cancelled, 2000), now);
         state.apply(&finished_after("lint", BeamStatus::Cancelled, 0), now);
         assert_eq!(
@@ -2495,7 +2751,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(
             &RunEvent::BeamNotice {
                 id: id("build"),
@@ -2532,7 +2794,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(
             &RunEvent::CommandStarted {
                 id: id("build"),
@@ -2638,7 +2906,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         for index in 0..3 {
             state.apply(&output("build", &format!("out{index}")), now);
         }
@@ -2768,7 +3042,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         for line in ["alpha", "bravo", "charlie"] {
             state.apply(&output("build", line), now);
         }
@@ -2801,7 +3081,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         for line in ["alpha", "bravo", "charlie"] {
             state.apply(&output("build", line), now);
         }
@@ -2831,7 +3117,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         state.apply(&output("build", "alpha"), now);
         state.apply(&output("build", "bravo"), now);
         state.set_pane_size(10, 80);
@@ -2859,7 +3151,13 @@ mod tests {
         let mut state = AppState::new("build", false);
         let now = Instant::now();
         state.apply(&run_started("build", &["build"], &[]), now);
-        state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("build"),
+                mode: None,
+            },
+            now,
+        );
         for index in 0..30 {
             state.apply(&output("build", &format!("line {index}")), now);
         }

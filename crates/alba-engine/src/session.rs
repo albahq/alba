@@ -66,7 +66,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
-use crate::affected::{Selection, select};
+use crate::affected::{ReferenceSource, Selection, select_with_changes};
 use crate::event::{RenderedError, RunEvent};
 use crate::scheduler::{Executors, RunOptions, run_in_session};
 use crate::watch::set::{Relevance, WatchSet};
@@ -102,6 +102,14 @@ pub enum SessionCommand {
 /// `project` and `sources` are taken owned: the session outlives the
 /// caller's own copy, and both are cheap to clone.
 ///
+/// `reference` is where every run's `git.changes()` reference comes from,
+/// read against the project that run loaded: the change set, and its
+/// warnings, are computed anew before each run (see
+/// [`RunOptions::diff_from`]), so `options.changes` is ignored. With
+/// [`ReferenceSource::Declared`], an affected `selection` follows the
+/// declared `base` too. A retarget keeps `reference`: a reference the
+/// caller named stays in effect for the beam the session moves to.
+///
 /// A `selection` this project cannot resolve — an unknown beam, or a git
 /// reference that does not exist — is *not* an error here: it
 /// parks the session like any other project it cannot work from, because
@@ -118,6 +126,7 @@ pub async fn session(
     project: Project,
     sources: SourceMap,
     selection: Selection,
+    reference: ReferenceSource,
     options: RunOptions,
     executors: Executors,
     events: UnboundedSender<RunEvent>,
@@ -134,6 +143,7 @@ pub async fn session(
         project,
         sources,
         selection,
+        reference,
         options,
         executors.clone(),
         events,
@@ -157,6 +167,7 @@ async fn drive(
     mut project: Project,
     mut sources: SourceMap,
     mut selection: Selection,
+    reference: ReferenceSource,
     options: RunOptions,
     executors: Executors,
     events: UnboundedSender<RunEvent>,
@@ -228,58 +239,76 @@ async fn drive(
             }
         };
 
-        let targets = match select(&project, &sources, &root, &selection) {
-            Ok(targets) => targets,
-            Err(error) => {
-                // Same parking as an unknown target above: nothing but a
-                // change to the project can move this answer (a git
-                // failure included: the reference is fixed for the
-                // session, and a repository that appears or a reference
-                // that gets created will not announce itself).
-                let session_error = SessionError::Run {
-                    error,
-                    sources: sources.clone(),
-                };
-                let rendered = render_error(&session_error);
-                let _ = events.send(RunEvent::ProjectBroken {
-                    diagnostic: rendered.text,
-                    report: rendered.report,
-                });
-                match park_until_the_project_changes(
-                    beamfile,
-                    sources.clone(),
-                    &events,
-                    &mut *watcher,
-                    &cancel,
-                    &mut commands,
-                    &mut watch_enabled,
-                    render_error,
+        // Recomputed for every run: the working tree moves between runs,
+        // a reload may have edited `base`, and a retargeted session keeps
+        // the reference its source names, not the one it started with.
+        // Computed before the selection, which reuses it: one diff per run.
+        let mut run_options = options.clone();
+        // From this run's own sources: a reload may have imported a
+        // Beamfile from a new directory, whose `.alba/` the change set
+        // must leave out too.
+        run_options.sources = sources.clone();
+        run_options.diff_from(&project, &root, &reference);
+        let targets =
+            match follow_declared_base(&mut selection, &project, &reference).and_then(|()| {
+                select_with_changes(
+                    &project,
+                    &sources,
+                    &root,
+                    &selection,
+                    run_options.changes.as_ref(),
                 )
-                .await
-                {
-                    Reloaded::Project {
-                        project: fresh_project,
-                        sources: fresh_sources,
-                        commanded,
-                    } => {
-                        (project, sources) = (fresh_project, fresh_sources);
-                        match commanded {
-                            Some((id, bypass_cache)) => {
-                                (selection, bypass_cache_next) =
-                                    (Selection::Beam(id), bypass_cache);
+            }) {
+                Ok(targets) => targets,
+                Err(error) => {
+                    // Same parking as an unknown target above: nothing but a
+                    // change to the project can move this answer (a git
+                    // failure included: a repository that appears or a
+                    // reference that gets created will not announce itself;
+                    // a declared `base` edited back in will, as a reload).
+                    let session_error = SessionError::Run {
+                        error,
+                        sources: sources.clone(),
+                    };
+                    let rendered = render_error(&session_error);
+                    let _ = events.send(RunEvent::ProjectBroken {
+                        diagnostic: rendered.text,
+                        report: rendered.report,
+                    });
+                    match park_until_the_project_changes(
+                        beamfile,
+                        sources.clone(),
+                        &events,
+                        &mut *watcher,
+                        &cancel,
+                        &mut commands,
+                        &mut watch_enabled,
+                        render_error,
+                    )
+                    .await
+                    {
+                        Reloaded::Project {
+                            project: fresh_project,
+                            sources: fresh_sources,
+                            commanded,
+                        } => {
+                            (project, sources) = (fresh_project, fresh_sources);
+                            match commanded {
+                                Some((id, bypass_cache)) => {
+                                    (selection, bypass_cache_next) =
+                                        (Selection::Beam(id), bypass_cache);
+                                }
+                                None => announce_recovery(&events),
                             }
-                            None => announce_recovery(&events),
+                            continue;
                         }
-                        continue;
+                        Reloaded::Exit(exit) => return exit,
                     }
-                    Reloaded::Exit(exit) => return exit,
                 }
-            }
-        };
+            };
 
         // ---- run phase -------------------------------------------------
         let run_cancel = cancel.child_token();
-        let mut run_options = options.clone();
         if let Some(cache) = run_options.cache.as_mut() {
             cache.bypass_cache = bypass_cache_next;
         }
@@ -469,6 +498,41 @@ async fn drive(
             }
         }
     }
+}
+
+/// For an affected session that follows the declared base (`--affected`
+/// without a value), points the selection at the `base` of the project
+/// this run loaded. A project that no longer declares one cannot be
+/// selected from, like an unknown reference, and parks the session.
+fn follow_declared_base(
+    selection: &mut Selection,
+    project: &Project,
+    reference: &ReferenceSource,
+) -> Result<(), EngineError> {
+    if let (
+        Selection::Affected {
+            reference: current, ..
+        },
+        ReferenceSource::Declared,
+    ) = (selection, reference)
+    {
+        match &project.git.base {
+            Some(base) => current.clone_from(base),
+            None => {
+                let mut message = "no git reference to diff from: the Beamfile no longer \
+                                   declares a `base` in its `git` block"
+                    .to_string();
+                // As at startup: say why, when git could not evaluate it.
+                if let Some(warning) = &project.git.warning {
+                    message.push_str(&format!(
+                        "; the declared `base` could not be evaluated: {warning}"
+                    ));
+                }
+                return Err(EngineError::Unschedulable(message));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The driver's next command, or a future that never completes when there

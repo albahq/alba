@@ -156,11 +156,27 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
 /// non-ASCII or special-character filename comes back verbatim instead of
 /// C-quoted (`"caf\303\251.txt"`).
 fn split_nul_terminated(bytes: &[u8]) -> Vec<PathBuf> {
-    String::from_utf8_lossy(bytes)
-        .split('\0')
+    bytes
+        .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
-        .map(PathBuf::from)
+        .map(path_from_bytes)
         .collect()
+}
+
+/// A path git printed, byte for byte. On unix a file name is any bytes,
+/// so one that is not valid UTF-8 keeps its exact name: whoever renders
+/// it as text can then refuse it by name instead of naming another file.
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// A path git printed. Git for Windows prints UTF-8, and a Windows path
+/// holds unicode only, so reading it lossily changes nothing it can hold.
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// The repository's top-level directory, canonical.
@@ -171,9 +187,15 @@ pub fn repository_root(cwd: &Path) -> Result<PathBuf, GitError> {
         .map_err(|error| GitError(format!("cannot canonicalize repository root: {error}")))
 }
 
+/// The full SHA `HEAD` points at, without the rest of [`head`]: no
+/// working-tree scan.
+pub fn head_sha(cwd: &Path) -> Result<String, GitError> {
+    git(cwd, &["rev-parse", "HEAD"])
+}
+
 pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
     let branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let sha = git(cwd, &["rev-parse", "HEAD"])?;
+    let sha = head_sha(cwd)?;
     let short_sha = git(cwd, &["rev-parse", "--short", "HEAD"])?;
     let status = git(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
     Ok(GitHead {
@@ -182,6 +204,44 @@ pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
         short_sha,
         dirty: !status.is_empty(),
     })
+}
+
+/// Refuses a `reference` git would read as one of its own options
+/// (`--output=<file>` writes a file) instead of as a revision.
+fn refuse_option_like(reference: &str) -> Result<(), GitError> {
+    if reference.starts_with('-') {
+        return Err(GitError(format!(
+            "`{reference}` is not a git reference: it would be read as an option"
+        )));
+    }
+    Ok(())
+}
+
+/// The full SHA of the best common ancestor of `reference` and `HEAD`:
+/// where the current branch forked from `reference`.
+///
+/// Computed with `git merge-base` rather than `git diff --merge-base`,
+/// which needs git 2.30. When there is none (unrelated histories, or a
+/// shallow clone that did not fetch far enough) the error says so and
+/// names the reference.
+pub fn merge_base(cwd: &Path, reference: &str) -> Result<String, GitError> {
+    refuse_option_like(reference)?;
+    let output = spawn(cwd, &["merge-base", reference, "HEAD"])?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    // Unrelated histories make git exit 1 without a word on stderr.
+    let mut message = format!("no merge base between `{reference}` and HEAD");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        message.push_str(&format!(": {}", stderr.trim()));
+    }
+    let shallow =
+        git(cwd, &["rev-parse", "--is-shallow-repository"]).is_ok_and(|out| out == "true");
+    if shallow {
+        message.push_str("; the clone is shallow, fetch more history (git fetch --unshallow)");
+    }
+    Err(GitError(message))
 }
 
 /// Every path that differs between `reference` and the working tree
@@ -198,24 +258,36 @@ pub fn head(cwd: &Path) -> Result<GitHead, GitError> {
 /// below it, and one outside climbs from `cwd` by as many `..` as git says
 /// separate it from the top level.
 ///
+/// "Since `reference`" means since the branch forked from it: the diff
+/// starts at [`merge_base`], so commits that landed on `reference` after
+/// the fork are not counted as the branch's changes.
+///
 /// A `reference` starting with `-` is refused: git would read it as one of
 /// its own options (`--output=<file>` writes a file), not as a revision.
 pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitError> {
-    if reference.starts_with('-') {
-        return Err(GitError(format!(
-            "`{reference}` is not a git reference: it would be read as an option"
-        )));
-    }
+    let base = merge_base(cwd, reference)?;
+    changed_files_since(cwd, &base)
+}
+
+/// [`changed_files`] from `commit` itself rather than from its merge base
+/// with `HEAD`: for a caller that already computed the merge base and
+/// must not ask git for it twice. `commit` is refused when it starts with
+/// `-`, as a reference is.
+pub fn changed_files_since(cwd: &Path, commit: &str) -> Result<Vec<PathBuf>, GitError> {
+    refuse_option_like(commit)?;
     let prefix = git_output(cwd, &["rev-parse", "--show-prefix"])?;
-    let prefix = String::from_utf8_lossy(&prefix)
-        .trim_end_matches(['\n', '\r'])
-        .to_string();
-    let climb = "../".repeat(prefix.split('/').filter(|part| !part.is_empty()).count());
+    // Only the line ending: a directory name may end in a space.
+    let end = prefix
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\n' | b'\r'))
+        .map_or(0, |last| last + 1);
+    let prefix = path_from_bytes(&prefix[..end]);
+    let climb = "../".repeat(prefix.components().count());
 
     // Both list paths relative to the top level: `diff` without
     // `--relative` always does, `ls-files` once told `--full-name` and
     // the `:/` pathspec (the top level, wherever `cwd` is).
-    let diff = git_output(cwd, &["diff", "--name-only", "-z", reference, "--"])?;
+    let diff = git_output(cwd, &["diff", "--name-only", "-z", commit, "--"])?;
     let untracked = git_output(
         cwd,
         &[

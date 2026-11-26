@@ -41,6 +41,7 @@ pub enum TokenKind {
     KwTrue,
     KwFalse,
     KwHook,
+    KwMatch,
 
     // Punctuation and operators.
     LBrace,
@@ -61,6 +62,10 @@ pub enum TokenKind {
     AndAnd,
     /// `||`
     OrOr,
+    /// `|`, separating the alternative patterns of a `match` arm.
+    Pipe,
+    /// `=>`, between a `match` arm's patterns and its value.
+    FatArrow,
     Plus,
     /// `.`, member access (`git.branch`).
     Dot,

@@ -128,15 +128,24 @@ pub fn format_duration(duration: Duration) -> String {
 ///
 /// `failed (allowed)` deliberately omits the exit code that `failed`
 /// reports: an allowed failure does not affect the run, so the number is
-/// noise, and the phrase is what the user greps for.
+/// noise, and the phrase is what the user greps for. `○ unchanged` keeps
+/// the glyph the interface draws it with: it is the one status that says
+/// nothing ran without saying something went wrong.
 pub fn status_label(status: &BeamStatus) -> String {
     match status {
         BeamStatus::Succeeded => "ok".to_string(),
         BeamStatus::Cached => "cached".to_string(),
+        BeamStatus::Unchanged => "\u{25cb} unchanged".to_string(),
         BeamStatus::Failed { exit_code } => format!("failed (exit {exit_code})"),
         BeamStatus::FailedAllowed { .. } => "failed (allowed)".to_string(),
         BeamStatus::Cancelled => "cancelled".to_string(),
     }
+}
+
+/// How the text renderers print a run's warning, on stderr: Alba talking
+/// about the run, like the status lines below.
+pub(super) fn warning_line(message: &str) -> String {
+    format!("warning: {message}")
 }
 
 /// The status line a watch event renders to, `None` for every other
@@ -245,6 +254,7 @@ fn summary_line(summary: &RunSummary, affected_by: Option<&str>) -> String {
     if let Some(reference) = affected_by
         && summary.succeeded.is_empty()
         && summary.cached.is_empty()
+        && summary.unchanged.is_empty()
         && summary.failed.is_empty()
         && summary.failed_allowed.is_empty()
         && summary.cancelled.is_empty()
@@ -255,6 +265,7 @@ fn summary_line(summary: &RunSummary, affected_by: Option<&str>) -> String {
     let counts = [
         ("\u{2713}", summary.succeeded.len(), "succeeded"),
         ("\u{21ba}", summary.cached.len(), "cached"),
+        ("\u{25cb}", summary.unchanged.len(), "unchanged"),
         ("\u{2717}", summary.failed.len(), "failed"),
         ("\u{26a0}", summary.failed_allowed.len(), "failed (allowed)"),
         ("\u{2298}", summary.cancelled.len(), "cancelled"),

@@ -67,13 +67,20 @@ fn a_run_in_flight_renders_at_the_forty_column_floor() {
         &RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: vec![id("codegen"), id("build")],
             edges: vec![(id("build"), id("codegen"))],
             details: Vec::new(),
         },
         now,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("codegen"),
+            mode: None,
+        },
+        now,
+    );
     state.apply(
         &RunEvent::BeamFinished {
             id: id("codegen"),
@@ -82,7 +89,13 @@ fn a_run_in_flight_renders_at_the_forty_column_floor() {
         },
         now,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("build"),
+            mode: None,
+        },
+        now,
+    );
     state.apply(&output("build", "Compiling api v0.1.0"), now);
     insta::assert_snapshot!(drawn(&state, 40, 12));
 }
@@ -120,13 +133,20 @@ fn a_committed_search_keeps_its_highlights_in_normal_mode() {
         &RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: vec![id("build")],
             edges: vec![],
             details: Vec::new(),
         },
         now,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("build"),
+            mode: None,
+        },
+        now,
+    );
     for index in 0..10 {
         state.apply(&output("build", &format!("line {index}")), now);
     }
@@ -159,13 +179,20 @@ fn three_beam_chain() -> AppState {
         &RunEvent::RunStarted {
             targets: vec![id("test")],
             affected_by: None,
+            base: None,
             beams: vec![id("codegen"), id("build"), id("test")],
             edges: vec![(id("build"), id("codegen")), (id("test"), id("build"))],
             details: Vec::new(),
         },
         now,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("codegen"),
+            mode: None,
+        },
+        now,
+    );
     state.apply(
         &RunEvent::BeamFinished {
             id: id("codegen"),
@@ -176,7 +203,13 @@ fn three_beam_chain() -> AppState {
     );
     // "build" stays running and "test" stays pending: three different
     // glyphs (✔, ▶, ○), one per layer.
-    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("build"),
+            mode: None,
+        },
+        now,
+    );
     state
 }
 
@@ -193,6 +226,7 @@ fn helping() -> AppState {
         &RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: vec![id("build")],
             edges: vec![],
             details: Vec::new(),
@@ -242,13 +276,20 @@ fn a_long_log_line_wraps_in_the_pane() {
         &RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: vec![id("build")],
             edges: Vec::new(),
             details: Vec::new(),
         },
         now,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("build"),
+            mode: None,
+        },
+        now,
+    );
     state.apply(&output("build", &"x".repeat(60)), now);
     state.apply(&output("build", "tail"), now);
     insta::assert_snapshot!(drawn(&state, 80, 24));
@@ -263,6 +304,7 @@ fn a_long_beam_name_is_truncated_in_the_tree() {
         &RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: vec![id("services:payment:integration"), id("build")],
             edges: Vec::new(),
             details: Vec::new(),
@@ -272,6 +314,7 @@ fn a_long_beam_name_is_truncated_in_the_tree() {
     state.apply(
         &RunEvent::BeamStarted {
             id: id("services:payment:integration"),
+            mode: None,
         },
         now,
     );
@@ -321,13 +364,20 @@ fn a_stream_filter_hides_the_other_stream_in_the_drawing() {
         &RunEvent::RunStarted {
             targets: vec![id("build")],
             affected_by: None,
+            base: None,
             beams: vec![id("build")],
             edges: vec![],
             details: Vec::new(),
         },
         now,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("build") }, now);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("build"),
+            mode: None,
+        },
+        now,
+    );
     state.apply(
         &RunEvent::CommandStarted {
             id: id("build"),
@@ -448,6 +498,7 @@ fn started(
     RunEvent::RunStarted {
         targets: vec![id(target)],
         affected_by: None,
+        base: None,
         beams: beams.iter().map(|name| id(name)).collect(),
         edges: edges.iter().map(|(from, to)| (id(from), id(to))).collect(),
         details,
@@ -520,7 +571,13 @@ fn check_run_started(state: &mut AppState, start: Instant) {
         &started(&CHECK_BEAMS, &CHECK_EDGES, "check", check_details()),
         start,
     );
-    state.apply(&RunEvent::BeamStarted { id: id("fmt") }, start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("fmt"),
+            mode: None,
+        },
+        start,
+    );
     state.apply(&command("fmt", "cargo fmt --all --check"), start);
     state.apply(
         &finished("fmt", BeamStatus::Succeeded, millis(800)),
@@ -561,7 +618,13 @@ fn run_live_output() {
     let mut state = AppState::new("check", false);
     check_run_started(&mut state, start);
     let test_start = start + millis(300);
-    state.apply(&RunEvent::BeamStarted { id: id("test") }, test_start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("test"),
+            mode: None,
+        },
+        test_start,
+    );
     test_output_head(&mut state, test_start);
     state.select(2);
     insta::assert_snapshot!(artboard(&state, start + millis(8400)));
@@ -574,7 +637,13 @@ fn graph_dependencies() {
     let mut state = AppState::new("check", false);
     check_run_started(&mut state, start);
     let test_start = start + millis(300);
-    state.apply(&RunEvent::BeamStarted { id: id("test") }, test_start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("test"),
+            mode: None,
+        },
+        test_start,
+    );
     test_output_head(&mut state, test_start);
     state.select(2);
     state.enter_graph();
@@ -585,7 +654,13 @@ fn graph_dependencies() {
 /// the whole run took 9.4s.
 fn check_run_passed(state: &mut AppState, start: Instant, test_duration: Duration) {
     check_run_started(state, start);
-    state.apply(&RunEvent::BeamStarted { id: id("test") }, start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("test"),
+            mode: None,
+        },
+        start,
+    );
     state.apply(&command("test", "cargo test --workspace"), start);
     state.apply(
         &output("test", "test result: ok. 67 passed; 0 failed; 0 ignored"),
@@ -596,7 +671,10 @@ fn check_run_passed(state: &mut AppState, start: Instant, test_duration: Duratio
         start + test_duration,
     );
     state.apply(
-        &RunEvent::BeamStarted { id: id("check") },
+        &RunEvent::BeamStarted {
+            id: id("check"),
+            mode: None,
+        },
         start + test_duration,
     );
     state.apply(
@@ -628,6 +706,50 @@ fn run_passed() {
     let mut state = AppState::new("check", false);
     check_run_passed(&mut state, start, millis(8500));
     state.select(3);
+    insta::assert_snapshot!(artboard(&state, start + millis(20_000)));
+}
+
+/// `test` had no changed file to process, so it ended unchanged without
+/// running, and `check` still ran after it: the row reads `○ unchanged`,
+/// and the progress row counts it as passed.
+#[test]
+fn run_with_an_unchanged_beam() {
+    let start = Instant::now();
+    let mut state = AppState::new("check", false);
+    check_run_started(&mut state, start);
+    state.apply(
+        &finished("test", BeamStatus::Unchanged, Duration::ZERO),
+        start + millis(900),
+    );
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("check"),
+            mode: None,
+        },
+        start + millis(900),
+    );
+    state.apply(
+        &command("check", "echo all checks passed"),
+        start + millis(900),
+    );
+    state.apply(&output("check", "all checks passed"), start + millis(900));
+    state.apply(
+        &finished("check", BeamStatus::Succeeded, millis(100)),
+        start + millis(1000),
+    );
+    state.apply(
+        &RunEvent::RunFinished {
+            summary: RunSummary {
+                succeeded: vec![id("fmt"), id("check")],
+                cached: vec![id("lint")],
+                unchanged: vec![id("test")],
+                duration: millis(1000),
+                ..RunSummary::default()
+            },
+        },
+        start + millis(1000),
+    );
+    state.select(2);
     insta::assert_snapshot!(artboard(&state, start + millis(20_000)));
 }
 
@@ -689,7 +811,13 @@ fn watch_parked_on_diagnostic() {
 /// run took 12.3s.
 fn check_run_failed(state: &mut AppState, start: Instant) {
     check_run_started(state, start);
-    state.apply(&RunEvent::BeamStarted { id: id("test") }, start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("test"),
+            mode: None,
+        },
+        start,
+    );
     state.apply(&command("test", "cargo test --workspace"), start);
     state.apply(&stderr("test", "     Running unittests src/lib.rs"), start);
     state.apply(&output("test", "running 67 tests"), start);
@@ -817,7 +945,13 @@ fn help_keyboard_page() {
     let mut state = AppState::new("check", false);
     check_run_started(&mut state, start);
     let test_start = start + millis(300);
-    state.apply(&RunEvent::BeamStarted { id: id("test") }, test_start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("test"),
+            mode: None,
+        },
+        test_start,
+    );
     test_output_head(&mut state, test_start);
     state.select(2);
     state.enter_help();
@@ -945,7 +1079,13 @@ fn run_scrolling_48_beams() {
         if matches!(status, BeamStatus::Cached) {
             state.apply(&RunEvent::BeamCached { id: id(name) }, start);
         } else {
-            state.apply(&RunEvent::BeamStarted { id: id(name) }, start);
+            state.apply(
+                &RunEvent::BeamStarted {
+                    id: id(name),
+                    mode: None,
+                },
+                start,
+            );
         }
         state.apply(&finished(name, status, millis(duration)), start);
     }
@@ -953,12 +1093,14 @@ fn run_scrolling_48_beams() {
     state.apply(
         &RunEvent::BeamStarted {
             id: id("services:payment:integration"),
+            mode: None,
         },
         now - millis(62_000),
     );
     state.apply(
         &RunEvent::BeamStarted {
             id: id("services:payment:unit"),
+            mode: None,
         },
         now - millis(24_900),
     );
@@ -1007,7 +1149,13 @@ fn run_cancelled() {
     let mut state = AppState::new("check", false);
     check_run_started(&mut state, start);
     let test_start = start + millis(300);
-    state.apply(&RunEvent::BeamStarted { id: id("test") }, test_start);
+    state.apply(
+        &RunEvent::BeamStarted {
+            id: id("test"),
+            mode: None,
+        },
+        test_start,
+    );
     test_output_head(&mut state, test_start);
     state.select(2);
     state.mark_user_cancelled();

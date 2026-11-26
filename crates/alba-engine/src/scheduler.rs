@@ -41,13 +41,14 @@
 //! `stop` is a child token, the caller's cancellation implies it too.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{
-    Beam, BeamDefinition, BeamId, CoreError, ExecutorKind, OptionValue, Project,
-    execution_subgraph, expand_globs, outputs_satisfied, render_template,
+    Beam, BeamDefinition, BeamId, ChangeMode, ChangeSet, CoreError, ExecutorKind, FullReason,
+    OptionValue, Project, Quoting, Scope, SourceMap, execution_subgraph, expand_globs,
+    outputs_satisfied, render_template,
 };
 use alba_executors::{
     BeamContext, BeamIdentity, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor,
@@ -57,6 +58,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
+use crate::affected::{ReferenceSource, RunChanges, beam_modes, resolve_changes};
 use crate::cache::{
     ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
     fingerprint, hash_file, static_contribution,
@@ -98,6 +100,56 @@ pub struct RunOptions {
     /// only, never read by a run itself. A beam without an entry is
     /// announced with no location and no commands.
     pub definitions: HashMap<BeamId, BeamDefinition>,
+    /// The change set `git.changes()` answers from, set by
+    /// [`RunOptions::diff_from`] (a session calls it before each run).
+    /// `None` runs every beam that calls it in full mode, for want of a
+    /// reference.
+    pub changes: Option<RunChanges>,
+    /// The caller had a reference but could not resolve it (and warned
+    /// about it): with no `changes`, the full mode it gives then says so.
+    pub unresolved_base: bool,
+    /// What the run warns about, each sent as a [`RunEvent::Warning`]
+    /// right after `RunStarted`. [`RunOptions::diff_from`] fills it with
+    /// why there is no change set, alongside `changes`.
+    pub warnings: Vec<String>,
+    /// The project's sources, as [`alba_core::load_project`] returned
+    /// them: where each beam's Beamfile is, to tell whether it changed.
+    /// Only read with `changes`; a beam whose Beamfile is missing from it
+    /// runs in full mode.
+    pub sources: SourceMap,
+}
+
+impl RunOptions {
+    /// Sets the change set of a run of `project` from `source`, and what
+    /// the run warns about when there is none although one was wanted:
+    /// a reference git cannot resolve (the run goes full, saying why), or
+    /// a `git` block git could not evaluate. The one place a run's
+    /// reference becomes its change set, for a single run as for every
+    /// run of a session. Reads `self.sources` for the project's Beamfiles,
+    /// so set them to `project`'s first.
+    pub fn diff_from(&mut self, project: &Project, root: &Path, source: &ReferenceSource) {
+        self.changes = None;
+        self.unresolved_base = false;
+        self.warnings.clear();
+        if *source == ReferenceSource::Declared
+            && let Some(message) = &project.git.warning
+        {
+            self.warnings
+                .push(format!("{message}; no reference declared for this run"));
+        }
+        let Some(reference) = source.reference(project) else {
+            return;
+        };
+        match resolve_changes(root, &self.sources, reference) {
+            Ok(changes) => self.changes = Some(changes),
+            Err(error) => {
+                self.unresolved_base = true;
+                self.warnings.push(format!(
+                    "cannot diff from `{reference}`: {error}; running in full mode"
+                ));
+            }
+        }
+    }
 }
 
 /// The executors a run can dispatch to, chosen per beam.
@@ -381,6 +433,10 @@ async fn run_once(
     let _ = events.send(RunEvent::RunStarted {
         targets: targets.beams.clone(),
         affected_by: targets.affected_by.clone(),
+        base: options
+            .changes
+            .as_ref()
+            .map(|changes| (changes.reference.clone(), changes.merge_base.clone())),
         beams: beams.iter().map(|beam| beam.id.clone()).collect(),
         edges: beams
             .iter()
@@ -406,6 +462,11 @@ async fn run_once(
             })
             .collect(),
     });
+    for message in &options.warnings {
+        let _ = events.send(RunEvent::Warning {
+            message: message.clone(),
+        });
+    }
 
     let slots = Arc::new(Semaphore::new(options.jobs.max(1)));
     let stop = cancel.child_token();
@@ -421,6 +482,11 @@ async fn run_once(
         .is_some_and(|options| options.bypass_cache);
     let ambient_env: Arc<HashMap<String, String>> =
         Arc::new(options.ambient_env.iter().cloned().collect());
+    let mut modes = change_modes(project, &options);
+    let changed = options.changes.as_ref().map_or_else(
+        || Arc::new(Vec::new()),
+        |changes| Arc::clone(&changes.changed),
+    );
 
     // Both halves of every channel exist before the first task is spawned,
     // so no dependent can ever start waiting on a beam whose channel does
@@ -479,6 +545,10 @@ async fn run_once(
             bypass_cache,
             ambient_env: Arc::clone(&ambient_env),
             extra_env: options.extra_env.clone(),
+            changes: modes.remove(&beam.id).map(|mode| ChangeSet {
+                mode,
+                changed: Arc::clone(&changed),
+            }),
         };
         tasks.push((beam.id.clone(), tokio::spawn(run_beam(task))));
     }
@@ -511,6 +581,32 @@ async fn run_once(
         summary: summary.clone(),
     });
     Ok(summary)
+}
+
+/// The `git.changes()` mode of every beam that calls it. Without a change
+/// set, full mode, saying whether a reference was missing or could not be
+/// resolved; with one, see [`beam_modes`].
+///
+/// This mode and its reason, carried by each beam's `BeamStarted`, are
+/// how a surprising full run is diagnosed: the engine has no log of its
+/// own.
+fn change_modes(project: &Project, options: &RunOptions) -> HashMap<BeamId, ChangeMode> {
+    match &options.changes {
+        Some(changes) => beam_modes(project, &options.sources, changes),
+        None => {
+            let reason = if options.unresolved_base {
+                FullReason::ReferenceUnresolved
+            } else {
+                FullReason::NoReference
+            };
+            project
+                .beams
+                .iter()
+                .filter(|beam| !beam.change_globs.is_empty())
+                .map(|beam| (beam.id.clone(), ChangeMode::Full(reason.clone())))
+                .collect()
+        }
+    }
 }
 
 /// The beams to run, in the project's declaration order, and the binary
@@ -687,6 +783,9 @@ struct BeamTask {
     /// The run's ambient environment, added to every command under the
     /// beam's own `env`. Never reaches the cache fingerprint.
     extra_env: Vec<(String, String)>,
+    /// What `git.changes()` answers for this beam: `Some` only for a beam
+    /// that calls it.
+    changes: Option<ChangeSet>,
 }
 
 /// One beam's whole life: wait, run (or not), report, release dependents.
@@ -728,8 +827,8 @@ async fn run_beam(mut task: BeamTask) -> BeamStatus {
 
 /// Waits for every dependency and collects what each contributes to this
 /// beam's fingerprint, in `needs` order. `None` means a dependency failed
-/// or was cancelled — this beam must not run. `FailedAllowed` and
-/// `Cached` both count as satisfied.
+/// or was cancelled — this beam must not run. `FailedAllowed`, `Cached`
+/// and `Unchanged` all count as satisfied.
 ///
 /// That a `FailedAllowed` dependency satisfies its dependents holds even
 /// under `keep_going`: a beam whose dependency did not produce its outputs
@@ -741,7 +840,10 @@ async fn wait_for_dependencies(
     for dependency in dependencies {
         let outcome = wait_for_outcome(dependency).await;
         match outcome.status {
-            BeamStatus::Succeeded | BeamStatus::Cached | BeamStatus::FailedAllowed { .. } => {
+            BeamStatus::Succeeded
+            | BeamStatus::Cached
+            | BeamStatus::Unchanged
+            | BeamStatus::FailedAllowed { .. } => {
                 contributions.push(outcome.contribution);
             }
             BeamStatus::Failed { .. } | BeamStatus::Cancelled => return None,
@@ -812,7 +914,27 @@ async fn process(
         return cancelled;
     }
 
-    let plan = render(&task.beam, &task.args).ok();
+    let plan = render(&task.beam, &task.args, task.changes.as_ref()).ok();
+
+    // Nothing to process: no command runs, so there is nothing to look up
+    // in the cache or to record there. Dependents still get a stable
+    // contribution, the rendered commands', as for an uncached beam.
+    if let Some(plan) = &plan
+        && plan.unchanged
+    {
+        return (
+            BeamStatus::Unchanged,
+            Duration::ZERO,
+            Some(static_contribution(
+                &plan.commands,
+                &plan.cwd.to_string_lossy(),
+                &plan.env,
+                &task.args,
+                &executor_label(&task.beam.executor),
+            )),
+        );
+    }
+
     let mask = Mask::new(
         &task.beam.secrets,
         plan.as_ref().map_or(&[], |plan| plan.env.as_slice()),
@@ -1109,6 +1231,7 @@ async fn execute(
     let started_at = Instant::now();
     let _ = task.events.send(RunEvent::BeamStarted {
         id: task.beam.id.clone(),
+        mode: task.changes.as_ref().map(|changes| changes.mode.clone()),
     });
 
     // Output is forwarded by a task of its own so lines reach the consumer
@@ -1150,17 +1273,18 @@ async fn execute(
     // `plan` is what the caller already rendered successfully; re-rendering
     // here is how a beam whose template does not render reaches the failure
     // path with its error message intact.
-    let status = match plan.map_or_else(|| render(&task.beam, &task.args), Ok) {
-        Ok(plan) => run_commands(task, &plan, &lines, &announcements).await,
-        Err(error) => {
-            announce(
-                &announcements,
-                Marker::notice(NoticeLevel::Error, error.to_string()),
-            )
-            .await;
-            failure_status(task)
-        }
-    };
+    let status =
+        match plan.map_or_else(|| render(&task.beam, &task.args, task.changes.as_ref()), Ok) {
+            Ok(plan) => run_commands(task, &plan, &lines, &announcements).await,
+            Err(error) => {
+                announce(
+                    &announcements,
+                    Marker::notice(NoticeLevel::Error, error.to_string()),
+                )
+                .await;
+                failure_status(task)
+            }
+        };
     drop(lines);
     drop(announcements);
     let lines = forwarder.await.unwrap_or_default();
@@ -1203,16 +1327,60 @@ struct RenderedBeam {
     commands: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
+    /// In incremental mode, every glob the beam passes to `git.changes()`
+    /// lists no file: there is nothing to process, so it does not run.
+    unchanged: bool,
 }
 
-/// Renders the beam's schedule-time templates with its parameters bound.
+/// Whether the beam, in incremental mode, has nothing to process: the
+/// render of its `run` and `env` reached at least one `git.changes()`
+/// call, and every call it reached listed no file. Asked of the scope its
+/// commands rendered with, once they are rendered, so a call in a branch
+/// this invocation does not take never counts, and the decision and the
+/// rendered lists cannot disagree.
+fn is_unchanged(changes: Option<&ChangeSet>, scope: &Scope) -> bool {
+    changes.is_some_and(|changes| changes.mode == ChangeMode::Incremental) && scope.listed_nothing()
+}
+
+/// The scope the beam's `run` and `env` render in, and the directory its
+/// commands run in: its parameters bound and, for a beam calling
+/// `git.changes()`, the run's change set anchored to its directory and
+/// listed relative to that `cwd`, quoted for the shell that reads it.
+fn beam_scope(beam: &Beam, args: &[String], changes: Option<&ChangeSet>) -> (Scope, PathBuf) {
+    let cwd = beam.run_dir();
+    let mut scope = beam.scope.with_params(&beam.params, args);
+    if let Some(changes) = changes {
+        scope = scope
+            .with_changes(changes.clone(), &beam.dir, &cwd)
+            .with_quoting(quoting(&beam.executor));
+    }
+    (scope, cwd)
+}
+
+/// How a list is quoted for the shell the beam's commands run in: the
+/// host shell on Windows is PowerShell; every other executor reads POSIX
+/// words (a plugin receives them too).
+fn quoting(executor: &ExecutorKind) -> Quoting {
+    if cfg!(windows) && *executor == ExecutorKind::SystemShell {
+        Quoting::PowerShell
+    } else {
+        Quoting::Posix
+    }
+}
+
+/// Renders the beam's schedule-time templates with its parameters bound
+/// and, for a beam calling `git.changes()`, its change set.
 ///
 /// Every error is stamped with the beam's own [`alba_core::SourceId`]:
 /// there is no active source scope outside `alba-core`'s loading, so an
 /// unstamped error would point the CLI's caret at the root Beamfile
 /// whatever file this beam actually came from.
-fn render(beam: &Beam, args: &[String]) -> Result<RenderedBeam, EngineError> {
-    let scope = beam.scope.with_params(&beam.params, args);
+fn render(
+    beam: &Beam,
+    args: &[String],
+    changes: Option<&ChangeSet>,
+) -> Result<RenderedBeam, EngineError> {
+    let (scope, cwd) = beam_scope(beam, args, changes);
     let stamp = |error: CoreError| EngineError::Core(error.with_source_id(beam.source));
 
     let mut commands = Vec::with_capacity(beam.run.len());
@@ -1227,14 +1395,12 @@ fn render(beam: &Beam, args: &[String]) -> Result<RenderedBeam, EngineError> {
         ));
     }
 
-    let cwd = match &beam.cwd {
-        // `join` with an absolute `cwd` yields that absolute path, so a
-        // beam can opt out of its Beamfile's directory.
-        Some(cwd) => beam.dir.join(cwd),
-        None => beam.dir.clone(),
-    };
-
-    Ok(RenderedBeam { commands, env, cwd })
+    Ok(RenderedBeam {
+        unchanged: is_unchanged(changes, &scope),
+        commands,
+        env,
+        cwd,
+    })
 }
 
 /// The exit code reported for a command that never produced one, because
