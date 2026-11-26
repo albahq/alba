@@ -162,8 +162,8 @@ git {
 - A top-level declaration, at most one per project, in the root Beamfile only. A second block, or a block in an
   imported Beamfile, is a load error pointing at it.
 - `base` is an expression evaluated at load time, with the load-time rules (`env()` needs a default).
-- `base` may read `git.branch`, `git.sha`, `git.short_sha`, `git.dirty` and `let` bindings declared before the
-  block. Calling `git.changes()` there is a load error.
+- `base` may read `git.branch`, `git.sha`, `git.short_sha`, `git.dirty` and any `let` binding of the file:
+  every `let` is evaluated before the block. Calling `git.changes()` there is a load error.
 - If git cannot answer while `base` is evaluated (no repository, as in a Docker build context without `.git`; no
   commit yet; git missing), the project loads with no reference and a warning naming git's message, instead of
   failing to load. Outside the block, reading `git.*` keeps today's behaviour: a load error.
