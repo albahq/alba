@@ -338,3 +338,61 @@ fn an_unclosed_match_in_an_interpolation_is_an_unclosed_interpolation() {
     assert_eq!(err.message, "unclosed interpolation");
     assert_eq!(err.span, first_byte_of(src, "{match"));
 }
+
+#[test]
+fn a_git_block_holds_a_base_expression() {
+    let src = "git {\n  base env('GITHUB_BASE_REF', 'origin/develop')\n}\nbeam b { run \"x\" }";
+    let file = parse(src).unwrap();
+    let git = file.git.expect("a git declaration");
+    assert!(matches!(git.base, Some(Expr::Call { .. })));
+    assert_eq!(git.span, Span::new(0, src.find("\nbeam").unwrap()));
+    assert_eq!(file.beams.len(), 1);
+}
+
+#[test]
+fn an_empty_git_block_declares_no_base() {
+    let file = parse("git { }").unwrap();
+    assert_eq!(file.git.expect("a git declaration").base, None);
+}
+
+#[test]
+fn a_second_git_block_is_rejected() {
+    let src = "git { base 'a' }\ngit { base 'b' }";
+    let err = parse(src).unwrap_err();
+    assert_eq!(err.message, "duplicate `git` block");
+    assert_eq!(err.span, Span::new(17, 20));
+}
+
+#[test]
+fn a_repeated_base_is_rejected() {
+    let src = "git { base 'a' base 'b' }";
+    let err = parse(src).unwrap_err();
+    assert_eq!(err.message, "duplicate `git` key `base`");
+    assert_eq!(err.span, Span::new(15, 19));
+}
+
+#[test]
+fn an_unknown_git_key_is_rejected_with_a_suggestion() {
+    let src = "git { bse 'a' }";
+    let err = parse(src).unwrap_err();
+    assert_eq!(err.message, "unknown `git` key `bse`");
+    assert_eq!(err.span, span_of(src, "bse"));
+    assert_eq!(err.help.as_deref(), Some("did you mean `base`?"));
+}
+
+#[test]
+fn a_far_git_key_gets_no_suggestion() {
+    let err = parse("git { remote 'a' }").unwrap_err();
+    assert_eq!(err.message, "unknown `git` key `remote`");
+    assert_eq!(
+        err.help.as_deref(),
+        Some("`base` is the only key a `git` block takes")
+    );
+}
+
+#[test]
+fn git_stays_an_ordinary_name_outside_a_block() {
+    let file = parse("let x = git.branch\nbeam b { run \"x\" }").unwrap();
+    assert!(file.git.is_none());
+    assert_eq!(file.lets.len(), 1);
+}

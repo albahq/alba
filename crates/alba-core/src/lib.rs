@@ -32,7 +32,9 @@ pub use files::{
 };
 pub use graph::{execution_subgraph, validate_graph};
 pub use loader::{LoadError, SourceMap, load_project};
-pub use model::{Beam, BeamId, ExecutorKind, Hook, OptionValue, Project, SourceId, Value};
+pub use model::{
+    Beam, BeamId, ExecutorKind, GitSettings, Hook, OptionValue, Project, SourceId, Value,
+};
 
 #[doc(hidden)]
 pub use eval::load_str;

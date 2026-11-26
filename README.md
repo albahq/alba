@@ -149,6 +149,35 @@ pointing at the expression that accessed it.
 `git` is a reserved name: `let git = ...`, and a parameter named `git`, are
 both rejected at parse time.
 
+#### Declaring the reference
+
+A top-level `git { ... }` block declares the reference a project diffs from.
+`base` is an expression, evaluated at load time, so a CI variable can
+override a per-branch default:
+
+```
+git {
+  base env('GITHUB_BASE_REF', match git.branch {
+    'hotfix/*' => 'origin/master'
+    _          => 'origin/develop'
+  })
+}
+```
+
+- `base` may read `git.branch`, `git.sha`, `git.short_sha`, `git.dirty`, and
+  any `let` of the file (every `let` is evaluated before the block). It
+  follows the load-time rules: `env()` needs a default.
+- An empty string means no reference, as if there were no block: a `match`
+  arm such as `'main' => ''` opts a branch out.
+- There is at most one block, in the root Beamfile only. A second one, or
+  one in an imported Beamfile, is a load error. An unknown key is a load
+  error that suggests `base` when it is close.
+- When git cannot answer while `base` is evaluated (no repository, as in a
+  Docker build context without `.git`; no commit yet; `git` missing), the
+  project loads with no reference and a warning carrying git's message. Any
+  other error in `base` fails the load, and so does reading `git.*` outside
+  the block.
+
 ### Imports
 
 `import "api/Beamfile" as api` loads another Beamfile, resolved relative to

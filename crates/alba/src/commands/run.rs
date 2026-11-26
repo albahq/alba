@@ -1129,6 +1129,7 @@ mod tests {
             beams,
             default: None,
             hooks: Vec::new(),
+            git: Default::default(),
         }
     }
 

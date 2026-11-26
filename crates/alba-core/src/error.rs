@@ -84,6 +84,10 @@ pub struct CoreError {
     pub span: Option<Span>,
     pub help: Option<String>,
     pub source_id: SourceId,
+    /// Whether this error is git itself failing to answer a `git.*` read,
+    /// as opposed to anything wrong in the Beamfile. Lets the `git` block
+    /// turn exactly that failure into a warning.
+    pub(crate) git_failure: bool,
 }
 
 impl CoreError {
@@ -98,6 +102,7 @@ impl CoreError {
             span: Some(span),
             help: None,
             source_id: current_source_id(),
+            git_failure: false,
         }
     }
 
@@ -109,12 +114,19 @@ impl CoreError {
             span: None,
             help: None,
             source_id: current_source_id(),
+            git_failure: false,
         }
     }
 
     /// Attaches help text (chainable with [`CoreError::new`]).
     pub(crate) fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+
+    /// Marks this error as git failing to answer a `git.*` read.
+    pub(crate) fn marked_as_git_failure(mut self) -> Self {
+        self.git_failure = true;
         self
     }
 

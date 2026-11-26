@@ -72,7 +72,7 @@ use alba_syntax::{
 
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
 use crate::git::{GitError, GitHead};
-use crate::model::{Beam, BeamId, ExecutorKind, Hook, OptionValue, Project, Value};
+use crate::model::{Beam, BeamId, ExecutorKind, GitSettings, Hook, OptionValue, Project, Value};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
 const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
@@ -104,6 +104,14 @@ impl LazyGit {
         Self {
             root,
             head: OnceLock::new(),
+        }
+    }
+
+    /// The failure of the head lookup, once it has run and failed.
+    fn failure(&self) -> Option<GitError> {
+        match self.head.get() {
+            Some(Err(failure)) => Some(failure.clone()),
+            _ => None,
         }
     }
 
@@ -149,6 +157,7 @@ impl Scope {
         };
         let head = git.head().map_err(|error| {
             CoreError::new(format!("cannot read `git.{}`: {error}", field.value), span)
+                .marked_as_git_failure()
         })?;
         Ok(match field.value.as_str() {
             "branch" => Value::Str(head.branch.clone()),
@@ -157,6 +166,16 @@ impl Scope {
             "dirty" => Value::Bool(head.dirty),
             _ => unreachable!("checked by check_field before this method is ever called"),
         })
+    }
+
+    /// The git failure `error` reports, when `error` is the failure of a
+    /// `git.*` read in this scope.
+    fn git_failure(&self, error: &CoreError) -> Option<GitError> {
+        if error.git_failure {
+            self.git.as_ref()?.failure()
+        } else {
+            None
+        }
     }
 
     /// Binds `name` to `value` in place. `pub(crate)`: only this module's
@@ -1074,6 +1093,8 @@ pub(crate) fn build_project(
         lets.insert(binding.name.value.clone(), value);
     }
 
+    let git_settings = build_git_settings(file, &lets, is_root)?;
+
     let beams = file
         .beams
         .iter()
@@ -1126,7 +1147,50 @@ pub(crate) fn build_project(
         beams,
         default,
         hooks,
+        git: git_settings,
     })
+}
+
+/// Evaluates the file's `git { base ... }` block, after every `let`.
+///
+/// A failure of git itself while reading `git.*` inside `base` is not a
+/// load error: the project loads without a reference and the settings
+/// carry git's message, so a Docker build context without `.git` still
+/// loads. Every other error (a name or type error, `env()` without a
+/// default) fails the load, and so does a block outside the root Beamfile.
+fn build_git_settings(file: &File, lets: &Scope, is_root: bool) -> Result<GitSettings, CoreError> {
+    let Some(decl) = &file.git else {
+        return Ok(GitSettings::default());
+    };
+    if !is_root {
+        return Err(CoreError::new(
+            "a `git` block belongs in the root Beamfile",
+            Span::new(decl.span.start, decl.span.start + "git".len()),
+        )
+        .with_help(
+            "a project has one reference to diff from; declare it in the Beamfile you run",
+        ));
+    }
+    let Some(base) = &decl.base else {
+        return Ok(GitSettings::default());
+    };
+    let fallback = expr_span(base).unwrap_or(decl.span);
+    check_expr(base, lets, &[], Timing::Load, fallback)?;
+    match eval_expr(base, lets) {
+        Ok(Value::Str(base)) => Ok(GitSettings {
+            base: (!base.is_empty()).then_some(base),
+            warning: None,
+        }),
+        Ok(Value::Bool(_)) => Err(CoreError::new("`base` must be a string", fallback)
+            .with_help("name a reference, such as `'origin/main'`, or `''` for none")),
+        Err(error) => match lets.git_failure(&error) {
+            Some(failure) => Ok(GitSettings {
+                base: None,
+                warning: Some(failure.0),
+            }),
+            None => Err(error),
+        },
+    }
 }
 
 fn beam_ref_to_id(r: &BeamRef) -> BeamId {

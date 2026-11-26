@@ -200,4 +200,17 @@ pub struct Project {
     pub default: Option<Spanned<BeamId>>,
     /// The root Beamfile's hook declarations, in source order.
     pub hooks: Vec<Hook>,
+    /// What the root Beamfile's `git { ... }` block declared.
+    pub git: GitSettings,
+}
+
+/// The settings a `git { ... }` block declares, evaluated at load time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GitSettings {
+    /// The reference to diff from. `None` without a block, for an empty
+    /// `base`, or when git could not answer while `base` was evaluated.
+    pub base: Option<String>,
+    /// Git's message when it could not answer while `base` was evaluated:
+    /// the project loads without a reference rather than failing.
+    pub warning: Option<String>,
 }

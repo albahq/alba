@@ -33,7 +33,7 @@
 //!   a parse error (`duplicate executor option`), for the same reason.
 
 use crate::ast::{
-    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File,
+    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File, GitDecl,
     HookDecl, Import, LetBinding, NamedString, NeedRef, Spanned,
 };
 use crate::expr::Expr;
@@ -146,6 +146,11 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn peek(&self) -> &Token {
         &self.tokens[self.pos]
+    }
+
+    /// The token after the current one, or `Eof` at the end of input.
+    fn peek_next(&self) -> &Token {
+        &self.tokens[(self.pos + 1).min(self.tokens.len() - 1)]
     }
 
     pub(crate) fn is_eof(&self) -> bool {
@@ -602,6 +607,7 @@ impl<'a> Parser<'a> {
         let mut default = None;
         let mut beams = Vec::new();
         let mut hooks = Vec::new();
+        let mut git = None;
 
         while !self.is_eof() {
             match self.peek().kind {
@@ -617,10 +623,26 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwBeam => beams.push(self.parse_beam()?),
                 TokenKind::KwHook => hooks.push(self.parse_hook()?),
+                // `git` is a reserved name, not a keyword: it opens a
+                // block only at the top level, followed by a brace, and
+                // stays an ordinary identifier everywhere else.
+                TokenKind::Ident(ref name)
+                    if name == "git" && self.peek_next().kind == TokenKind::LBrace =>
+                {
+                    let decl = self.parse_git()?;
+                    if git.is_some() {
+                        return Err(ParseError {
+                            message: "duplicate `git` block".to_string(),
+                            span: Span::new(decl.span.start, decl.span.start + "git".len()),
+                            help: Some("declare every `git` setting in one block".to_string()),
+                        });
+                    }
+                    git = Some(decl);
+                }
                 _ => {
-                    return Err(
-                        self.unexpected("`version`, `import`, `let`, `default`, `beam`, or `hook`")
-                    );
+                    return Err(self.unexpected(
+                        "`version`, `import`, `let`, `default`, `beam`, `hook`, or `git`",
+                    ));
                 }
             }
         }
@@ -643,9 +665,47 @@ impl<'a> Parser<'a> {
             default,
             beams,
             hooks,
+            git,
+        })
+    }
+
+    /// `git { base <expr> }`. Every key is optional, and none may repeat.
+    fn parse_git(&mut self) -> Result<GitDecl, ParseError> {
+        let keyword = self.eat_ident()?;
+        self.expect(TokenKind::LBrace, "`{`")?;
+        let mut base = None;
+        while !self.check(&TokenKind::RBrace) {
+            let key = self.eat_ident()?;
+            if key.value != "base" {
+                let help = match closest(&key.value, GIT_KEYS.iter().copied()) {
+                    Some(candidate) => format!("did you mean `{candidate}`?"),
+                    None => "`base` is the only key a `git` block takes".to_string(),
+                };
+                return Err(ParseError {
+                    message: format!("unknown `git` key `{}`", key.value),
+                    span: key.span,
+                    help: Some(help),
+                });
+            }
+            if base.is_some() {
+                return Err(ParseError {
+                    message: "duplicate `git` key `base`".to_string(),
+                    span: key.span,
+                    help: None,
+                });
+            }
+            base = Some(self.parse_expr()?);
+        }
+        let close = self.expect(TokenKind::RBrace, "`}`")?;
+        Ok(GitDecl {
+            base,
+            span: Span::new(keyword.span.start, close.span.end),
         })
     }
 }
+
+/// The keys a `git { ... }` block takes.
+const GIT_KEYS: [&str; 1] = ["base"];
 
 /// `git` names the built-in git object; binding it would shadow every
 /// `git.*` field at once.
@@ -708,12 +768,17 @@ fn describe(kind: &TokenKind) -> String {
 /// Suggests the closest known beam field name to `name`, if any is within
 /// Levenshtein distance 2 (picking the closest on ties by array order).
 fn suggest_field(name: &str) -> Option<&'static str> {
-    BEAM_FIELDS
-        .iter()
-        .map(|&field| (field, levenshtein(name, field)))
+    closest(name, BEAM_FIELDS.iter().copied())
+}
+
+/// The candidate closest to `name`, if any is within Levenshtein distance
+/// 2 (the first of equally close ones).
+fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    candidates
+        .map(|candidate| (candidate, levenshtein(name, candidate)))
         .filter(|&(_, distance)| distance <= 2)
         .min_by_key(|&(_, distance)| distance)
-        .map(|(field, _)| field)
+        .map(|(candidate, _)| candidate)
 }
 
 /// Classic dynamic-programming Levenshtein edit distance between two

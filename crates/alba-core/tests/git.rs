@@ -8,6 +8,7 @@ use alba_core::git::{
     KNOWN_HOOKS, changed_files, head, hooks_path, known_hook, repository_root, set_hooks_path,
     unset_hooks_path,
 };
+use alba_core::{CoreError, GitSettings, load_project};
 
 fn git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -188,4 +189,129 @@ fn the_known_hooks_carry_git_s_argument_counts() {
     assert_eq!(known_hook("post-checkout").unwrap().arity, 3);
     assert!(known_hook("pre-comit").is_none());
     assert!(KNOWN_HOOKS.len() >= 15);
+}
+
+/// Writes a Beamfile with `content` at the root of `dir` and loads it.
+fn load_beamfile(dir: &Path, content: &str) -> Result<GitSettings, CoreError> {
+    std::fs::write(dir.join("Beamfile"), content).unwrap();
+    load_project(&dir.join("Beamfile"))
+        .map(|(project, _)| project.git)
+        .map_err(|err| err.error)
+}
+
+const BASE_BY_BRANCH: &str = "git {\n  base match git.branch {\n    'hotfix/*' => 'origin/master'\n    _ => 'origin/develop'\n  }\n}\nbeam b { run \"x\" }";
+
+#[test]
+fn base_is_evaluated_from_the_branch() {
+    let dir = repository();
+    git(dir.path(), &["checkout", "-q", "-b", "hotfix/x"]);
+
+    let settings = load_beamfile(dir.path(), BASE_BY_BRANCH).unwrap();
+
+    assert_eq!(settings.base.as_deref(), Some("origin/master"));
+    assert_eq!(settings.warning, None);
+}
+
+#[test]
+fn a_detached_head_falls_through_to_the_default_arm() {
+    let dir = repository();
+    git(dir.path(), &["checkout", "-q", "--detach"]);
+
+    let settings = load_beamfile(dir.path(), BASE_BY_BRANCH).unwrap();
+
+    assert_eq!(settings.base.as_deref(), Some("origin/develop"));
+}
+
+#[test]
+fn an_empty_base_means_no_reference() {
+    let dir = repository();
+
+    let settings = load_beamfile(dir.path(), "git { base '' }\nbeam b { run \"x\" }").unwrap();
+
+    assert_eq!(settings, GitSettings::default());
+}
+
+#[test]
+fn without_a_block_there_is_no_reference() {
+    let dir = repository();
+
+    let settings = load_beamfile(dir.path(), "beam b { run \"x\" }").unwrap();
+
+    assert_eq!(settings, GitSettings::default());
+}
+
+#[test]
+fn base_may_read_lets() {
+    let dir = repository();
+
+    let settings = load_beamfile(
+        dir.path(),
+        "git { base \"origin/{trunk}\" }\nlet trunk = 'main'\nbeam b { run \"x\" }",
+    )
+    .unwrap();
+
+    assert_eq!(settings.base.as_deref(), Some("origin/main"));
+}
+
+#[test]
+fn outside_a_repository_the_project_loads_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let settings = load_beamfile(dir.path(), BASE_BY_BRANCH).unwrap();
+
+    assert_eq!(settings.base, None);
+    let warning = settings.warning.expect("a warning naming git's failure");
+    assert!(warning.contains("not a git repository"), "{warning}");
+}
+
+#[test]
+fn an_unknown_variable_in_base_stays_a_load_error() {
+    let dir = repository();
+
+    let err = load_beamfile(
+        dir.path(),
+        "git { base unknown_name }\nbeam b { run \"x\" }",
+    )
+    .unwrap_err();
+
+    assert!(err.message.contains("unknown variable"), "{}", err.message);
+    assert!(err.span.is_some());
+}
+
+#[test]
+fn env_without_a_default_in_base_stays_a_load_error() {
+    let dir = repository();
+
+    let err = load_beamfile(
+        dir.path(),
+        "git { base env('ALBA_TEST_UNSET_BASE_REF') }\nbeam b { run \"x\" }",
+    )
+    .unwrap_err();
+
+    assert_eq!(err.message, "`env` requires a default value here");
+    assert!(err.span.is_some());
+}
+
+#[test]
+fn reading_git_outside_the_block_still_fails_the_load() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let err = load_beamfile(
+        dir.path(),
+        "git { base 'origin/main' }\nlet b = git.branch\nbeam b { run \"x\" }",
+    )
+    .unwrap_err();
+
+    assert!(err.message.contains("git.branch"), "{}", err.message);
+}
+
+#[test]
+fn a_boolean_base_is_a_load_error() {
+    let dir = repository();
+
+    let err =
+        load_beamfile(dir.path(), "git { base git.dirty }\nbeam b { run \"x\" }").unwrap_err();
+
+    assert_eq!(err.message, "`base` must be a string");
+    assert!(err.span.is_some());
 }

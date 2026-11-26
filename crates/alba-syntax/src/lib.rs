@@ -9,7 +9,7 @@ mod template;
 mod token;
 
 pub use ast::{
-    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File,
+    AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File, GitDecl,
     HookDecl, Import, LetBinding, NamedString, NeedRef, Spanned,
 };
 pub use diagnostics::{Diagnostic, DiagnosticReport, SnippetLine, line_col, render_diagnostic};
