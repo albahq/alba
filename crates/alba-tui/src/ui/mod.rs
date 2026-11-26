@@ -430,6 +430,44 @@ mod tests {
             },
             now,
         );
+        let mut structured = running(now);
+        structured.watch_enabled = true;
+        structured.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: unknown field `tset`\n".to_string(),
+                report: Some(alba_core::DiagnosticReport {
+                    message: "unknown field `tset` in a message long enough to wrap".to_string(),
+                    path: "/home/someone/projects/payment/imports/Beamfile".to_string(),
+                    line: 5,
+                    column: 5,
+                    snippet: vec![
+                        alba_core::SnippetLine {
+                            number: 4,
+                            text: "beam build {".to_string(),
+                            faulty: false,
+                        },
+                        alba_core::SnippetLine {
+                            number: 5,
+                            text: "    tset = \"国国国国国国国国国国国国国国国国国国国国国国国国\""
+                                .to_string(),
+                            faulty: true,
+                        },
+                        alba_core::SnippetLine {
+                            number: 6,
+                            text: "}".to_string(),
+                            faulty: false,
+                        },
+                    ],
+                    caret: 4..8,
+                    help: Some("did you mean `test`?".to_string()),
+                }),
+            },
+            now,
+        );
+        assert!(structured.shows_structured_diagnostic(), "precondition");
+        let mut copy = running(now);
+        copy.enter_copy();
+        assert!(matches!(copy.mode, Mode::Copy(_)), "precondition");
         let mut search = running(now);
         search.enter_search();
         if let Mode::Search(typed) = &mut search.mode {
@@ -442,8 +480,12 @@ mod tests {
             (search, "▶ RUNNING"),
             (waiting, "● WATCHING"),
             (parked, "Ⅱ PARKED"),
+            (structured, "Ⅱ PARKED"),
+            (copy, "▶ RUNNING"),
         ];
-        for height in [12, 24, 50] {
+        // 12 to 16 cross the rows where the definition row, the graph's
+        // alignment row and its COMMANDS section come and go.
+        for height in (12..=16).chain([24, 50]) {
             for width in 40..=200 {
                 let content = width as usize - 4;
                 for (state, label) in &states {
