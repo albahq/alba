@@ -695,3 +695,57 @@ fn a_name_that_is_not_utf8_fails_the_render() {
     assert!(err.message.contains("caf"), "{}", err.message);
     assert_eq!(err.span, span_of(PHPCS, "git.changes('src/**/*.php')"));
 }
+
+/// The same refusal through a real repository: git lists the file by its
+/// raw bytes, and the list keeps them, so the render names the file
+/// instead of silently dropping a name decoded into one that does not
+/// exist. Linux only: its filesystems store any bytes as a name, where
+/// APFS and NTFS refuse this one.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_name_git_lists_that_is_not_utf8_fails_the_render() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = Fixture::new(PHPCS, &["src/A.php"]);
+    let root = fixture.root();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "alba@example.com"]);
+    git(&["config", "user.name", "Alba"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["config", "core.excludesFile", ".git/no-global-excludes"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+    // Untracked: `ls-files` lists it, byte for byte under `-z`.
+    let name = OsStr::from_bytes(b"caf\xe9.php");
+    std::fs::write(root.join("src").join(name), "").unwrap();
+
+    let changed = alba_core::git::changed_files(root, "HEAD").unwrap();
+    let project = fixture.project();
+    let beam = beam(&project, "b");
+    let scope = beam
+        .scope
+        .with_changes(incremental(changed), &beam.dir, &cwd_of(beam));
+
+    let err = render_template(&beam.run[0], &scope).unwrap_err();
+
+    assert!(
+        err.message.contains("is not valid UTF-8"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("caf"), "{}", err.message);
+    assert_eq!(err.span, span_of(PHPCS, "git.changes('src/**/*.php')"));
+}

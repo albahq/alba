@@ -156,11 +156,27 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
 /// non-ASCII or special-character filename comes back verbatim instead of
 /// C-quoted (`"caf\303\251.txt"`).
 fn split_nul_terminated(bytes: &[u8]) -> Vec<PathBuf> {
-    String::from_utf8_lossy(bytes)
-        .split('\0')
+    bytes
+        .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
-        .map(PathBuf::from)
+        .map(path_from_bytes)
         .collect()
+}
+
+/// A path git printed, byte for byte. On unix a file name is any bytes,
+/// so one that is not valid UTF-8 keeps its exact name: whoever renders
+/// it as text can then refuse it by name instead of naming another file.
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// A path git printed. Git for Windows prints UTF-8, and a Windows path
+/// holds unicode only, so reading it lossily changes nothing it can hold.
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// The repository's top-level directory, canonical.
@@ -260,10 +276,13 @@ pub fn changed_files(cwd: &Path, reference: &str) -> Result<Vec<PathBuf>, GitErr
 pub fn changed_files_since(cwd: &Path, commit: &str) -> Result<Vec<PathBuf>, GitError> {
     refuse_option_like(commit)?;
     let prefix = git_output(cwd, &["rev-parse", "--show-prefix"])?;
-    let prefix = String::from_utf8_lossy(&prefix)
-        .trim_end_matches(['\n', '\r'])
-        .to_string();
-    let climb = "../".repeat(prefix.split('/').filter(|part| !part.is_empty()).count());
+    // Only the line ending: a directory name may end in a space.
+    let end = prefix
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\n' | b'\r'))
+        .map_or(0, |last| last + 1);
+    let prefix = path_from_bytes(&prefix[..end]);
+    let climb = "../".repeat(prefix.components().count());
 
     // Both list paths relative to the top level: `diff` without
     // `--relative` always does, `ls-files` once told `--full-name` and
