@@ -104,14 +104,17 @@ pub fn draw(frame: &mut Frame, body: Rect, mode: ColourMode) {
     let right = column(&[FIND_AND_COPY, VIEWS], mode);
     let note = Line::styled(NOTE, style(Token::TextMuted, mode));
 
-    // Two columns when the left one and the gap fit before the middle of
-    // the body and the right one fits after it.
-    let middle = body.width / 2;
+    // The right column sits as far into the frame's right half as the
+    // left one sits into the frame, the frame's margin (`body.x`) and
+    // the indent: measured from `body.x`, the frame's middle (rounded
+    // up on an odd width) plus the indent. Two columns when the left
+    // one and the gap fit before it and the right one fits after it.
+    let right_x = (2 * body.x + body.width).div_ceil(2) + INDENT;
     let fits_two =
-        INDENT + width(&left) + COLUMN_GAP <= middle && middle + width(&right) <= body.width;
+        INDENT + width(&left) + COLUMN_GAP <= right_x && right_x + width(&right) <= body.width;
     if fits_two {
         let rows = left.len().max(right.len()) as u16;
-        let left_width = middle - INDENT;
+        let left_width = right_x - INDENT;
         frame.render_widget(
             Paragraph::new(left),
             Rect {
@@ -121,7 +124,7 @@ pub fn draw(frame: &mut Frame, body: Rect, mode: ColourMode) {
         );
         frame.render_widget(
             Paragraph::new(right),
-            Rect::new(body.x + middle, area.y, body.width - middle, area.height),
+            Rect::new(body.x + right_x, area.y, body.width - right_x, area.height),
         );
         if rows < area.height {
             frame.render_widget(
@@ -332,5 +335,18 @@ mod tests {
             assert!(row(&small, 7).contains("RUN"), "{page}");
             assert!(row(&small, height - 2).contains("Esc close help"), "{page}");
         }
+    }
+
+    /// Each column sits as far into its half of the frame as the left
+    /// one sits into the frame; two columns from 90 cells wide.
+    #[test]
+    fn the_right_column_sits_into_its_half_like_the_left_one() {
+        let buffer = drawn(&helping(), 104, 23);
+        assert_eq!(column(&buffer, 7, "RUN"), Some(4));
+        assert_eq!(column(&buffer, 7, "FIND AND COPY"), Some(56));
+        let narrowest = drawn(&helping(), 90, 23);
+        assert_eq!(column(&narrowest, 7, "FIND AND COPY"), Some(49));
+        let narrower = drawn(&helping(), 89, 23);
+        assert_eq!(column(&narrower, 7, "FIND AND COPY"), None);
     }
 }
