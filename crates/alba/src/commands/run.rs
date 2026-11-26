@@ -1117,6 +1117,7 @@ mod tests {
             cwd: None,
             executor: alba_core::ExecutorKind::Shell,
             allow_failure: false,
+            change_globs: Vec::new(),
             dir: PathBuf::from("."),
             span: alba_syntax::Span::new(0, 0),
             source: alba_core::SourceId(0),

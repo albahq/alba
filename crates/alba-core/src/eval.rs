@@ -60,7 +60,19 @@
 //! where it resolves when the beam runs. `glob()` has no such side effect
 //! (it only compiles a pattern), so it is validated eagerly on both paths
 //! as soon as its argument is known.
+//!
+//! ## `git.changes()` and lists
+//!
+//! `git.changes(glob)` returns a [`Value::List`], whose elements depend on
+//! the run's changes and so are never known while loading: [`check_expr`]
+//! tracks a list as [`StaticValue::List`] and accepts it only as a whole
+//! interpolation of a `run` or `env` template, rejecting it wherever a
+//! string or a boolean is required. The call itself is validated on every
+//! branch like the rest: only on the schedule-time path, with a glob known
+//! now and equal to one of the beam's rendered `inputs`, collected into
+//! [`Beam::change_globs`]. Evaluating it is [`crate::changes`]' job.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -70,12 +82,18 @@ use alba_syntax::{
     File, MatchArm, NeedRef, ParseError, Span, Spanned, StringTemplate, TemplatePart,
 };
 
+use crate::changes::{self, BeamChanges};
 use crate::error::{CoreError, ROOT_SOURCE_ID, SourceIdScope, current_source_id};
 use crate::git::{GitError, GitHead};
-use crate::model::{Beam, BeamId, ExecutorKind, GitSettings, Hook, OptionValue, Project, Value};
+use crate::model::{
+    Beam, BeamId, ChangeSet, ExecutorKind, GitSettings, Hook, OptionValue, Project, Quoting, Value,
+};
 
 /// The built-in functions `eval_expr` recognizes in a `Call` expression.
 const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
+
+/// The methods of the `git` object.
+const GIT_METHODS: &[&str] = &["changes"];
 
 /// Name bindings available while evaluating expressions: a file's
 /// evaluated `let`s, later composed with a beam's own parameter values.
@@ -84,10 +102,16 @@ const BUILTIN_FUNCTIONS: &[&str] = &["env", "glob"];
 /// `let`s and a beam takes a handful of parameters, so this stays cheap in
 /// practice; a persistent/structural-sharing map would be premature
 /// machinery for that size.
+///
+/// A beam's scope also carries what `git.changes()` answers from (see
+/// [`Scope::with_changes`]) and how a list renders into a command (see
+/// [`Scope::with_quoting`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scope {
     values: HashMap<String, Value>,
     git: Option<Arc<LazyGit>>,
+    changes: Option<Arc<BeamChanges>>,
+    quoting: Quoting,
 }
 
 /// The `git` object's values, computed on first access and shared by every
@@ -141,9 +165,60 @@ impl Scope {
     /// so `git.*` field access resolves once an expression reads it.
     pub(crate) fn with_git(git: Arc<LazyGit>) -> Self {
         Self {
-            values: HashMap::new(),
             git: Some(git),
+            ..Self::default()
         }
+    }
+
+    /// Returns a new scope in which `git.changes()` answers from
+    /// `changes`: its globs anchored to `beam_dir`, the beam's Beamfile
+    /// directory, and its paths relative to `cwd`, the directory the
+    /// beam's commands run in. A scope without one answers in full mode,
+    /// for want of a reference.
+    pub fn with_changes(&self, changes: ChangeSet, beam_dir: &Path, cwd: &Path) -> Self {
+        Self {
+            changes: Some(Arc::new(BeamChanges::new(changes, beam_dir, cwd))),
+            ..self.clone()
+        }
+    }
+
+    /// Returns a new scope rendering lists with `quoting`, the quoting of
+    /// the shell the beam's commands run in. POSIX by default.
+    pub fn with_quoting(&self, quoting: Quoting) -> Self {
+        Self {
+            quoting,
+            ..self.clone()
+        }
+    }
+
+    /// The scope a beam keeps: full mode with no reference, anchored to
+    /// the beam's directory and `cwd`, so a beam rendered before any
+    /// change set is computed (`alba check`, a run without the engine's
+    /// change set) still lists paths relative to where it runs.
+    fn for_beam(&self, beam_dir: &Path, cwd: &Path) -> Self {
+        Self {
+            changes: Some(Arc::new(BeamChanges::without_reference(beam_dir, cwd))),
+            ..self.clone()
+        }
+    }
+
+    /// `git.changes(glob)`, evaluated: see [`BeamChanges::list`]. `span`
+    /// is the call's, for a path that cannot be rendered as text.
+    fn git_changes(&self, glob: &str, span: Span) -> Result<Vec<String>, CoreError> {
+        let listed = match &self.changes {
+            Some(changes) => changes.list(glob),
+            None => BeamChanges::without_reference(Path::new("."), Path::new(".")).list(glob),
+        };
+        listed.map_err(|path| {
+            CoreError::new(
+                format!(
+                    "`git.changes('{glob}')` cannot list `{}`: its name is not valid UTF-8",
+                    path.display()
+                ),
+                span,
+            )
+            .with_help("rename the file, or keep it out of the glob")
+        })
     }
 
     /// The `git.<field>` value, or the error to report at `span`. Callers
@@ -211,20 +286,17 @@ impl Scope {
     /// argument-count mismatch gets a clear diagnostic instead of
     /// surfacing here as a confusing unknown-variable one.
     pub fn with_params(&self, params: &[String], args: &[String]) -> Self {
-        let mut values = self.values.clone();
+        let mut scope = self.clone();
         for (name, arg) in params.iter().zip(args.iter()) {
-            values.insert(name.clone(), Value::Str(arg.clone()));
+            scope.values.insert(name.clone(), Value::Str(arg.clone()));
         }
-        Self {
-            values,
-            git: self.git.clone(),
-        }
+        scope
     }
 }
 
 /// The most precise span available for `expr`, per `alba_syntax`'s span
 /// policy: `Str` (via its `StringTemplate`), `Var`, and `Call` (via their
-/// name), `Field`, and `Match` carry one; `Bool`, `Binary`, and `If` do
+/// name), `Field`, `Match`, and `Method` carry one; `Bool`, `Binary`, and `If` do
 /// not. Callers fall back to an enclosing span (a `StringTemplate`'s span,
 /// or a fallback threaded down from one) when this returns `None`.
 fn expr_span(expr: &Expr) -> Option<Span> {
@@ -234,7 +306,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Call { name, .. } => Some(name.span),
         Expr::Bool(_) | Expr::Binary { .. } | Expr::If { .. } => None,
         Expr::Field { object, field } => Some(Span::new(object.span.start, field.span.end)),
-        Expr::Match { span, .. } => Some(*span),
+        Expr::Match { span, .. } | Expr::Method { span, .. } => Some(*span),
     }
 }
 
@@ -301,9 +373,17 @@ fn check_field(object: &Spanned<String>, field: &Spanned<String>) -> Result<(), 
         field.value.as_str(),
         "branch" | "sha" | "short_sha" | "dirty"
     ) {
+        let help = if GIT_METHODS.contains(&field.value.as_str()) {
+            format!(
+                "`{0}` is a method: call it, as in `git.{0}(glob)`",
+                field.value
+            )
+        } else {
+            "expected one of `branch`, `sha`, `short_sha`, `dirty`".to_string()
+        };
         return Err(
             CoreError::new(format!("unknown git field `{}`", field.value), field.span)
-                .with_help("expected one of `branch`, `sha`, `short_sha`, `dirty`"),
+                .with_help(help),
         );
     }
     Ok(())
@@ -392,7 +472,8 @@ fn unknown_function_error(name: &Spanned<String>) -> CoreError {
 
 /// Renders `template` against `scope`: literal parts pass through
 /// unchanged, `{expr}` parts are evaluated and interpolated (strings
-/// verbatim, booleans as `true`/`false`).
+/// verbatim, booleans as `true`/`false`, a list as its elements quoted
+/// for the scope's [`Quoting`], joined by single spaces).
 pub fn render_template(template: &StringTemplate, scope: &Scope) -> Result<String, CoreError> {
     let mut out = String::new();
     for part in &template.parts {
@@ -401,7 +482,7 @@ pub fn render_template(template: &StringTemplate, scope: &Scope) -> Result<Strin
             TemplatePart::Expr(e) => {
                 let fallback = expr_span(e).unwrap_or(template.span);
                 let value = eval_with_fallback(e, scope, fallback)?;
-                out.push_str(value.as_display());
+                out.push_str(&value.render(scope.quoting));
             }
         }
     }
@@ -473,10 +554,116 @@ fn eval_with_fallback(expr: &Expr, scope: &Scope, fallback: Span) -> Result<Valu
             };
             eval_with_fallback(chosen, scope, expr_span(chosen).unwrap_or(*span))
         }
+        Expr::Method {
+            receiver,
+            method,
+            args,
+            span,
+        } => eval_method(receiver, method, args, scope, *span),
+    }
+}
+
+/// `receiver.method(args)`, evaluated. The checks repeat [`check_method`]'s,
+/// so a scope built some other way than through a load still fails with
+/// the same message rather than misbehaving.
+fn eval_method(
+    receiver: &Expr,
+    method: &Spanned<String>,
+    args: &[Expr],
+    scope: &Scope,
+    span: Span,
+) -> Result<Value, CoreError> {
+    if is_git_object(receiver) {
+        let name = git_method_name(method)?;
+        if args.len() != 1 {
+            return Err(arity_error(&name, 1, 1, args.len()));
+        }
+        let glob = expect_str_arg(&name, &args[0], scope, span)?;
+        return Ok(Value::List(scope.git_changes(&glob, span)?));
+    }
+    let receiver_span = expr_span(receiver).unwrap_or(span);
+    let items = match eval_with_fallback(receiver, scope, receiver_span)? {
+        Value::List(items) => items,
+        other => return Err(scalar_method_error(other.type_name(), method)),
+    };
+    list_method_name(method)?;
+    if args.len() != 1 {
+        return Err(arity_error(method, 1, 1, args.len()));
+    }
+    let glob_span = expr_span(&args[0]).unwrap_or(span);
+    let glob = expect_str_arg(method, &args[0], scope, span)?;
+    let matcher = changes::compile_dirs_glob(&glob, glob_span)?;
+    Ok(Value::List(changes::dirs(&items, &matcher)))
+}
+
+/// Whether `receiver` is the `git` object. `git` is reserved, never a
+/// `let` or a parameter, so a `Var` named `git` can only mean it.
+fn is_git_object(receiver: &Expr) -> bool {
+    matches!(receiver, Expr::Var(name) if name.value == "git")
+}
+
+/// `method` as a method of `git`, named `git.changes` for messages, or the
+/// error naming `git`'s methods.
+fn git_method_name(method: &Spanned<String>) -> Result<Spanned<String>, CoreError> {
+    if GIT_METHODS.contains(&method.value.as_str()) {
+        return Ok(Spanned::new(format!("git.{}", method.value), method.span));
+    }
+    let err = CoreError::new(
+        format!("`git` has no method `{}`", method.value),
+        method.span,
+    );
+    Err(match suggest(&method.value, GIT_METHODS.iter().copied()) {
+        Some(candidate) => err.with_help(format!("did you mean `{candidate}`?")),
+        None => err.with_help(
+            "`git` has one method, `changes(glob)`; its fields `branch`, `sha`, `short_sha` \
+             and `dirty` are read without parentheses",
+        ),
+    })
+}
+
+/// Checks `method` is one of a list's methods, or names them.
+fn list_method_name(method: &Spanned<String>) -> Result<(), CoreError> {
+    if method.value == "dirs" {
+        return Ok(());
+    }
+    Err(CoreError::new(
+        format!("a list has no method `{}`", method.value),
+        method.span,
+    )
+    .with_help("a list has one method: `dirs`"))
+}
+
+/// A method called on a string or a boolean, which have none.
+fn scalar_method_error(type_name: &str, method: &Spanned<String>) -> CoreError {
+    CoreError::new(
+        format!("{type_name} has no method `{}`", method.value),
+        method.span,
+    )
+    .with_help("only a list has methods: `git.changes(glob)` returns one, with the method `dirs`")
+}
+
+/// A list where a single value is required: `+`, `==`, a condition, a
+/// `match` subject, an argument, a string.
+fn list_type_error(expected: &str, span: Span) -> CoreError {
+    CoreError::new(format!("expected {expected}, found a list"), span).with_help(
+        "a list only renders as a whole `{...}` interpolation in `run` or `env`, each element \
+         quoted for the shell",
+    )
+}
+
+/// The type `op` requires of a single operand, for the error naming a
+/// list found in its place.
+fn operand_type(op: BinOp) -> &'static str {
+    match op {
+        BinOp::And | BinOp::Or => "a boolean",
+        BinOp::Concat | BinOp::Eq | BinOp::NotEq => "a string",
     }
 }
 
 fn eval_binary(op: BinOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, CoreError> {
+    if matches!(lhs, Value::List(_)) || matches!(rhs, Value::List(_)) {
+        return Err(list_type_error(operand_type(op), span));
+    }
     match op {
         BinOp::Concat => match (lhs, rhs) {
             (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
@@ -629,27 +816,40 @@ fn eval_glob(
     validate_glob_pattern(pattern, pattern_span)
 }
 
-/// What [`check_expr`] statically knows about a sub-expression: either its
+/// What [`check_expr`] statically knows about a sub-expression: its
 /// concrete value (it only touched file-level `let`s, which are already
-/// evaluated) or that it depends on something not known yet — one of the
-/// beam's own parameters, or the process environment.
+/// evaluated), that it is a string or a boolean depending on something not
+/// known yet (one of the beam's own parameters, the process environment,
+/// `git`), or that it is a list, whose elements are only known when the
+/// beam runs.
 enum StaticValue {
     Known(Value),
     Unknown,
+    List,
 }
 
 /// When the expression being validated will actually be evaluated, which
-/// is the one thing [`check_expr`] treats differently between the two
-/// paths: whether `env()` may be written without a default. See the module
-/// doc comment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Timing {
-    /// `let` bindings and the beam fields evaluated during the load itself
-    /// (`description`, `inputs`, `outputs`, `cwd`, executor options).
+/// decides whether `env()` may be written without a default and whether
+/// `git.changes()` may appear at all. See the module doc comment.
+#[derive(Debug, Clone, Copy)]
+enum Timing<'a> {
+    /// `let` bindings, the `git` block, and the beam fields evaluated
+    /// during the load itself (`description`, `inputs`, `outputs`, `cwd`,
+    /// executor options).
     Load,
     /// `run` commands and `env` values, rendered when the beam is about to
     /// run, with its parameters bound.
-    Schedule,
+    Schedule(&'a ScheduledBeam<'a>),
+}
+
+/// The beam whose `run` and `env` are being validated: what a
+/// `git.changes()` call there is checked against, and where the globs it
+/// passes are collected into [`Beam::change_globs`].
+#[derive(Debug)]
+struct ScheduledBeam<'a> {
+    name: &'a str,
+    inputs: &'a [String],
+    change_globs: RefCell<Vec<String>>,
 }
 
 /// Walks `expr`, validating variable and function names and eagerly
@@ -696,8 +896,12 @@ fn check_expr(
                     TemplatePart::Expr(e) => {
                         let span = expr_span(e).unwrap_or(template.span);
                         match check_expr(e, lets, params, timing, span)? {
-                            StaticValue::Known(v) => rendered.push_str(v.as_display()),
+                            StaticValue::Known(v) => rendered.push_str(&v.render(Quoting::Posix)),
                             StaticValue::Unknown => any_unknown = true,
+                            // A list renders only as a whole interpolation
+                            // of `run` or `env`, not inside a string an
+                            // expression goes on to use.
+                            StaticValue::List => return Err(list_type_error("a string", span)),
                         }
                     }
                 }
@@ -731,6 +935,19 @@ fn check_expr(
                 timing,
                 expr_span(rhs).unwrap_or(fallback),
             )?;
+            let expected = operand_type(*op);
+            if matches!(l, StaticValue::List) {
+                return Err(list_type_error(
+                    expected,
+                    expr_span(lhs).unwrap_or(fallback),
+                ));
+            }
+            if matches!(r, StaticValue::List) {
+                return Err(list_type_error(
+                    expected,
+                    expr_span(rhs).unwrap_or(fallback),
+                ));
+            }
             match (l, r) {
                 (StaticValue::Known(lv), StaticValue::Known(rv)) => {
                     Ok(StaticValue::Known(eval_binary(*op, lv, rv, fallback)?))
@@ -769,12 +986,15 @@ fn check_expr(
                     ),
                     cond_span,
                 )),
+                StaticValue::List => {
+                    Err(list_type_error("a boolean condition for `if`", cond_span))
+                }
                 StaticValue::Unknown => {
                     // Which branch runs isn't decided yet; still validate
                     // names and types in both.
-                    check_expr(then, lets, params, timing, then_span)?;
-                    check_expr(otherwise, lets, params, timing, otherwise_span)?;
-                    Ok(StaticValue::Unknown)
+                    let then_result = check_expr(then, lets, params, timing, then_span)?;
+                    let else_result = check_expr(otherwise, lets, params, timing, otherwise_span)?;
+                    Ok(either_branch([then_result, else_result]))
                 }
             }
         }
@@ -804,6 +1024,12 @@ fn check_expr(
             let subject = match check_expr(subject, lets, params, timing, subject_span)? {
                 StaticValue::Known(value) => Some(expect_match_subject(value, subject_span)?),
                 StaticValue::Unknown => None,
+                StaticValue::List => {
+                    return Err(list_type_error("a string", subject_span).with_help(
+                        "a `match` subject must be a string, matched against each arm's glob \
+                         patterns",
+                    ));
+                }
             };
             let matchers = arms
                 .iter()
@@ -826,9 +1052,145 @@ fn check_expr(
                         None => default_result,
                     })
                 }
-                None => Ok(StaticValue::Unknown),
+                None => Ok(either_branch(results.into_iter().chain([default_result]))),
             }
         }
+        Expr::Method {
+            receiver,
+            method,
+            args,
+            span,
+        } => check_method(receiver, method, args, *span, lets, params, timing),
+    }
+}
+
+/// What an `if` or `match` whose branch is not known yet gives: a list
+/// when any branch is one, so whatever uses it is held to a list's rules
+/// whichever branch runs.
+fn either_branch(results: impl IntoIterator<Item = StaticValue>) -> StaticValue {
+    if results
+        .into_iter()
+        .any(|result| matches!(result, StaticValue::List))
+    {
+        StaticValue::List
+    } else {
+        StaticValue::Unknown
+    }
+}
+
+/// Validates `receiver.method(args)`: `git.changes(glob)` (only in `run`
+/// and `env`, its glob known now and one of the beam's `inputs`) or a list
+/// method (`dirs(glob)`, its glob known now and compiled).
+fn check_method(
+    receiver: &Expr,
+    method: &Spanned<String>,
+    args: &[Expr],
+    span: Span,
+    lets: &Scope,
+    params: &[String],
+    timing: Timing,
+) -> Result<StaticValue, CoreError> {
+    if is_git_object(receiver) {
+        let name = git_method_name(method)?;
+        let Timing::Schedule(beam) = timing else {
+            return Err(CoreError::new(
+                format!(
+                    "`{}` is only available in `run` and `env`: its value belongs to the moment \
+                     the beam runs",
+                    name.value
+                ),
+                span,
+            )
+            .with_help(
+                "move the call into the beam's `run` commands or `env` values, which render \
+                 when the beam runs",
+            ));
+        };
+        let (glob, glob_span) = check_known_glob(&name, args, span, lets, params, timing)?;
+        if !beam.inputs.contains(&glob) {
+            return Err(glob_outside_inputs(&name, &glob, glob_span, beam));
+        }
+        let mut globs = beam.change_globs.borrow_mut();
+        if !globs.contains(&glob) {
+            globs.push(glob);
+        }
+        return Ok(StaticValue::List);
+    }
+
+    let receiver_span = expr_span(receiver).unwrap_or(span);
+    match check_expr(receiver, lets, params, timing, receiver_span)? {
+        StaticValue::List => {}
+        StaticValue::Known(value) => return Err(scalar_method_error(value.type_name(), method)),
+        StaticValue::Unknown => return Err(scalar_method_error("a string or a boolean", method)),
+    }
+    list_method_name(method)?;
+    let (glob, glob_span) = check_known_glob(method, args, span, lets, params, timing)?;
+    changes::compile_dirs_glob(&glob, glob_span)?;
+    Ok(StaticValue::List)
+}
+
+/// The one argument of a method taking a glob, which must be a string
+/// known when the Beamfile loads (a literal or a `let`), with its span.
+fn check_known_glob(
+    name: &Spanned<String>,
+    args: &[Expr],
+    span: Span,
+    lets: &Scope,
+    params: &[String],
+    timing: Timing,
+) -> Result<(String, Span), CoreError> {
+    if args.len() != 1 {
+        return Err(arity_error(name, 1, 1, args.len()));
+    }
+    let glob_span = expr_span(&args[0]).unwrap_or(span);
+    match check_expr(&args[0], lets, params, timing, glob_span)? {
+        StaticValue::Known(value) => {
+            Ok((expect_str_value(&name.value, value, glob_span)?, glob_span))
+        }
+        StaticValue::List => Err(list_type_error("a string", glob_span)),
+        StaticValue::Unknown => Err(CoreError::new(
+            format!(
+                "the glob of `{}` must be known when the Beamfile loads",
+                name.value
+            ),
+            glob_span,
+        )
+        .with_help(
+            "write it as a literal or a `let`, not a beam parameter, `env()` or a `git` field",
+        )),
+    }
+}
+
+/// A `git.changes()` glob that is none of the beam's `inputs`.
+fn glob_outside_inputs(
+    name: &Spanned<String>,
+    glob: &str,
+    span: Span,
+    beam: &ScheduledBeam,
+) -> CoreError {
+    let err = CoreError::new(
+        format!(
+            "`{}` glob `{glob}` is not one of beam `{}`'s inputs",
+            name.value, beam.name
+        ),
+        span,
+    );
+    let reason = "so the cache, `--affected` and the list agree on what changed";
+    if beam.inputs.is_empty() {
+        err.with_help(format!(
+            "beam `{}` declares no `inputs`; add `'{glob}'` to them, {reason}",
+            beam.name
+        ))
+    } else {
+        let inputs: Vec<String> = beam
+            .inputs
+            .iter()
+            .map(|input| format!("`{input}`"))
+            .collect();
+        err.with_help(format!(
+            "its inputs are {}; pass one of them, {reason}",
+            inputs.join(", ")
+        ))
     }
 }
 
@@ -848,9 +1210,11 @@ fn check_env_call(
     }
     for arg in args {
         let span = expr_span(arg).unwrap_or(fallback);
-        check_expr(arg, lets, params, timing, span)?;
+        if let StaticValue::List = check_expr(arg, lets, params, timing, span)? {
+            return Err(list_type_error("a string", span));
+        }
     }
-    if timing == Timing::Load && args.len() == 1 {
+    if matches!(timing, Timing::Load) && args.len() == 1 {
         return Err(CoreError::new(
             "`env` requires a default value here",
             name.span,
@@ -890,6 +1254,7 @@ fn check_glob_call(
             )?))
         }
         StaticValue::Unknown => Ok(StaticValue::Unknown),
+        StaticValue::List => Err(list_type_error("a string", pattern_span)),
     }
 }
 
@@ -962,6 +1327,11 @@ fn reject_param_references(expr: &Expr, params: &[String], field: &str) -> Resul
             arms.iter()
                 .try_for_each(|arm| reject_param_references(&arm.value, params, field))?;
             reject_param_references(default, params, field)
+        }
+        Expr::Method { receiver, args, .. } => {
+            reject_param_references(receiver, params, field)?;
+            args.iter()
+                .try_for_each(|arg| reject_param_references(arg, params, field))
         }
     }
 }
@@ -1181,8 +1551,10 @@ fn build_git_settings(file: &File, lets: &Scope, is_root: bool) -> Result<GitSet
             base: (!base.is_empty()).then_some(base),
             warning: None,
         }),
-        Ok(Value::Bool(_)) => Err(CoreError::new("`base` must be a string", fallback)
-            .with_help("name a reference, such as `'origin/main'`, or `''` for none")),
+        Ok(Value::Bool(_) | Value::List(_)) => {
+            Err(CoreError::new("`base` must be a string", fallback)
+                .with_help("name a reference, such as `'origin/main'`, or `''` for none"))
+        }
         Err(error) => match lets.git_failure(&error) {
             Some(failure) => Ok(GitSettings {
                 base: None,
@@ -1299,12 +1671,18 @@ fn build_beam(
     let env_inputs = build_env_inputs(decl, lets, &params, &inputs)?;
     let secrets = variable_names("secrets", beam_name, &decl.secrets, lets, &params)?;
 
+    let scheduled = ScheduledBeam {
+        name: beam_name,
+        inputs: &inputs,
+        change_globs: RefCell::new(Vec::new()),
+    };
     for run_template in &decl.run {
-        validate_template(run_template, lets, &params, Timing::Schedule)?;
+        validate_template(run_template, lets, &params, Timing::Schedule(&scheduled))?;
     }
     for (_, env_template) in &decl.env {
-        validate_template(env_template, lets, &params, Timing::Schedule)?;
+        validate_template(env_template, lets, &params, Timing::Schedule(&scheduled))?;
     }
+    let change_globs = scheduled.change_globs.into_inner();
 
     let cwd = decl
         .cwd
@@ -1312,6 +1690,11 @@ fn build_beam(
         .map(|t| render_load_time_template("cwd", t, lets, &params))
         .transpose()?;
     let executor = build_executor(decl.executor.as_ref(), lets, &params)?;
+    // As the engine resolves it: `join` with an absolute `cwd` yields it.
+    let run_dir = match &cwd {
+        Some(cwd) => dir.join(cwd),
+        None => dir.to_path_buf(),
+    };
 
     Ok(Beam {
         id: BeamId(decl.name.value.clone()),
@@ -1331,10 +1714,11 @@ fn build_beam(
         cwd,
         executor,
         allow_failure: decl.allow_failure,
+        change_globs,
         dir: dir.to_path_buf(),
         span: decl.span,
         source: current_source_id(),
-        scope: lets.clone(),
+        scope: lets.for_beam(dir, &run_dir),
     })
 }
 

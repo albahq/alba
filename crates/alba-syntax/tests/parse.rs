@@ -396,3 +396,75 @@ fn git_stays_an_ordinary_name_outside_a_block() {
     assert!(file.git.is_none());
     assert_eq!(file.lets.len(), 1);
 }
+
+#[test]
+fn a_method_call_on_git_parses() {
+    let src = "let x = git.changes('src/**/*.php')";
+    let Expr::Method {
+        receiver,
+        method,
+        args,
+        span,
+    } = let_value(src)
+    else {
+        panic!("expected a method call");
+    };
+
+    assert!(matches!(*receiver, Expr::Var(ref name) if name.value == "git"));
+    assert_eq!(method.value, "changes");
+    assert_eq!(method.span, span_of(src, "changes"));
+    assert_eq!(args.len(), 1);
+    assert_eq!(literal(&args[0]), "src/**/*.php");
+    assert_eq!(span, Span::new(src.find("git").unwrap(), src.len()));
+}
+
+#[test]
+fn method_calls_chain() {
+    let src = "let x = git.changes('a').dirs('b')";
+    let Expr::Method {
+        receiver,
+        method,
+        args,
+        span,
+    } = let_value(src)
+    else {
+        panic!("expected a method call");
+    };
+
+    assert_eq!(method.value, "dirs");
+    assert_eq!(literal(&args[0]), "b");
+    assert_eq!(span, Span::new(src.find("git").unwrap(), src.len()));
+    let Expr::Method {
+        receiver: inner,
+        method: inner_method,
+        args: inner_args,
+        span: inner_span,
+    } = *receiver
+    else {
+        panic!("expected the receiver to be a method call");
+    };
+    assert!(matches!(*inner, Expr::Var(ref name) if name.value == "git"));
+    assert_eq!(inner_method.value, "changes");
+    assert_eq!(literal(&inner_args[0]), "a");
+    assert_eq!(inner_span, span_of(src, "git.changes('a')"));
+}
+
+#[test]
+fn a_field_is_still_a_field() {
+    let src = "let x = git.branch";
+    let Expr::Field { object, field } = let_value(src) else {
+        panic!("expected a field access");
+    };
+    assert_eq!(object.value, "git");
+    assert_eq!(field.value, "branch");
+}
+
+#[test]
+fn a_method_call_in_an_interpolation_closes_on_its_own_brace() {
+    let file =
+        parse("beam b { inputs ['src/**'] run \"lint {git.changes('src/**')} done\" }").unwrap();
+    let parts = &file.beams[0].run[0].parts;
+    assert!(matches!(&parts[0], TemplatePart::Literal(text) if text == "lint "));
+    assert!(matches!(&parts[1], TemplatePart::Expr(Expr::Method { .. })));
+    assert!(matches!(&parts[2], TemplatePart::Literal(text) if text == " done"));
+}

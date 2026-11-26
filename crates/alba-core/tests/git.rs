@@ -315,3 +315,21 @@ fn a_boolean_base_is_a_load_error() {
     assert_eq!(err.message, "`base` must be a string");
     assert!(err.span.is_some());
 }
+
+#[test]
+fn calling_git_changes_in_base_is_rejected() {
+    let dir = repository();
+    let source = "git { base git.changes('src/**') }\nbeam b { inputs ['src/**'] run \"x\" }";
+
+    let err = load_beamfile(dir.path(), source).unwrap_err();
+
+    assert_eq!(
+        err.message,
+        "`git.changes` is only available in `run` and `env`: its value belongs to the moment \
+         the beam runs"
+    );
+    let start = source.find("git.changes").unwrap();
+    let end = source.find(") }").unwrap() + 1;
+    assert_eq!(err.span, Some(alba_syntax::Span::new(start, end)));
+    assert!(err.help.is_some());
+}

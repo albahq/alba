@@ -8,7 +8,9 @@
 //! validating that a referenced beam actually exists: that is
 //! [`crate::validate_graph`]'s job, not this module's.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use alba_syntax::{Span, Spanned, StringTemplate};
 
@@ -87,12 +89,16 @@ pub enum OptionValue {
     List(Vec<String>),
 }
 
-/// A value produced by evaluating an [`alba_syntax::Expr`]: either of the
-/// DSL's two runtime types.
+/// A value produced by evaluating an [`alba_syntax::Expr`]: a string, a
+/// boolean, or a list of strings. No literal produces a list: only
+/// `git.changes()` and the list methods do, and a list is only ever
+/// rendered whole, as one `{...}` interpolation of a `run` or `env`
+/// template.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Str(String),
     Bool(bool),
+    List(Vec<String>),
 }
 
 impl Value {
@@ -102,18 +108,75 @@ impl Value {
         match self {
             Value::Str(_) => "a string",
             Value::Bool(_) => "a boolean",
+            Value::List(_) => "a list",
         }
     }
 
     /// This value as it appears when interpolated into a template:
-    /// strings verbatim, booleans as `true`/`false`.
-    pub(crate) fn as_display(&self) -> &str {
+    /// strings verbatim, booleans as `true`/`false`, a list as its
+    /// elements quoted for the shell `quoting` names, joined by single
+    /// spaces.
+    pub(crate) fn render(&self, quoting: Quoting) -> Cow<'_, str> {
         match self {
-            Value::Str(s) => s.as_str(),
-            Value::Bool(true) => "true",
-            Value::Bool(false) => "false",
+            Value::Str(s) => Cow::Borrowed(s.as_str()),
+            Value::Bool(true) => Cow::Borrowed("true"),
+            Value::Bool(false) => Cow::Borrowed("false"),
+            Value::List(items) => Cow::Owned(crate::changes::render_list(items, quoting)),
         }
     }
+}
+
+/// How the shell a beam's commands run in reads a quoted word, which is
+/// how a list's elements are quoted when it is rendered into a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quoting {
+    /// POSIX single quoting: the embedded shell, `sh`, the docker and
+    /// compose executors, and plugin executors.
+    #[default]
+    Posix,
+    /// PowerShell single quoting, with native `\` separators: the host
+    /// shell (`system_shell`) on Windows.
+    PowerShell,
+}
+
+/// What `git.changes()` returns for one beam in one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeMode {
+    /// The changed files matching the glob.
+    Incremental,
+    /// The glob's base directory, so the tool processes everything.
+    Full(FullReason),
+}
+
+/// Why a beam runs in full mode, for diagnosing a surprising full run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullReason {
+    /// No reference to diff from: no `git` block, an empty `base`, or
+    /// `--no-affected`.
+    NoReference,
+    /// The reference, or its merge base with `HEAD`, could not be
+    /// resolved.
+    ReferenceUnresolved,
+    /// The merge base is `HEAD` on a clean working tree: the run is on the
+    /// target branch itself.
+    OnTargetBranch,
+    /// The beam's own Beamfile changed.
+    BeamfileChanged,
+    /// A beam this one transitively `needs` is affected.
+    DependencyAffected(BeamId),
+    /// A changed path, relative to the project root, matches one of the
+    /// beam's `inputs` but none of its `git.changes()` globs.
+    InputOutsideChanges(String),
+}
+
+/// The changes one run computed, and what they mean for one beam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeSet {
+    pub mode: ChangeMode,
+    /// Every changed path of the repository, absolute and lexically
+    /// normal, deleted ones included: `git.changes()` keeps those that
+    /// still exist when the beam renders.
+    pub changed: Arc<Vec<PathBuf>>,
 }
 
 /// A single beam: the unit of work produced by evaluating a `beam { ... }`
@@ -153,6 +216,11 @@ pub struct Beam {
     pub cwd: Option<String>,
     pub executor: ExecutorKind,
     pub allow_failure: bool,
+    /// Every glob the beam passes to `git.changes()` in `run` or `env`,
+    /// rendered, deduplicated, in order of appearance (`run` before `env`).
+    /// A call in a branch that depends on a parameter counts too: which
+    /// branch runs is not known until the beam is scheduled.
+    pub change_globs: Vec<String>,
     /// The directory of the defining Beamfile, used as the `cwd` base.
     /// Always absolute for a project built by `crate::loader::load_project`
     /// (it derives this via `std::path::absolute`, not the file's

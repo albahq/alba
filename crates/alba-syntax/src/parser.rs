@@ -150,7 +150,13 @@ impl<'a> Parser<'a> {
 
     /// The token after the current one, or `Eof` at the end of input.
     fn peek_next(&self) -> &Token {
-        &self.tokens[(self.pos + 1).min(self.tokens.len() - 1)]
+        self.peek_at(1)
+    }
+
+    /// The token `offset` places after the current one, or `Eof` past the
+    /// end of input.
+    pub(crate) fn peek_at(&self, offset: usize) -> &Token {
+        &self.tokens[(self.pos + offset).min(self.tokens.len() - 1)]
     }
 
     pub(crate) fn is_eof(&self) -> bool {

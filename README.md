@@ -502,6 +502,100 @@ targets against `<ref>`, so reverting a change drops its beam back out.
 Affected selection is driven through the `git` CLI: `git` must be on the
 `PATH` for `--affected` and `alba affected`.
 
+## Incremental beams
+
+A linter or a static analyser does not need to see the whole tree when a
+branch changed three files. `git.changes(glob)` hands a beam the changed
+files matching `glob`, against the reference a `git` block declares (see
+[Declaring the reference](#declaring-the-reference)):
+
+```
+git {
+  base match git.branch {
+    'hotfix/*' | 'master' => 'origin/master'
+    _                     => 'origin/develop'
+  }
+}
+
+beam phpcs {
+  inputs ["src/**/*.php", "phpcs.xml"]
+  run "vendor/bin/phpcs {git.changes('src/**/*.php')}"
+}
+
+beam phpstan {
+  inputs ["src/**/*.php", "phpstan.neon"]
+  run "vendor/bin/phpstan analyse {git.changes('src/**/*.php').dirs('src/*')}"
+}
+```
+
+`git.changes(glob)` is a method call on the `git` object, and returns a
+list. It is checked when the Beamfile loads:
+
+- It may only appear in `run` and `env`: its value belongs to the moment the
+  beam runs. Anywhere else (`let`, `description`, `inputs`, `cwd`, an
+  executor option, the `git` block) is a load error.
+- It takes exactly one string, a literal or a `let`, known when the Beamfile
+  loads; a beam parameter or `env()` is rejected.
+- The glob must be one of the beam's `inputs`, compared after rendering, so
+  the cache, `--affected` and the list agree on what changed. Otherwise the
+  load error lists the beam's inputs.
+
+The list holds, in incremental mode, the changed files matching the glob
+that still exist (an added, modified, renamed or untracked file; a deleted
+file is dropped; a rename keeps its new path), sorted, without duplicates.
+The glob is anchored to the Beamfile's directory exactly as `inputs` are, so
+`../libs/**/*.php` matches changes outside it. In full mode, the list holds
+one element: the glob's base directory (`src/**/*.php` gives `src`; a glob
+with no literal prefix, such as `**/*.php`, gives `.`), so the tool
+processes everything. Paths are relative to the beam's `cwd`, climbing with
+`../` when needed.
+
+A beam runs in full mode whenever there is any doubt:
+
+- there is no reference (no `git` block, an empty `base`, or
+  `--no-affected`);
+- the reference, or its merge base with `HEAD`, cannot be resolved (a
+  warning names it);
+- the merge base is `HEAD` and the working tree is clean, as on the target
+  branch after a merge;
+- the beam's Beamfile changed, or a beam it transitively `needs` is
+  affected;
+- a changed path matches one of the beam's `inputs` but none of the globs
+  it passes to `git.changes()`, as a `phpcs.xml` change does above.
+
+Otherwise it runs in incremental mode.
+
+`.dirs(glob)` is a method of a list. Each element becomes the shortest
+prefix of its path, cut at a `/`, that matches `glob`, where `*` never
+crosses a `/`; an element with no matching prefix is kept as it is. Then
+duplicates are removed, as is any element lying under another one, and the
+result is sorted. `src/Billing/Invoice.php` with `.dirs('src/*')` gives
+`src/Billing`; in full mode `src` is shorter than `src/*` and stays `src`,
+so phpstan analyses everything. Its glob is a literal or a `let`, compiled
+when the Beamfile loads.
+
+A list renders as its elements joined by single spaces, each quoted for the
+shell that runs the command, so a file name holding a space, a quote or a
+`$` reaches the tool as one argument. An element made only of letters,
+digits and `_ . / : @ % + = , -` is left bare, to keep logs readable;
+anything else is single quoted. The embedded shell, `sh`, docker, compose
+and plugin executors get POSIX quoting (`'it'\''s.php'`); `system_shell` on
+Windows gets PowerShell quoting (`'it''s.php'`, every quote PowerShell
+reads as one doubled, typographic ones included, and `,` and `@` quoted
+too) and native `\` separators. An element starting with `-` is written
+`./-x.php` (`.\-x.php` for PowerShell), so a file a branch names
+`--autoload-file=evil.php` reaches the tool as a path, never as an option.
+An empty list renders as nothing. A path whose name is not valid UTF-8
+fails the run with an error naming it, rather than reaching the tool
+mangled.
+
+A list is only accepted as a whole `{...}` interpolation of `run` or `env`:
+using one where a string or a boolean is required (`+`, `==`, an `if`
+condition, a `match` subject, a function argument) is a load error. In an
+`env` value the list is the same shell-quoted text a command gets, so a
+consumer must evaluate it as shell words (`eval "set -- $FILES"` in `sh`),
+not split it on spaces.
+
 ## Watch mode
 
 `alba run --watch [beam]` runs the beam, then keeps the session open and

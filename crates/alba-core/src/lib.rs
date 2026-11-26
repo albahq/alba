@@ -3,9 +3,10 @@
 //! `alba-core` takes the AST `alba-syntax` produces and evaluates it into
 //! the typed [`Project`] model the execution engine schedules: resolving
 //! `let` bindings and `{expr}` interpolation, checking the small type
-//! system (strings and booleans), and running the built-in `env()`/`glob()`
-//! functions. See [`render_template`] and [`eval_expr`] for the
-//! load-time-vs-schedule-time rendering split between a beam's fields.
+//! system (strings, booleans, and the lists `git.changes()` returns), and
+//! running the built-in `env()`/`glob()` functions. See
+//! [`render_template`] and [`eval_expr`] for the load-time-vs-schedule-time
+//! rendering split between a beam's fields.
 //!
 //! Multi-file loading (`import "path" as alias`, namespaced beam ids) is
 //! [`load_project`]'s job, which also validates the resulting dependency
@@ -14,6 +15,7 @@
 //! closure of a target beam, for whichever engine schedules and runs it.
 //! [`git`] wraps the `git` CLI, the only place in the workspace that spawns it.
 
+mod changes;
 mod definition;
 mod error;
 mod eval;
@@ -33,7 +35,8 @@ pub use files::{
 pub use graph::{execution_subgraph, validate_graph};
 pub use loader::{LoadError, SourceMap, load_project};
 pub use model::{
-    Beam, BeamId, ExecutorKind, GitSettings, Hook, OptionValue, Project, SourceId, Value,
+    Beam, BeamId, ChangeMode, ChangeSet, ExecutorKind, FullReason, GitSettings, Hook, OptionValue,
+    Project, Quoting, SourceId, Value,
 };
 
 #[doc(hidden)]

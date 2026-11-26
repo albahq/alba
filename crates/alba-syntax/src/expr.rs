@@ -14,7 +14,8 @@
 //! into the full expression grammar, so e.g. `else "no" + suffix` parses
 //! the whole `+` expression as the `else` branch. `match subject { ... }`
 //! is an atom too: its braces delimit it, so it needs no precedence of its
-//! own.
+//! own. A method call (`receiver.name(args)`) is a postfix on an atom,
+//! binding tighter than everything else, and chains left to right.
 
 use std::collections::HashSet;
 
@@ -59,6 +60,18 @@ pub enum Expr {
         arms: Vec<MatchArm>,
         default: Box<Expr>,
         /// From `match` to the closing `}`.
+        span: Span,
+    },
+    /// `receiver.method(args)`: a method call, such as
+    /// `git.changes('src/**/*.php')` or `<list>.dirs('src/*')`. Which
+    /// values have which methods is `alba-core`'s concern, not the
+    /// grammar's. Without parentheses, `object.field` stays a
+    /// [`Expr::Field`].
+    Method {
+        receiver: Box<Expr>,
+        method: Spanned<String>,
+        args: Vec<Expr>,
+        /// From the start of the receiver to the closing `)`.
         span: Span,
     },
 }
@@ -159,9 +172,57 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    /// A single atom: a string, boolean, variable, call, or `if/then/else`
-    /// expression. The highest-precedence level.
+    /// A single atom followed by any number of method calls, the
+    /// highest-precedence level: `git.changes('a').dirs('b')` is
+    /// `(git.changes('a')).dirs('b')`. Only `. name (` starts a method
+    /// call, so `git.branch` keeps parsing as a field.
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek().span.start;
+        let mut expr = self.parse_primary()?;
+        while self.method_call_follows() {
+            self.advance();
+            let method = self.eat_ident()?;
+            let args = self.parse_call_args()?;
+            expr = Expr::Method {
+                receiver: Box::new(expr),
+                method,
+                args,
+                span: Span::new(start, self.prev_end()),
+            };
+        }
+        Ok(expr)
+    }
+
+    /// Whether the next tokens are `. identifier (`, the start of a method
+    /// call.
+    fn method_call_follows(&self) -> bool {
+        self.check(&TokenKind::Dot)
+            && matches!(self.peek_at(1).kind, TokenKind::Ident(_))
+            && self.peek_at(2).kind == TokenKind::LParen
+    }
+
+    /// `( args )`: a parenthesized, comma-separated argument list, shared
+    /// by function and method calls.
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.expect(TokenKind::LParen, "`(`")?;
+        let mut args = Vec::new();
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                args.push(self.parse_expr()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    /// A string, boolean, variable, call, field, `match`, or
+    /// `if/then/else` expression.
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwMatch => self.parse_match(),
@@ -180,7 +241,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) => {
                 let name_span = self.advance().span;
-                if self.check(&TokenKind::Dot) {
+                // `git.changes(...)` is a method call on `git`, left to
+                // `parse_atom`'s postfix loop; `git.branch` is a field.
+                if self.check(&TokenKind::Dot) && !self.method_call_follows() {
                     self.advance();
                     let field = self.eat_ident()?;
                     return Ok(Expr::Field {
@@ -189,19 +252,7 @@ impl<'a> Parser<'a> {
                     });
                 }
                 if self.check(&TokenKind::LParen) {
-                    self.advance();
-                    let mut args = Vec::new();
-                    if !self.check(&TokenKind::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if self.check(&TokenKind::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(TokenKind::RParen, "`)`")?;
+                    let args = self.parse_call_args()?;
                     Ok(Expr::Call {
                         name: Spanned::new(name, name_span),
                         args,

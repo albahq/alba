@@ -182,7 +182,7 @@ pub fn lexically_normal(path: &Path) -> PathBuf {
 
 /// `path`'s components with `.` dropped and `..` folded into the component
 /// before it, so two spellings of one path compare equal.
-fn lexical_components(path: &Path) -> Vec<Component<'_>> {
+pub(crate) fn lexical_components(path: &Path) -> Vec<Component<'_>> {
     let mut components = Vec::new();
     for component in path.components() {
         match component {
@@ -199,7 +199,7 @@ fn lexical_components(path: &Path) -> Vec<Component<'_>> {
 /// The shortest '/'-separated path from the base (given as its
 /// [`lexical_components`]) to `path`, climbing with `..` when `path` lies
 /// outside it.
-fn relative_name(base: &[Component<'_>], path: &Path) -> String {
+pub(crate) fn relative_name(base: &[Component<'_>], path: &Path) -> String {
     let path = lexical_components(path);
     let shared = base
         .iter()
