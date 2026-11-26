@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use alba_core::BeamId;
 use alba_engine::{BeamDetails, BeamStatus, ExecutorLabel, RunEvent, RunSummary};
 use alba_executors::{OutputLine, Stream};
-use alba_tui::copy::CopyState;
+use alba_tui::input::{Action, action_for};
 use alba_tui::state::{AppState, Mode};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -407,6 +407,32 @@ fn sized_for_artboard(state: &mut AppState) {
     sized(state, ARTBOARD_WIDTH, ARTBOARD_HEIGHT);
 }
 
+/// A key pressed in the artboard's terminal: mapped to its action by
+/// the keymap (`input::action_for`), then carried out as `lib::dispatch`
+/// does, the pane sized first. Only the actions these tests press are
+/// carried out; `dispatch` itself needs the session's command channel.
+fn press(state: &mut AppState, code: KeyCode) {
+    sized_for_artboard(state);
+    let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    match action_for(&event, &state.mode) {
+        Action::ScrollHalfPageUp => {
+            let pane = alba_tui::ui::log_pane_content_area(state, ARTBOARD_WIDTH, ARTBOARD_HEIGHT)
+                .expect("the artboard is above the size floor");
+            let rows = (pane.height as usize / 2).max(1);
+            let filter = state.effective_filter();
+            let key = state.displayed_log_key();
+            state
+                .logs
+                .entry(key)
+                .or_default()
+                .scroll_up_rows(rows, pane.width as usize, filter);
+        }
+        Action::EnterCopy => state.enter_copy(),
+        Action::Key(key) => state.handle_modal_key(key),
+        other => panic!("{code:?} maps to {other:?}, which these tests do not press"),
+    }
+}
+
 fn artboard(state: &AppState, now: Instant) -> String {
     drawn_at(state, ARTBOARD_WIDTH, ARTBOARD_HEIGHT, now)
 }
@@ -766,10 +792,24 @@ fn copy_line_selection() {
     // Buffer lines: 0 the echo, 1 `Running`, 2 `running 67 tests`,
     // 3 the failed test, 4 the panic, 5 the assertion, 6 `left`,
     // 7 `right`.
-    sized_for_artboard(&mut state);
-    let mut copy = CopyState::new_at(4);
-    copy.cursor = (7, 28);
-    state.mode = Mode::Copy(copy);
+    // `v` anchors on the pane's top line, the echo; four lines down,
+    // `v` again re-anchors on the panic, then three down and to the end
+    // of `right:`.
+    press(&mut state, KeyCode::Char('v'));
+    for _ in 0..4 {
+        press(&mut state, KeyCode::Char('j'));
+    }
+    press(&mut state, KeyCode::Char('v'));
+    for _ in 0..3 {
+        press(&mut state, KeyCode::Char('j'));
+    }
+    for _ in 0..28 {
+        press(&mut state, KeyCode::Char('l'));
+    }
+    match &state.mode {
+        Mode::Copy(copy) => assert_eq!((copy.anchor, copy.cursor), ((4, 0), (7, 27))),
+        other => panic!("expected copy mode, got {other:?}"),
+    }
     insta::assert_snapshot!(artboard(&state, start + millis(20_000)));
 }
 
@@ -951,24 +991,26 @@ fn run_scrolling_48_beams() {
         "payment/payout/batch_skips_frozen_accounts",
         "payment/payout/retries_on_transient_bank",
     ];
-    // The pane shows twelve lines ending on line 1 240 of 2 400.
+    // The pane shows twelve lines ending on line 1 240 of 2 400: the
+    // reader paged up twice (six rows each) from line 1 252, and the
+    // beam printed the rest while the pane stayed paused.
     let first_visible = 1240 - visible.len();
-    for index in 0..2400_usize {
+    let line = |index: usize| {
         let name = match index.checked_sub(first_visible) {
             Some(offset) if offset < visible.len() => visible[offset].to_string(),
             _ => format!("payment/sandbox/case_{index:04}"),
         };
-        state.apply(
-            &output("services:payment:integration", &format!("ok   {name}")),
-            now,
-        );
-    }
-    state
-        .logs
-        .get_mut("services:payment:integration")
-        .unwrap()
-        .scroll_up(2400 - 1240);
+        output("services:payment:integration", &format!("ok   {name}"))
+    };
     state.select(21);
+    for index in 0..1252 {
+        state.apply(&line(index), now);
+    }
+    press(&mut state, KeyCode::PageUp);
+    press(&mut state, KeyCode::PageUp);
+    for index in 1252..2400 {
+        state.apply(&line(index), now);
+    }
     insta::assert_snapshot!(artboard(&state, now));
 }
 
