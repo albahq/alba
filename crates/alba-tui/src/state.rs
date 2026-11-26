@@ -347,8 +347,7 @@ impl AppState {
                 status,
                 duration,
             } => {
-                let skipped =
-                    matches!(status, BeamStatus::Cancelled) && !self.started.contains(&id.0);
+                let skipped = self.skipped_by(&id.0, status);
                 if skipped {
                     // Nothing ran this time: the skip is the whole story,
                     // not a footnote to the previous run's output.
@@ -464,13 +463,16 @@ impl AppState {
     /// `row` ended `Cancelled` without having started: the engine
     /// skipped it, so nothing ran and its duration means nothing.
     pub fn is_skipped(&self, row: &BeamRow) -> bool {
-        matches!(
-            row.state,
-            BeamState::Done {
-                status: BeamStatus::Cancelled,
-                ..
-            }
-        ) && !self.started.contains(&row.id)
+        match &row.state {
+            BeamState::Done { status, .. } => self.skipped_by(&row.id, status),
+            BeamState::Pending | BeamState::Running { .. } => false,
+        }
+    }
+
+    /// Whether beam `id` ending with `status` means the engine skipped
+    /// it: cancelled without having started.
+    fn skipped_by(&self, id: &str, status: &BeamStatus) -> bool {
+        matches!(status, BeamStatus::Cancelled) && !self.started.contains(id)
     }
 
     /// Ctrl-C with nothing running: the session is being interrupted,
