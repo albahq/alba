@@ -50,21 +50,25 @@ impl Counts {
             match &row.state {
                 BeamState::Pending => counts.not_run += 1,
                 BeamState::Running { .. } => {}
-                BeamState::Done { status, .. } => {
-                    counts.done += 1;
-                    match status {
-                        BeamStatus::Succeeded => counts.passed += 1,
-                        BeamStatus::Cached => counts.cached += 1,
-                        BeamStatus::Failed { .. } | BeamStatus::FailedAllowed { .. } => {
-                            counts.failed += 1
-                        }
-                        // A beam that ended without running is pending no
-                        // more while the run goes on, and skipped once it
-                        // is over.
-                        BeamStatus::Cancelled if !running => counts.not_run += 1,
-                        BeamStatus::Cancelled => {}
+                BeamState::Done { status, .. } => match status {
+                    BeamStatus::Succeeded => {
+                        counts.done += 1;
+                        counts.passed += 1;
                     }
-                }
+                    BeamStatus::Cached => {
+                        counts.done += 1;
+                        counts.cached += 1;
+                    }
+                    BeamStatus::Failed { .. } | BeamStatus::FailedAllowed { .. } => {
+                        counts.done += 1;
+                        counts.failed += 1;
+                    }
+                    // A beam that ended without running is not complete:
+                    // pending no more while the run goes on, and skipped
+                    // once it is over.
+                    BeamStatus::Cancelled if !running => counts.not_run += 1,
+                    BeamStatus::Cancelled => {}
+                },
             }
         }
         counts
@@ -332,6 +336,8 @@ mod tests {
         assert_eq!(red.spans[0].style.fg, Some(Color::Rgb(0xF0, 0xA2, 0x9A)));
     }
 
+    /// A beam that ended without running is not complete: it counts
+    /// as skipped once the run is over, never towards `done`.
     #[test]
     fn a_finished_run_counts_skipped_beams() {
         let mut state = started(&["a", "b", "c"]);
@@ -339,7 +345,7 @@ mod tests {
         finish(&mut state, "b", BeamStatus::Cancelled);
         assert_eq!(
             drawn(&state, 40).trim_start(),
-            "2/3 complete   ✗ 1 failed   ○ 1 pending"
+            "1/3 complete   ✗ 1 failed   ○ 1 pending"
         );
         state.apply(
             &RunEvent::RunFinished {
@@ -349,7 +355,7 @@ mod tests {
         );
         assert_eq!(
             drawn(&state, 40).trim_start(),
-            "2/3 complete   ✗ 1 failed   ○ 2 skipped"
+            "1/3 complete   ✗ 1 failed   ○ 2 skipped"
         );
     }
 
