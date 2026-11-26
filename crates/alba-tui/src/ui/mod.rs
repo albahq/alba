@@ -141,8 +141,9 @@ fn draw_separator(frame: &mut Frame, area: Rect, y: u16, mode: ColourMode) {
     );
 }
 
-/// Below the floor: the badge, `Terminal too small` bold, then the
-/// size needed and the size there is, muted, centred.
+/// Below the floor: the badge, `Terminal too small` bold and the size
+/// needed, then the size there is, muted, centred; a blank row between
+/// each group.
 fn draw_too_small(frame: &mut Frame, area: Rect, mode: ColourMode) {
     let muted = style(Token::TextMuted, mode);
     let lines = vec![
@@ -153,6 +154,7 @@ fn draw_too_small(frame: &mut Frame, area: Rect, mode: ColourMode) {
             format!("Resize to at least {MIN_WIDTH}×{MIN_HEIGHT}"),
             muted,
         ),
+        Line::default(),
         Line::styled(format!("Now {}×{}", area.width, area.height), muted),
     ];
     let height = (lines.len() as u16).min(area.height);
@@ -545,6 +547,32 @@ mod tests {
         ] {
             assert!(text.contains(expected), "{expected:?} missing:\n{text}");
         }
+    }
+
+    /// The badge, then the message and what it asks for, then the size
+    /// there is: each group a blank row from the next, centred.
+    #[test]
+    fn the_too_small_screen_groups_its_lines() {
+        let state = AppState::new("build", false);
+        let buffer = drawn(&state, 36, 10, Instant::now());
+        let rows: Vec<String> = (0..10)
+            .map(|y| row(&buffer, y).trim().to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "",
+                "",
+                "ALBA",
+                "",
+                "Terminal too small",
+                "Resize to at least 40×12",
+                "",
+                "Now 36×10",
+                "",
+                "",
+            ]
+        );
     }
 
     #[test]
