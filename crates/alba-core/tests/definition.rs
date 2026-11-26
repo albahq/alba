@@ -112,7 +112,8 @@ fn a_source_outside_the_root_keeps_its_full_path() {
 
     let defs = definitions(&project, &sources, elsewhere.path());
 
-    let expected = format!("{}:1", dir.path().join("Beamfile").display());
+    // Locations always use `/`, whatever the platform's separator.
+    let expected = format!("{}:1", dir.path().join("Beamfile").display()).replace('\\', "/");
     assert_eq!(defs[&id("a")].location, expected);
 }
 
@@ -126,6 +127,8 @@ fn an_absolute_path_outside_the_root_has_a_single_leading_slash() {
     let defs = definitions(&project, &sources, elsewhere.path());
 
     let location = &defs[&id("a")].location;
-    assert!(location.starts_with('/') && !location.starts_with("//"));
-    assert!(location.ends_with("/Beamfile:1"));
+    let path = location.strip_suffix(":1").unwrap();
+    assert!(std::path::Path::new(path).is_absolute(), "{location}");
+    assert!(!location.contains("//"), "{location}");
+    assert!(location.ends_with("/Beamfile:1"), "{location}");
 }
