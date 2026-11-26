@@ -551,78 +551,120 @@ a run in flight and starts a fresh one, exactly as that section describes.
 
 ### Colour
 
-- The theme: `✔` green, `⚡` cyan, `▶` yellow, `✖` red, `○` dimmed; the
-  progress bar green while running; the outcome green or red; the header
-  yellow while parked; keys in the bottom bar bold.
-- `NO_COLOR` (or stdout not being a terminal) turns all of it off and the
-  interface renders monochrome.
+- The interface draws with a fixed palette: an amber accent for keys, the
+  selection and the focused path; green for passed beams, teal for cached
+  ones, red for failures, and muted grey for pending, skipped, and
+  cancelled ones.
+- `COLORTERM=truecolor` (or `24bit`) draws the palette exactly; any other
+  terminal gets its nearest xterm-256 colours, with the accent and the
+  error colour kept apart. `NO_COLOR` (or stdout not being a terminal)
+  turns colour off: the interface renders monochrome, using bold, dim, and
+  underline where it would otherwise use colour.
 - Commands run under the interface receive `FORCE_COLOR=1` and
   `CLICOLOR_FORCE=1` (a beam's own `env` wins on those names), so `cargo`,
   `eslint`, and friends print the colours they would in a terminal, which
-  the log pane renders. Both variables are inherited by anything the
-  beam's command spawns in turn, not only that command itself, so a
-  script that shells out further still gets colour several processes
-  down. The cache does not see those two variables, so a beam hits the
-  same entry whether the interface or a pipe ran it; that is right for
-  rebuild avoidance, but it also means a beam whose output depends on
-  colour (a build log written to a file, a generated report) can be
-  produced under the interface and then served from cache to a headless
-  run, or the other way around, with the fingerprint never noticing. A
-  beam that redirects tool output into a file or a parser should pin
-  `env { FORCE_COLOR = "0" }` in its own `env`, which wins. The headless
-  renderers set nothing and print the command's bytes as they are.
-- stderr lines that carry no colour of their own are dimmed; ones that do
-  keep it.
+  the output pane renders, mapped onto the palette. Both variables are
+  inherited by anything the beam's command spawns in turn, not only that
+  command itself, so a script that shells out further still gets colour
+  several processes down. The cache does not see those two variables, so
+  a beam hits the same entry whether the interface or a pipe ran it; that
+  is right for rebuild avoidance, but it also means a beam whose output
+  depends on colour (a build log written to a file, a generated report)
+  can be produced under the interface and then served from cache to a
+  headless run, or the other way around, with the fingerprint never
+  noticing. A beam that redirects tool output into a file or a parser
+  should pin `env { FORCE_COLOR = "0" }` in its own `env`, which wins. The
+  headless renderers set nothing and print the command's bytes as they
+  are.
 - The exit replay of failed beams keeps their colours when the interface
   had colour, and prints plain text otherwise.
 
 ### Layout
 
 ```text
-┌─ alba · build ──────────────────────────────────────────── watching 3 files ─┐
-│BEAMS                         │LOGS                               ● following │
-│ ✔ codegen                1.2s│Compiling proc-macro2 v1.0.86                  │
-│ ⚡ api:codegen           0.8s│Compiling serde v1.0.210                       │
-│ ▶ api:build             3.4s…│Compiling api v0.1.0 (/repo/api)               │
-│ ○ build                      │warning: unused import: `std::fmt`             │
-│ ○ test                       │  --> src/lib.rs:4:5                           │
-│                              │                                               │
-├──────────────────────────────┴───────────────────────────────────────────────┤
-│ ✔ 1  ⚡ 1  ✖ 0  ○ 2                ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 2/5 · 4.2s │
-└─ q quit · r rerun · c cancel · w watch · / search · ? help ──────────────────┘
+  ALBA   run / check                                                    ▶ RUNNING   8.4s
+
+  ━━━━━━━━━━━━━━━━━━━━━━━──────────────────  2/4 complete   ✓ 1 passed   ↯ 1 cached   ○ 1 pending
+ ─────────────────────┬─────────────────────────────────────────────────────────────────────────
+  BEAMS            3/4│ OUTPUT / test    EXECUTOR shell (embedded)                  ● following
+                      │ Run the test suite                                          Beamfile:23
+    ✓ fmt         0.8s│
+    ↯ lint        0.1s│ $ cargo test --workspace
+    ▶ test        8.1s│▎   Compiling alba-core v0.6.0
+    ○ check          —│▎    Finished `test` profile in 2.46s
+                      │
+                      │ running 67 tests
+                      │ test graph::tests::cycle_reports_exact_path ... ok
+ ─────────────────────┴─────────────────────────────────────────────────────────────────────────
+  ↑↓ beam   / search   g graph   v copy   r rerun   c cancel   w watch   ? help   q quit
 ```
 
-The header and the bottom bar are not panes of their own: they sit inside
-the top and bottom edge of a single outer frame. Inside it, one vertical
-divider separates the tree from the log pane, and a junction line closes
-both columns above the footer.
+- **Header**: the `ALBA` badge and `mode / target` on the left (`run` or
+  `watch`); on the right, the session state: `○ IDLE` before the first
+  run, `▶ RUNNING` with the elapsed time, `✓ PASSED` or `✗ FAILED` with
+  the total duration (an allowed failure counts as a failure), `○
+  CANCELLED`, `● WATCHING` with the number of watched files between runs,
+  or `Ⅱ PARKED` when the project cannot load.
+- **Progress row**: a bar that turns red once any beam fails, then
+  `done/total complete` and the beams counted by status: `✓ passed`, `↯
+  cached`, `✗ failed`, and `○ pending` while the run goes, `○ skipped`
+  once it ends. The bar is dropped when fewer than 14 cells are left for
+  it, and the counts give way in that order (pending or skipped, then
+  cached, then passed) when the row is narrow; the failures are always
+  shown. In a watch session between runs, a banner replaces the row:
+  `Last run passed in 9.4s.` with `Save a watched file to run again.`, or
+  `Invalid Beamfile.` with `Fix the error and save to resume.`
+- **Beams pane** (left): one row per beam, `✓` passed, `↯` cached, `▶`
+  running (its duration ticking), `✗` failed (an allowed failure
+  included), `○` pending, skipped, or cancelled, with its duration on the
+  right. The pane is as wide as the longest name needs, up to 40 percent
+  of the terminal and never under 20 columns; a name that still does not
+  fit is cut with a trailing `…`. The title shows `selected/total`. A
+  list taller than the pane scrolls to keep the selection in view, and
+  the divider becomes its scrollbar. When a beam fails and you have not
+  moved the selection since the run started, the selection jumps to it
+  (the first failure only).
+- **Output pane** (right): the selected beam's output.
+  - The title row names the beam and its executor (`shell (embedded)`,
+    `system shell`, `docker <image>`, `compose <service>`, or `plugin
+    <name>`), and on the right the pane's state: `● following`, `Ⅱ
+    paused`, `end of output`, `match i/n` during a search, `COPY · n
+    lines` in copy mode, or `▎ stdout only` / `▎ stderr only` when
+    filtered.
+  - The row below shows the beam's description and where it is defined
+    (`Beamfile:23`, or the path of an imported Beamfile). It is dropped
+    when the terminal is under 16 rows.
+  - Each command is shown as `$ command` before its output, with secrets
+    masked. A beam restored from the cache has no command lines, since
+    the cache stores output only.
+  - stdout and stderr stay interleaved in arrival order; a stderr line is
+    marked with `▎` at its left edge. `s` cycles the view between both
+    streams, stdout only, and stderr only, and the filter stays as you
+    move between beams.
+  - When a beam ends, Alba writes a line of its own: `✓ exit 0 · 0.1s`,
+    `✗ exit 101 · 4.2s`, `✗ exit 1 · allowed · 0.3s`, `↯ restored from
+    cache · 0.8s`, `○ cancelled · 2.0s`, or `○ skipped`. Alba's own
+    notices during a beam (why it runs without the cache, a command that
+    failed to render) appear the same way. These lines scroll, search,
+    and copy like output, and the stream filter never hides them.
+  - The pane follows the tail by default. Scrolling up (the wheel, or the
+    keys below) pauses following, so you can read in peace while the run
+    continues, and a badge at the bottom right shows the current line out
+    of the total; `G`, or scrolling back down to the bottom, resumes it.
+    Long lines wrap by character; scrolling moves by whole lines. A
+    scrollbar is drawn in the pane's last column when the output is
+    taller than the pane.
+- **Diagnostic pane**: while a watch session is parked, the output pane
+  shows the error instead, as the terminal would: `error:` and the
+  message, the source lines around it with a caret under the faulty span,
+  and a `help:` suggestion when there is one. An error without a source
+  location is shown as plain text.
+- **Key hints**: the keys available in whatever mode is active, the keymap
+  below condensed to what fits; when the row is narrow, hints drop from
+  the end, but `? help` and `q quit` always stay.
 
-- **Header**: `alba · {target}` on the left; on the right, between runs in
-  a watch session, how many files it is watching, or `parked` when the
-  project cannot load.
-- **Tree** (left, 30 columns): one row per beam, `✔` succeeded, `⚡`
-  cached, `▶` running (its own duration ticking), `✖` failed (an allowed
-  failure included), `○` pending or cancelled. A name longer than its
-  column is cut with a trailing `…`.
-- **Logs** (right): the selected beam's output, following the tail by
-  default; the title row shows `● following` or `↑ paused`. Scrolling up
-  (the wheel, or the keys below) pauses following, so you can read in
-  peace while the run continues; `G`, or scrolling back down to the
-  bottom, resumes it. Long lines wrap by character; scrolling moves by
-  whole lines. When a beam fails and you have not moved the selection
-  since the run started, the selection jumps to it (the first failure
-  only).
-- **Footer**: the run. Left, the beams counted by status (`▶` left out of
-  the tally, since it has not settled yet). Right, while a run is going,
-  its progress bar, done/total, and elapsed time, ticking live; once it
-  ends, `ok` or `failed` and the duration. The bar grows with the
-  terminal, up to 30 cells, and gives way to the count alone when fewer
-  than 14 cells are left for it.
-- **Bottom bar**: the actions available in whatever mode is active, the
-  keymap below condensed to what fits.
-
-Below roughly 40 columns by 12 rows, the interface shows "terminal too
-small" rather than a layout with nothing left to draw.
+Below 40 columns by 12 rows, the interface shows "Terminal too small" and
+the current size rather than a layout with nothing left to draw.
 
 ### Keymap
 
@@ -641,17 +683,19 @@ quits if nothing is running.
 | `w` | Toggle watch on or off. |
 | `j`/`k`, `↓`/`↑` | Move the selection. Moving the selection by hand also stops a failure from moving it for the rest of the run. |
 | `t` | Run the target the session was started for. `r` and `f` retarget the session onto the beam they rerun, so this is the way back to the whole graph. |
-| `PgUp`/`PgDn`, `Ctrl-u`/`Ctrl-d` | Scroll the log pane by half its height. |
-| `G` | Jump the log pane to the tail and resume following. |
-| Mouse wheel | Scroll the log pane. |
+| `PgUp`/`PgDn`, `Ctrl-u`/`Ctrl-d` | Scroll the output pane by half its height. |
+| `G` | Jump the output pane to the tail and resume following. |
+| Mouse wheel | Scroll the output pane. |
+| `s` | Show both streams, stdout only, or stderr only. |
 | `n` / `N` | Step the committed search forward or backward, wrapping; re-runs the query against the newly selected beam if the selection moved since it was committed. |
 | `/` | Enter search. |
 | `v` | Enter copy. |
 | `g` | Enter graph. |
 | `?` | Open help. |
 
-The bottom bar shows `q`, `r`, `c`, `w`, `/`, and `?`; the rest of this
-table lives in the help overlay.
+The key hints show the most used of these for the current state (`f`
+once a run is over, `G` while the output is paused, `s` while it is
+filtered); the help page lists them all.
 
 **Search** (`/`)
 
@@ -660,7 +704,11 @@ table lives in the help overlay.
 | Any printable character | Add to the query (composing only, `n`/`N` included; stepping is the Normal-mode binding above). |
 | `Backspace` | Erase the last character. |
 | `Enter` | Commit the query, return to Normal, and keep the highlights. Committing is what gives `n`/`N` something to step. |
-| `Esc` | Cancel and return to Normal: nothing is committed, the highlights go away, `n`/`N` have nothing to step, and the log pane resumes following the tail. |
+| `Esc` | Cancel and return to Normal: nothing is committed, the highlights go away, and `n`/`N` have nothing to step. |
+
+While composing, the key hints row becomes the search prompt, with the
+position among the matching lines (`2/5`). The current match is
+highlighted apart from the others.
 
 **Copy** (`v`)
 
@@ -668,34 +716,38 @@ table lives in the help overlay.
 | --- | --- |
 | `hjkl` / arrows | Move the cursor. |
 | `v` | Re-anchor the selection at the cursor. |
-| `y` | Copy the selection (OSC 52, falling back to the system clipboard when the terminal does not support it) and return to Normal; the bottom bar confirms for about two seconds. |
+| `y` | Copy the selection (OSC 52, falling back to the system clipboard when the terminal does not support it) and return to Normal; the key hints row confirms for about two seconds. |
 | `Esc` | Leave without copying. |
-| Click and drag, then release | Select by dragging in the log pane; releasing copies. |
+| Click and drag, then release | Select by dragging in the output pane; releasing copies. |
 
 Copy is entered with `v`; a click-drag alone, without `v` first, does
-nothing. Once inside, the selection addresses only the log pane's own
-text; the tree beside it is never part of it.
+nothing. Once inside, the selection addresses only the output pane's own
+text, and the highlight covers exactly what `y` copies; the beams pane
+beside it is never part of it.
 
 **Graph** (`g`)
 
 | Key | Action |
 | --- | --- |
-| `↑↓←→` | Move focus between nodes. |
-| `Enter` | Select the focused beam and return to Normal. |
-| `Esc` | Return to Normal without changing the selection. |
+| `↑↓←→` | Move focus between nodes. The beams pane follows the focus. |
+| `Enter` | Select the focused beam, open its output, and return to Normal. |
+| `Esc` | Return to Normal with the selection as it was before the graph opened. |
 
-Graph mode draws the run's dependency graph in topological layers, colored
-by status, and replaces the whole body while it is open: there is no tree
-or log pane behind it.
+Graph mode draws the run's dependency graph in the right pane, in
+topological layers, coloured by status. The path from the focused beam
+down to the target is highlighted, and below the graph, the focused
+beam's commands are listed with the beams that need it and where it is
+defined.
 
 **Help** (`?`)
 
 | Key | Action |
 | --- | --- |
-| `?` or `Esc` | Close the overlay. |
+| `?` or `Esc` | Close the help page. |
 
-Help draws the same keymap as this section, over the tree and log panes
-dimmed rather than hidden.
+Help replaces the panes with a page listing the Normal-mode keys, in two
+columns from 90 columns wide and one below that. Copy and graph modes
+list their own keys in the key hints row.
 
 What exit code the process reports once you quit is not a keymap
 question; see [Exit codes](#exit-codes).

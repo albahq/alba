@@ -67,7 +67,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::EngineError;
 use crate::affected::{Selection, select};
-use crate::event::RunEvent;
+use crate::event::{RenderedError, RunEvent};
 use crate::scheduler::{Executors, RunOptions, run_in_session};
 use crate::watch::set::{Relevance, WatchSet};
 use crate::watch::{
@@ -125,7 +125,7 @@ pub async fn session(
     watch_enabled: bool,
     cancel: CancellationToken,
     watcher: Box<dyn Watcher>,
-    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> RenderedError + Send),
 ) -> SessionEnd {
     // The loop lives in its own function so that no `return` inside it can
     // skip the shutdown below.
@@ -164,7 +164,7 @@ async fn drive(
     mut watch_enabled: bool,
     cancel: CancellationToken,
     mut watcher: Box<dyn Watcher>,
-    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> RenderedError + Send),
 ) -> WatchExit {
     let root = beamfile_dir(beamfile);
     // `--force` empties the cache's read side for the initial run only:
@@ -188,8 +188,10 @@ async fn drive(
                     error: EngineError::Core(error),
                     sources: sources.clone(),
                 };
+                let rendered = render_error(&session_error);
                 let _ = events.send(RunEvent::ProjectBroken {
-                    diagnostic: render_error(&session_error),
+                    diagnostic: rendered.text,
+                    report: rendered.report,
                 });
                 match park_until_the_project_changes(
                     beamfile,
@@ -234,8 +236,10 @@ async fn drive(
                     error,
                     sources: sources.clone(),
                 };
+                let rendered = render_error(&session_error);
                 let _ = events.send(RunEvent::ProjectBroken {
-                    diagnostic: render_error(&session_error),
+                    diagnostic: rendered.text,
+                    report: rendered.report,
                 });
                 match park_until_the_project_changes(
                     beamfile,
@@ -275,6 +279,9 @@ async fn drive(
             cache.force = force_next;
         }
         force_next = false;
+        // From this run's own project and sources: a reload may have moved
+        // or rewritten any beam.
+        run_options.definitions = alba_core::definitions(&project, &sources, &root);
 
         // A batch that lands while the run is in flight cancels it and is
         // held here, so the wait phase below starts the next run at once
@@ -337,8 +344,10 @@ async fn drive(
                 error,
                 sources: sources.clone(),
             };
+            let rendered = render_error(&session_error);
             let _ = events.send(RunEvent::ProjectBroken {
-                diagnostic: render_error(&session_error),
+                diagnostic: rendered.text,
+                report: rendered.report,
             });
         }
         if cancel.is_cancelled() {
@@ -418,8 +427,10 @@ async fn drive(
                 Err(error) => {
                     let rejected = error.sources.clone();
                     let session_error = SessionError::Load(error);
+                    let rendered = render_error(&session_error);
                     let _ = events.send(RunEvent::ProjectBroken {
-                        diagnostic: render_error(&session_error),
+                        diagnostic: rendered.text,
+                        report: rendered.report,
                     });
                     match park_until_the_project_changes(
                         beamfile,
@@ -567,7 +578,7 @@ fn retry_load(
     beamfile: &Path,
     rejected: &mut SourceMap,
     events: &UnboundedSender<RunEvent>,
-    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> RenderedError + Send),
 ) -> Option<(Project, SourceMap)> {
     match alba_core::load_project(beamfile) {
         Ok(loaded) => Some(loaded),
@@ -575,8 +586,10 @@ fn retry_load(
             if error.sources != *rejected {
                 *rejected = error.sources.clone();
                 let session_error = SessionError::Load(error);
+                let rendered = render_error(&session_error);
                 let _ = events.send(RunEvent::ProjectBroken {
-                    diagnostic: render_error(&session_error),
+                    diagnostic: rendered.text,
+                    report: rendered.report,
                 });
             }
             None
@@ -612,7 +625,7 @@ async fn park_until_the_project_changes(
     cancel: &CancellationToken,
     commands: &mut Option<UnboundedReceiver<SessionCommand>>,
     watch_enabled: &mut bool,
-    render_error: &mut (dyn FnMut(&SessionError) -> String + Send),
+    render_error: &mut (dyn FnMut(&SessionError) -> RenderedError + Send),
 ) -> Reloaded {
     // Without this the stream's last word is the trigger that means
     // "running", and a consumer would read a stopped session as a busy

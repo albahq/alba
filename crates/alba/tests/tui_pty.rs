@@ -40,43 +40,39 @@ fn answer_cursor_queries(seen: &str, answered: &mut usize, writer: &mut Box<dyn 
 const ALTERNATE_SCREEN_ENTER: &str = "\u{1b}[?1049h";
 const ALTERNATE_SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 
-/// The outcome word the footer draws once a run is over (see
-/// `alba-tui/src/ui/footer.rs::outcome_line`: `ok · {duration}` or
-/// `failed · {duration}`, right-aligned) and nothing else in this
-/// interface ever renders: the fixtures' beams are `green` and `red`,
-/// the bottom bar's default keymap text, the pane titles, and the follow
-/// state spell neither word, and the beams' own output does not either
-/// (a failed copy takes over the bar with the literal `copy failed`
-/// from `copy.rs`, but this test never enters copy mode, so that
-/// exception never fires here). Unlike that output,
-/// which lands on the pty as soon as `RunEvent::BeamOutput` is applied,
-/// the word is only drawn once `Phase::Finished` and `last_summary` are
-/// set, in the very same `RunEvent::RunFinished` match arm that sets
-/// `AppState::outcome` (`state.rs`, the field `exit_outcome()` reads).
-/// So seeing it on the pty is synchronized with the exit code actually
-/// being decided.
+/// The outcome word the header draws once a run is over (see
+/// `alba-tui/src/ui/header.rs`: `✓ PASSED` or `✗ FAILED` and the total
+/// duration, ending at the content's last column) and nothing else in
+/// this interface ever renders: the fixtures' beams are `green` and
+/// `red`, the key hints, the pane titles, the progress counts (lower
+/// case) and the follow state spell neither word, and the beams' own
+/// output does not either. Unlike that output, which lands on the pty as
+/// soon as `RunEvent::BeamOutput` is applied, the word is only drawn once
+/// `Phase::Finished` and `last_summary` are set, in the very same
+/// `RunEvent::RunFinished` match arm that sets `AppState::outcome`
+/// (`state.rs`, the field `exit_outcome()` reads). So seeing it on the
+/// pty is synchronized with the exit code actually being decided.
 ///
 /// It also has to survive ratatui's own diffing, which this test does
 /// not get to skip: `Buffer::diff` only forwards a cell whose symbol or
 /// style changed from the previously drawn frame, and silently
 /// cursor-jumps over one that did not. The frame right before the
-/// outcome's first appearance shows, at the footer's right end, either
-/// `idle` (drawn once before any event lands) or the in-flight text
-/// `{bar} {done}/{total} · {duration}` (drawn on every `RunEvent` batch
-/// while the beam runs). Both words are right-aligned, so their letters
-/// land on cells that held, in the predecessor, a bar cell, a digit, a
-/// `/`, a space, or nothing (`idle` is four cells wide and both words
-/// sit further left than that), never the same Latin letter. Every
-/// letter therefore differs from its predecessor and is emitted,
+/// outcome's first appearance shows, at the header's right end, either
+/// `○ IDLE` (drawn once before any event lands) or `▶ RUNNING` and the
+/// elapsed time (drawn on every `RunEvent` batch while the beam runs).
+/// All of them end on the same column, and no letter of `PASSED` or
+/// `FAILED` lands on a cell that held the same letter in either
+/// predecessor (`RUNNING` sits one cell further left, `IDLE` lands
+/// right of where the outcome word sits), so every letter is emitted,
 /// contiguously, whatever the run's timings.
-const RUN_OK: &str = "ok";
-const RUN_FAILED: &str = "failed";
+const RUN_OK: &str = "PASSED";
+const RUN_FAILED: &str = "FAILED";
 
 /// What the exit replay owes for this fixture's green run: the count
 /// `alba`'s `render::print_summary` puts in its summary line
 /// (`✓ 1 succeeded · 0.0s`), written to stderr once the alternate screen
-/// is already restored. Nothing the interface draws ever spells this —
-/// the frame's footer counts with glyphs instead (`✔ 1`) — so seeing it
+/// is already restored. Nothing the interface draws ever spells this
+/// (the frame's progress row reads `✓ 1 passed` instead), so seeing it
 /// in the bytes that follow `q` is evidence of the replay itself, not of
 /// a frame.
 const RUN_SUMMARY: &str = "1 succeeded";
@@ -331,6 +327,49 @@ fn the_replay_keeps_colour_on_a_terminal_and_drops_it_under_no_color() {
     assert!(
         !replay.contains("\u{1b}[31m"),
         "colour leaked under NO_COLOR: {replay:?}"
+    );
+}
+
+/// A beam whose template does not render at run time: `env(NAME)`
+/// without a default is resolved that late.
+const BROKEN: &str =
+    "version \"1\"\n\nbeam broken {\n  run \"echo {env('ALBA_MISSING_VAR_XYZ')}\"\n}\n";
+
+/// A beam that failed before running anything, on a template that does
+/// not render, is replayed with the reason, the very line the headless
+/// renderer prints for it, rather than as a bare header.
+#[test]
+fn the_replay_keeps_the_error_that_failed_a_beam() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("Beamfile"), BROKEN).unwrap();
+    let headless = assert_cmd::Command::cargo_bin("alba")
+        .unwrap()
+        .current_dir(project.path())
+        .args(["run", "broken"])
+        .env("NO_COLOR", "1")
+        .env_remove("ALBA_MISSING_VAR_XYZ")
+        .output()
+        .unwrap();
+    let headless = String::from_utf8_lossy(&headless.stderr).to_string()
+        + &String::from_utf8_lossy(&headless.stdout);
+    let reason = headless
+        .lines()
+        .find(|line| line.contains("ALBA_MISSING_VAR_XYZ"))
+        .unwrap_or_else(|| panic!("the headless run states no reason: {headless:?}"))
+        .to_string();
+
+    let (_, after_quit, status) = drive(BROKEN, "broken", &[("NO_COLOR", "1")]);
+
+    assert_eq!(status.exit_code(), 1);
+    let replay = &after_quit[after_quit
+        .find("── broken ──")
+        .unwrap_or_else(|| panic!("no replay header; got after q: {after_quit:?}"))..];
+    // Windows' pseudo console ends a rewritten line with an erase to
+    // the end of line (`ESC [ K`) before its line break.
+    let replay = replay.replace("\u{1b}[K", "");
+    assert!(
+        replay.contains(&format!("{reason}\r\n")) || replay.contains(&format!("{reason}\n")),
+        "the reason {reason:?} is not replayed; got: {replay:?}"
     );
 }
 

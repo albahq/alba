@@ -76,6 +76,13 @@ impl Renderer for GroupedRenderer {
                     .or_default()
                     .push(line.text.clone());
             }
+            // Buffered with the beam's lines, in arrival order.
+            RunEvent::BeamNotice { id, text, .. } => {
+                self.buffers
+                    .entry(id.0.clone())
+                    .or_default()
+                    .push(text.clone());
+            }
             RunEvent::BeamFinished {
                 id,
                 status,
@@ -114,10 +121,12 @@ impl Renderer for GroupedRenderer {
                 print_summary(&mut self.err, summary, self.affected_by.as_deref());
             }
             RunEvent::RunStarted { affected_by, .. } => self.affected_by = affected_by.clone(),
-            RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
+            RunEvent::WatchWaiting { .. }
+            | RunEvent::WatchTriggered { .. }
+            | RunEvent::CommandStarted { .. } => {}
             // Alba commentary, not the run's output — stderr, like every
             // other diagnostic this module prints (see the module doc).
-            RunEvent::ProjectBroken { diagnostic } => {
+            RunEvent::ProjectBroken { diagnostic, .. } => {
                 self.err.line(diagnostic.trim_end());
             }
         }
@@ -140,6 +149,24 @@ mod tests {
             },
             replayed: false,
         }
+    }
+
+    #[test]
+    fn a_notice_is_buffered_with_the_beams_lines_in_arrival_order() {
+        let mut renderer = GroupedRenderer::new(false);
+
+        renderer.handle(&output("build", "first"));
+        renderer.handle(&RunEvent::BeamNotice {
+            id: BeamId("build".to_string()),
+            level: alba_engine::NoticeLevel::Error,
+            text: "failed to spawn".to_string(),
+        });
+        renderer.handle(&output("build", "last"));
+
+        assert_eq!(
+            renderer.buffers["build"],
+            ["first", "failed to spawn", "last"]
+        );
     }
 
     /// Buffered output must never be lost, even for a beam whose

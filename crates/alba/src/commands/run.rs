@@ -44,8 +44,8 @@ use std::sync::Arc;
 
 use alba_core::{BeamId, Project, SourceMap};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, RunSummary, Selection, SessionEnd,
-    SessionError, WatchExit,
+    CacheOptions, EngineError, Executors, RenderedError, RunEvent, RunOptions, RunSummary,
+    Selection, SessionEnd, SessionError, WatchExit,
 };
 use alba_executors::{ComposeExecutor, DockerExecutor, EmbeddedShellExecutor, SystemShellExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -168,6 +168,7 @@ async fn execute(
     params: Vec<String>,
     flags: &RunFlags,
 ) -> i32 {
+    let root = alba_engine::beamfile_dir(beamfile);
     let options = RunOptions {
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
@@ -177,14 +178,14 @@ async fn execute(
             force: flags.force,
         }),
         ambient_env: ambient_env(),
+        definitions: alba_core::definitions(project, sources, &root),
         extra_env: Vec::new(),
     };
 
-    let root = alba_engine::beamfile_dir(beamfile);
     let targets = match alba_engine::select(project, sources, &root, selection) {
         Ok(targets) => targets,
         Err(error) => {
-            LineSink::stderr().line(render_engine_error(&error, sources).trim_end());
+            LineSink::stderr().line(render_engine_error(&error, sources).text.trim_end());
             return EXIT_ALBA_ERROR;
         }
     };
@@ -223,7 +224,7 @@ async fn execute(
     let code = match result {
         Ok(summary) => run_exit_code(&summary, &cancel),
         Err(error) => {
-            err.line(render_engine_error(&error, sources).trim_end());
+            err.line(render_engine_error(&error, sources).text.trim_end());
             EXIT_ALBA_ERROR
         }
     };
@@ -257,7 +258,7 @@ async fn watch_execute(
 
     let root = alba_engine::beamfile_dir(beamfile);
     if let Err(error) = alba_engine::select(project, sources, &root, selection) {
-        err.line(render_engine_error(&error, sources).trim_end());
+        err.line(render_engine_error(&error, sources).text.trim_end());
         return EXIT_ALBA_ERROR;
     }
     if let Some(target) = selection.watched_target()
@@ -284,6 +285,8 @@ async fn watch_execute(
             force: flags.force,
         }),
         ambient_env: ambient_env(),
+        // A session computes them for each run, from the project it just loaded.
+        definitions: Default::default(),
         extra_env: Vec::new(),
     };
 
@@ -314,10 +317,7 @@ async fn watch_execute(
         // never the map captured above: a session outlives the project it
         // started on, and a reload renumbers spans and source ids out from
         // under the startup map.
-        &mut |error| match error {
-            SessionError::Load(load) => crate::render_load_error(load),
-            SessionError::Run { error, sources } => render_engine_error(error, sources),
-        },
+        &mut render_session_error,
     )
     .await;
 
@@ -373,7 +373,7 @@ async fn tui_execute(
     // change it.
     let root = alba_engine::beamfile_dir(beamfile);
     if let Err(error) = alba_engine::select(project, sources, &root, selection) {
-        err.line(render_engine_error(&error, sources).trim_end());
+        err.line(render_engine_error(&error, sources).text.trim_end());
         return EXIT_ALBA_ERROR;
     }
 
@@ -385,7 +385,8 @@ async fn tui_execute(
         }
     };
 
-    let colour = crate::color_enabled();
+    let mode = crate::current_colour_mode();
+    let colour = mode != alba_tui::ColourMode::Monochrome;
     let options = RunOptions {
         jobs: jobs(flags.jobs),
         keep_going: flags.keep_going,
@@ -397,6 +398,8 @@ async fn tui_execute(
         // The interface renders ANSI, and commands on a pipe emit none
         // unless told to; a monochrome interface asks for none.
         ambient_env: ambient_env(),
+        // A session computes them for each run, from the project it just loaded.
+        definitions: Default::default(),
         extra_env: if colour {
             vec![
                 ("FORCE_COLOR".to_string(), "1".to_string()),
@@ -442,10 +445,7 @@ async fn tui_execute(
                 // Same contract as [`watch_execute`]'s: render against the
                 // sources the error carries, never a startup copy, and let
                 // the session turn the answer into an event.
-                &mut |error| match error {
-                    SessionError::Load(load) => crate::render_load_error(load),
-                    SessionError::Run { error, sources } => render_engine_error(error, sources),
-                },
+                &mut render_session_error,
             )
             .await
         }
@@ -457,7 +457,7 @@ async fn tui_execute(
         alba_tui::TuiOptions {
             target: selection_label(selection),
             watch: flags.watch,
-            colour,
+            colour: mode,
         },
     )
     .await;
@@ -608,9 +608,10 @@ struct SessionFailure {
 /// print, so the two front ends cannot describe the same run differently.
 ///
 /// The logs come from the interface's per-beam ring buffers, which are
-/// capped: a beam that produced more than [`alba_tui::logs::MAX_LINES`]
-/// lines is replayed from wherever the buffer starts, and says so rather
-/// than passing a partial log off as the whole one. `colour` picks which
+/// capped: a beam whose buffer dropped lines past
+/// [`alba_tui::logs::MAX_LINES`] is replayed from wherever the buffer
+/// starts, and says so ([`alba_tui::FailedLog::truncated`]) rather than
+/// passing a partial log off as the whole one. `colour` picks which
 /// side of each buffered [`alba_tui::ReplayLine`] gets printed: `raw` on a
 /// terminal, `text` (already stripped) under `NO_COLOR`.
 ///
@@ -633,9 +634,14 @@ fn replay<W: std::io::Write>(
         crate::render::print_summary(err, summary, affected_by);
     }
 
-    for (beam, lines) in &outcome.failed_logs {
+    for alba_tui::FailedLog {
+        beam,
+        lines,
+        truncated,
+    } in &outcome.failed_logs
+    {
         err.line(&format!("\u{2500}\u{2500} {beam} \u{2500}\u{2500}"));
-        if lines.len() >= alba_tui::logs::MAX_LINES {
+        if *truncated {
             err.line(&format!(
                 "(the interface keeps at most {} lines per beam; anything earlier is not replayed)",
                 alba_tui::logs::MAX_LINES
@@ -1043,19 +1049,39 @@ fn default_output() -> OutputStyle {
     }
 }
 
-/// Renders an [`EngineError`] for stderr.
+/// Renders a session's failure: the text the headless renderers print and,
+/// for the two errors that point into a Beamfile (a load failure and an
+/// [`EngineError::Core`]), the structured report. A core error holds a
+/// single diagnostic, so that one is the report; every other engine error
+/// is a plain sentence with nowhere to point and gets none.
 ///
-/// A `Core` error carries a span and a source file, so it gets the same
-/// caret-and-help diagnostic a load failure does. The other variants are
-/// plain sentences with nowhere in particular to point.
-///
-/// By reference for the same reason [`crate::render_load_error`] is: a
-/// watch session survives the failures it reports, so it only ever lends
-/// them out for rendering.
-fn render_engine_error(error: &EngineError, sources: &SourceMap) -> String {
+/// By reference because a watch session survives the failures it reports,
+/// so it only ever lends them out for rendering. Both arms render against
+/// the sources the error itself carries, never a startup copy: a reload
+/// renumbers spans and source ids.
+fn render_session_error(error: &SessionError) -> RenderedError {
     match error {
-        EngineError::Core(error) => crate::render_core_error(error, sources),
-        other => other.to_string(),
+        SessionError::Load(load) => RenderedError {
+            text: crate::render_load_error(load),
+            report: crate::render_core_report(&load.error, &load.sources),
+        },
+        SessionError::Run { error, sources } => render_engine_error(error, sources),
+    }
+}
+
+/// Renders an [`EngineError`]. A `Core` error carries a span and a source
+/// file, so it gets the same caret-and-help diagnostic a load failure does
+/// and a structured report of it.
+fn render_engine_error(error: &EngineError, sources: &SourceMap) -> RenderedError {
+    match error {
+        EngineError::Core(error) => RenderedError {
+            text: crate::render_core_error(error, sources),
+            report: crate::render_core_report(error, sources),
+        },
+        other => RenderedError {
+            text: other.to_string(),
+            report: None,
+        },
     }
 }
 
@@ -1378,6 +1404,7 @@ mod tests {
             .collect()
     }
 
+    /// An outcome whose failed beams kept their whole log.
     fn outcome(
         summary: Option<RunSummary>,
         failed_logs: Vec<(String, Vec<alba_tui::ReplayLine>)>,
@@ -1385,7 +1412,14 @@ mod tests {
         alba_tui::TuiOutcome {
             last_run_code: summary.as_ref().map(RunSummary::exit_code),
             last_summary: summary,
-            failed_logs,
+            failed_logs: failed_logs
+                .into_iter()
+                .map(|(beam, lines)| alba_tui::FailedLog {
+                    beam,
+                    lines,
+                    truncated: false,
+                })
+                .collect(),
         }
     }
 
@@ -1440,16 +1474,16 @@ mod tests {
             failed: vec![BeamId("chatty".to_string())],
             ..RunSummary::default()
         };
-        let logs = vec![(
-            "chatty".to_string(),
-            plain_lines(
-                (0..alba_tui::logs::MAX_LINES)
-                    .map(|index| format!("line {index}"))
-                    .collect::<Vec<_>>(),
-            ),
-        )];
+        let mut outcome = outcome(
+            Some(summary),
+            vec![(
+                "chatty".to_string(),
+                plain_lines(vec!["line 1".to_string(), "line 2".to_string()]),
+            )],
+        );
+        outcome.failed_logs[0].truncated = true;
 
-        let lines = replayed(&outcome(Some(summary), logs), None);
+        let lines = replayed(&outcome, None);
 
         assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
         assert!(
@@ -1457,8 +1491,78 @@ mod tests {
             "the disclosure comes before the lines themselves, got: {:?}",
             lines[2]
         );
-        assert_eq!(lines[3], "line 0");
-        assert_eq!(lines.len(), 3 + alba_tui::logs::MAX_LINES);
+        assert_eq!(&lines[3..], ["line 1", "line 2"]);
+    }
+
+    /// The replay read from a real session state: a failed beam that
+    /// printed `MAX_LINES` lines after its command echo lost its oldest
+    /// lines to the cap (the echo and the end line count too), so the
+    /// replay says so even though fewer than `MAX_LINES` lines remain.
+    #[test]
+    fn a_session_whose_failed_beam_overflowed_discloses_it_on_exit() {
+        use alba_engine::{BeamStatus, RunEvent};
+        use std::time::{Duration, Instant};
+
+        let beam = BeamId("chatty".to_string());
+        let now = Instant::now();
+        let mut state = alba_tui::state::AppState::new("chatty", false);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![beam.clone()],
+                affected_by: None,
+                beams: vec![beam.clone()],
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            now,
+        );
+        state.apply(&RunEvent::BeamStarted { id: beam.clone() }, now);
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: beam.clone(),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        for index in 0..alba_tui::logs::MAX_LINES {
+            state.apply(
+                &RunEvent::BeamOutput {
+                    id: beam.clone(),
+                    line: alba_executors::OutputLine {
+                        stream: alba_executors::Stream::Stdout,
+                        text: format!("line {index}"),
+                    },
+                    replayed: false,
+                },
+                now,
+            );
+        }
+        state.apply(
+            &RunEvent::BeamFinished {
+                id: beam.clone(),
+                status: BeamStatus::Failed { exit_code: 1 },
+                duration: Duration::from_secs(1),
+            },
+            now,
+        );
+        state.apply(
+            &RunEvent::RunFinished {
+                summary: RunSummary {
+                    failed: vec![beam],
+                    ..RunSummary::default()
+                },
+            },
+            now,
+        );
+
+        let lines = replayed(&alba_tui::outcome(&state), None);
+
+        assert_eq!(lines[1], "\u{2500}\u{2500} chatty \u{2500}\u{2500}");
+        assert!(
+            lines[2].contains(&format!("at most {} lines", alba_tui::logs::MAX_LINES)),
+            "the disclosure comes before the lines themselves, got: {:?}",
+            lines[2]
+        );
     }
 
     /// A session that quit before any run finished has nothing to say:
@@ -1645,5 +1749,72 @@ mod tests {
         cancel.cancel();
 
         assert_eq!(run_exit_code(&cancelled, &cancel), EXIT_INTERRUPTED);
+    }
+
+    /// A watch session parked on a broken Beamfile hands the diagnostic
+    /// pane a structured report next to the text the headless renderers
+    /// print, both drawn from the same error.
+    #[test]
+    fn a_broken_beamfile_reports_a_structured_diagnostic() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let beamfile = dir.path().join("Beamfile");
+        std::fs::write(
+            &beamfile,
+            "beam test {\n  run \"true\"\n}\n\nbeam build { needs [tset]\n  run \"true\"\n}\n",
+        )
+        .expect("Beamfile");
+        let load = alba_core::load_project(&beamfile).expect_err("`tset` is not a beam");
+        let expected_text = crate::render_load_error(&load);
+        let error = SessionError::Load(load);
+
+        let rendered = render_session_error(&error);
+
+        assert_eq!(rendered.text, expected_text);
+        let report = rendered.report.expect("a spanned error has a report");
+        assert_eq!(report.message, "unknown beam `tset`");
+        assert_eq!(report.path, beamfile.display().to_string());
+        assert_eq!((report.line, report.column), (5, 21));
+        assert_eq!(report.help.as_deref(), Some("did you mean `test`?"));
+    }
+
+    /// A run that fails at schedule time with a spanned core error is
+    /// reported like a load failure: same text, structured location.
+    #[test]
+    fn a_spanned_core_error_from_a_run_has_a_report() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let beamfile = dir.path().join("Beamfile");
+        std::fs::write(
+            &beamfile,
+            "beam test {\n  run \"true\"\n}\n\nbeam build { needs [tset]\n  run \"true\"\n}\n",
+        )
+        .expect("Beamfile");
+        let load = alba_core::load_project(&beamfile).expect_err("`tset` is not a beam");
+        let expected_text = crate::render_load_error(&load);
+        let error = SessionError::Run {
+            error: EngineError::Core(load.error),
+            sources: load.sources,
+        };
+
+        let rendered = render_session_error(&error);
+
+        assert_eq!(rendered.text, expected_text);
+        let report = rendered.report.expect("a spanned error has a report");
+        assert_eq!((report.line, report.column), (5, 21));
+        assert_eq!(report.help.as_deref(), Some("did you mean `test`?"));
+    }
+
+    /// Only a spanned core error can be drawn as a snippet; the other
+    /// engine errors stay plain sentences.
+    #[test]
+    fn an_engine_error_without_a_span_has_no_report() {
+        let error = SessionError::Run {
+            error: EngineError::Unschedulable("no executor".to_string()),
+            sources: SourceMap::default(),
+        };
+
+        let rendered = render_session_error(&error);
+
+        assert_eq!(rendered.text, "no executor");
+        assert_eq!(rendered.report, None);
     }
 }

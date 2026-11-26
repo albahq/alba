@@ -1,0 +1,14 @@
+---
+source: crates/alba-tui/tests/render.rs
+expression: "drawn_at(&state, 36, 10, Instant::now())"
+---
+"                                    "
+"                                    "
+"                ALBA                "
+"                                    "
+"         Terminal too small         "
+"      Resize to at least 40×12      "
+"                                    "
+"              Now 36×10             "
+"                                    "
+"                                    "

@@ -12,7 +12,7 @@ pub use ast::{
     AliasPattern, BeamDecl, BeamPattern, BeamRef, ExecutorDecl, ExecutorOptionValue, File,
     HookDecl, Import, LetBinding, NamedString, NeedRef, Spanned,
 };
-pub use diagnostics::{Diagnostic, render_diagnostic};
+pub use diagnostics::{Diagnostic, DiagnosticReport, SnippetLine, line_col, render_diagnostic};
 pub use expr::{BinOp, Expr};
 pub use lexer::{LexError, Lexer};
 pub use parser::{ParseError, parse};

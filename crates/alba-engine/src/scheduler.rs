@@ -46,12 +46,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alba_core::{
-    Beam, BeamId, CoreError, ExecutorKind, OptionValue, Project, execution_subgraph, expand_globs,
-    outputs_satisfied, render_template,
+    Beam, BeamDefinition, BeamId, CoreError, ExecutorKind, OptionValue, Project,
+    execution_subgraph, expand_globs, outputs_satisfied, render_template,
 };
 use alba_executors::{
     BeamContext, BeamIdentity, CommandSpec, ExecContext, Executor, OutputLine, PluginExecutor,
-    Stream,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -62,7 +61,7 @@ use crate::cache::{
     ALBA_VERSION, BeamFacts, CacheOptions, CacheStore, FORMAT_VERSION, Manifest, OutputFile,
     fingerprint, hash_file, static_contribution,
 };
-use crate::event::{BeamStatus, RunEvent, RunSummary};
+use crate::event::{BeamDetails, BeamStatus, NoticeLevel, RunEvent, RunSummary};
 use crate::mask::Mask;
 
 /// How a run is parameterized: everything the caller chose, as opposed to
@@ -93,6 +92,12 @@ pub struct RunOptions {
     /// `env_inputs` read their values from. Given rather than read here, so
     /// that what the engine sees is exactly what the caller decided.
     pub ambient_env: Vec<(String, String)>,
+    /// Where each beam is written and the commands as written, for the
+    /// interface to show: computed by the caller, which holds the sources
+    /// the engine never sees (see [`alba_core::definitions`]). Display
+    /// only, never read by a run itself. A beam without an entry is
+    /// announced with no location and no commands.
+    pub definitions: HashMap<BeamId, BeamDefinition>,
 }
 
 /// The executors a run can dispatch to, chosen per beam.
@@ -383,6 +388,21 @@ async fn run_once(
                 beam.needs
                     .iter()
                     .map(|need| (beam.id.clone(), need.value.clone()))
+            })
+            .collect(),
+        details: beams
+            .iter()
+            .map(|beam| {
+                let definition = options.definitions.get(&beam.id);
+                BeamDetails {
+                    id: beam.id.clone(),
+                    description: beam.description.clone(),
+                    location: definition.map(|definition| definition.location.clone()),
+                    executor: (&beam.executor).into(),
+                    commands: definition
+                        .map(|definition| definition.commands.clone())
+                        .unwrap_or_default(),
+                }
             })
             .collect(),
     });
@@ -874,7 +894,7 @@ async fn process(
 /// all, a template that will not render, a dependency with no stable
 /// contribution, or an input file that cannot be hashed. The last two
 /// filesystem cases carry a notice — they are the ones worth telling the
-/// user about, emitted as a stderr line once the beam starts.
+/// user about, emitted as an info notice once the beam starts.
 async fn assess(
     task: &BeamTask,
     plan: Option<&RenderedBeam>,
@@ -1094,10 +1114,18 @@ async fn execute(
     // `BeamOutput` precedes this beam's `BeamFinished`; it ends when the
     // last sender is dropped, which an `Executor` does by the time
     // `execute` returns (the trait's contract).
+    //
+    // Commands are announced on a channel of their own because executors
+    // hold the output sender and only speak `OutputLine`; the forwarder
+    // merges the two so the announcement of a command precedes the output
+    // an executor sends while running it (see `forward_output` for what
+    // that does and does not cover).
     let (lines, output) = tokio::sync::mpsc::unbounded_channel();
+    let (announcements, announced) = tokio::sync::mpsc::unbounded_channel();
     let forwarder = tokio::spawn(forward_output(
         task.beam.id.clone(),
         output,
+        announced,
         task.events.clone(),
         mask,
     ));
@@ -1105,10 +1133,7 @@ async fn execute(
     // Why this beam is running uncached, told where the user is already
     // looking rather than out of band.
     if let Some(notice) = notice {
-        let _ = lines.send(OutputLine {
-            stream: Stream::Stderr,
-            text: notice,
-        });
+        announce(&announcements, Marker::notice(NoticeLevel::Info, notice)).await;
     }
 
     // A template that will not render is this beam's failure, not the
@@ -1123,16 +1148,18 @@ async fn execute(
     // here is how a beam whose template does not render reaches the failure
     // path with its error message intact.
     let status = match plan.map_or_else(|| render(&task.beam, &task.args), Ok) {
-        Ok(plan) => run_commands(task, &plan, &lines).await,
+        Ok(plan) => run_commands(task, &plan, &lines, &announcements).await,
         Err(error) => {
-            let _ = lines.send(OutputLine {
-                stream: Stream::Stderr,
-                text: error.to_string(),
-            });
+            announce(
+                &announcements,
+                Marker::notice(NoticeLevel::Error, error.to_string()),
+            )
+            .await;
             failure_status(task)
         }
     };
     drop(lines);
+    drop(announcements);
     let lines = forwarder.await.unwrap_or_default();
 
     (status, started_at.elapsed(), lines)
@@ -1221,12 +1248,13 @@ const NO_EXIT_CODE: i32 = -1;
 /// problem, which is exactly what `keep_going` and `allow_failure` are
 /// about. Likewise for a session that could not be opened at all — no
 /// runtime, a missing image. The executor's message would otherwise be
-/// lost, so it is emitted as a stderr line first — the CLI already renders
-/// those where the user is looking.
+/// lost, so it is emitted as an error notice first, in order with the
+/// beam's output, where the user is looking.
 async fn run_commands(
     task: &BeamTask,
     plan: &RenderedBeam,
     output: &UnboundedSender<OutputLine>,
+    announcements: &UnboundedSender<Announcement>,
 ) -> BeamStatus {
     let context = BeamContext {
         beam: task.beam.id.0.clone(),
@@ -1238,10 +1266,11 @@ async fn run_commands(
     let mut session = match task.executor.open(context).await {
         Ok(session) => session,
         Err(error) => {
-            let _ = output.send(OutputLine {
-                stream: Stream::Stderr,
-                text: error.to_string(),
-            });
+            announce(
+                announcements,
+                Marker::notice(NoticeLevel::Error, error.to_string()),
+            )
+            .await;
             return if task.cancel.is_cancelled() {
                 BeamStatus::Cancelled
             } else {
@@ -1265,6 +1294,9 @@ async fn run_commands(
             break;
         }
 
+        // Awaited, so the forwarder has emitted it, after everything the
+        // previous command printed, before this command can print anything.
+        announce(announcements, Marker::Command(command.clone())).await;
         let spec = CommandSpec {
             command: command.clone(),
             env: command_env(&task.extra_env, &plan.env),
@@ -1279,10 +1311,11 @@ async fn run_commands(
             Ok(result) if result.exit_code == 0 => continue,
             Ok(result) => result.exit_code,
             Err(error) => {
-                let _ = output.send(OutputLine {
-                    stream: Stream::Stderr,
-                    text: error.to_string(),
-                });
+                announce(
+                    announcements,
+                    Marker::notice(NoticeLevel::Error, error.to_string()),
+                )
+                .await;
                 NO_EXIT_CODE
             }
         };
@@ -1305,12 +1338,42 @@ async fn run_commands(
     // here. A close failure is a notice, never a verdict change — the
     // commands' own outcome is already decided.
     if let Err(error) = session.close().await {
-        let _ = output.send(OutputLine {
-            stream: Stream::Stderr,
-            text: format!("session close: {error}"),
-        });
+        announce(
+            announcements,
+            Marker::notice(NoticeLevel::Error, format!("session close: {error}")),
+        )
+        .await;
     }
     status
+}
+
+/// Something Alba says about a beam that must keep its place among the
+/// beam's output: a command about to run, or a notice.
+enum Marker {
+    Command(String),
+    Notice { level: NoticeLevel, text: String },
+}
+
+impl Marker {
+    fn notice(level: NoticeLevel, text: String) -> Self {
+        Self::Notice { level, text }
+    }
+}
+
+/// A marker, and the signal that it has been emitted.
+type Announcement = (Marker, tokio::sync::oneshot::Sender<()>);
+
+/// Hands a marker to the forwarder and waits until it has emitted it, so
+/// it lands after everything already sent on the output channel and before
+/// anything sent once this returns. A forwarder that is gone has nothing
+/// left to order against; the marker is then dropped. A dead forwarder
+/// means the run's output is already lost and the notice goes with it, a
+/// loss accepted as before notices were events.
+async fn announce(announcements: &UnboundedSender<Announcement>, marker: Marker) {
+    let (done, emitted) = tokio::sync::oneshot::channel();
+    if announcements.send((marker, done)).is_ok() {
+        let _ = emitted.await;
+    }
 }
 
 /// Relabels an executor's output lines as this beam's output events until
@@ -1318,14 +1381,31 @@ async fn run_commands(
 /// the capture a successful beam stores for future replay. Every line is
 /// masked here, the one place all of a beam's output passes through
 /// before anything can show or store it.
+///
+/// Each marker announced on `announced` becomes a `CommandStarted` or a
+/// `BeamNotice` event, masked the same way. A notice is Alba's own message,
+/// not the beam's output, so it is not part of the capture and is never
+/// stored. Executors speak `OutputLine` on a channel of their
+/// own, so the order is made here: a sender announces a command and waits
+/// for the acknowledgement before running it, and the forwarder flushes the
+/// output already queued (what an executor sent before `execute` returned
+/// for the earlier commands) before emitting the announcement. At most one
+/// announcement is ever pending, so announcements and that output keep
+/// their execution order. The guarantee stops there: output an executor
+/// sends from a task that outlives `execute` is best effort. The plugin
+/// executor relays a session-wide stderr from `open` on, so a plugin's
+/// stderr for one command can arrive after the next command's
+/// announcement. Markers are not part of the capture: a cache replay shows
+/// output only.
 async fn forward_output(
     id: BeamId,
     mut output: UnboundedReceiver<OutputLine>,
+    mut announced: UnboundedReceiver<Announcement>,
     events: UnboundedSender<RunEvent>,
     mask: Mask,
 ) -> Vec<OutputLine> {
     let mut seen = Vec::new();
-    while let Some(line) = output.recv().await {
+    let forward = |line: OutputLine, seen: &mut Vec<OutputLine>| {
         let line = OutputLine {
             text: mask.apply(&line.text),
             ..line
@@ -1336,6 +1416,35 @@ async fn forward_output(
             replayed: false,
         });
         seen.push(line);
+    };
+    let emit = |marker: Marker| {
+        let _ = events.send(match marker {
+            Marker::Command(command) => RunEvent::CommandStarted {
+                id: id.clone(),
+                command: mask.apply(&command),
+            },
+            Marker::Notice { level, text } => RunEvent::BeamNotice {
+                id: id.clone(),
+                level,
+                text: mask.apply(&text),
+            },
+        });
+    };
+    loop {
+        tokio::select! {
+            biased;
+            Some((marker, done)) = announced.recv() => {
+                while let Ok(line) = output.try_recv() {
+                    forward(line, &mut seen);
+                }
+                emit(marker);
+                let _ = done.send(());
+            }
+            line = output.recv() => match line {
+                Some(line) => forward(line, &mut seen),
+                None => break,
+            },
+        }
     }
     seen
 }

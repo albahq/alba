@@ -221,6 +221,22 @@ pub(crate) fn render_core_error(error: &CoreError, sources: &SourceMap) -> Strin
     }
 }
 
+/// The structured counterpart of [`render_core_error`]: the same error read
+/// against the same source, as a report a front end can draw itself.
+/// `path` is the display path [`render_core_error`] prints for that source.
+/// `None` when the error carries no span, or its `source_id` was never
+/// registered in `sources`.
+pub(crate) fn render_core_report(
+    error: &CoreError,
+    sources: &SourceMap,
+) -> Option<alba_core::DiagnosticReport> {
+    let (path, source) = sources.get(error.source_id)?;
+    error
+        .clone()
+        .into_diagnostic()
+        .report(source, &path.display().to_string())
+}
+
 /// Whether ANSI color should be emitted: stdout is a real terminal, and the
 /// user has not opted out via `NO_COLOR` (https://no-color.org). Checked
 /// explicitly here rather than left to `owo-colors`' own ambient detection,
@@ -230,5 +246,69 @@ pub(crate) fn render_core_error(error: &CoreError, sources: &SourceMap) -> Strin
 /// the beam listing's dimmed placeholder and the interleaved renderer's
 /// per-beam colours both ask it rather than detecting anything themselves.
 pub(crate) fn color_enabled() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    current_colour_mode() != alba_tui::ColourMode::Monochrome
+}
+
+/// The colour mode this process runs in, read from the same gate as
+/// [`color_enabled`]: a terminal on stdout, `NO_COLOR` unset (set to
+/// anything, even empty, is an opt-out), and `COLORTERM` for the depth.
+pub(crate) fn current_colour_mode() -> alba_tui::ColourMode {
+    colour_mode(
+        std::io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("COLORTERM").ok().as_deref(),
+    )
+}
+
+/// How the interface colours itself: monochrome off a terminal or under
+/// `NO_COLOR`, truecolour when `COLORTERM` says `truecolor` or `24bit`
+/// (any case), the 256-colour table otherwise. There is no `--color`
+/// flag, so these three inputs are the whole decision.
+pub(crate) fn colour_mode(
+    stdout_is_terminal: bool,
+    no_color: bool,
+    colorterm: Option<&str>,
+) -> alba_tui::ColourMode {
+    use alba_tui::ColourMode;
+    if !stdout_is_terminal || no_color {
+        return ColourMode::Monochrome;
+    }
+    match colorterm {
+        Some(value)
+            if value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit") =>
+        {
+            ColourMode::TrueColour
+        }
+        _ => ColourMode::Indexed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alba_tui::ColourMode;
+
+    #[test]
+    fn colour_mode_reads_colorterm_and_no_color() {
+        assert_eq!(
+            colour_mode(true, false, Some("truecolor")),
+            ColourMode::TrueColour
+        );
+        assert_eq!(
+            colour_mode(true, false, Some("24BIT")),
+            ColourMode::TrueColour
+        );
+        assert_eq!(colour_mode(true, false, None), ColourMode::Indexed);
+        assert_eq!(colour_mode(true, false, Some("yes")), ColourMode::Indexed);
+        assert_eq!(
+            colour_mode(true, true, Some("truecolor")),
+            ColourMode::Monochrome
+        );
+        assert_eq!(colour_mode(true, true, None), ColourMode::Monochrome);
+        assert_eq!(
+            colour_mode(false, false, Some("truecolor")),
+            ColourMode::Monochrome
+        );
+        assert_eq!(colour_mode(false, false, None), ColourMode::Monochrome);
+    }
 }

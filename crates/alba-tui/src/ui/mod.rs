@@ -1,417 +1,723 @@
-//! The whole-frame layout: an outer border carrying the header and
-//! bottom bar, a vertical divider between the tree and log panes, the
-//! junction line that closes both columns, and the footer carrying the
-//! run beneath it — the interactive mirror of the CLI's headless
-//! renderers (see `alba/src/render/`), but a pure function of
-//! [`AppState`] rather than a stream consumer.
+//! The whole frame, band by band, for a terminal of `W` x `H` cells:
+//! row 1 the header, row 3 the progress row (or the banner between watch
+//! runs), row 4 the top separator, rows 5 to `H-4` the body (beams pane,
+//! divider, output pane or graph), row `H-3` the bottom separator, row
+//! `H-2` the key hints; rows 0, 2 and `H-1` stay empty. There is no
+//! outer border: content runs from column 2 to `W-3`, separators from
+//! column 1 to `W-2`, with `┬`/`┴` where the divider meets them. The
+//! help page replaces the body and drops the divider and its junctions.
+//!
+//! The whole frame is painted with the surface first, so every cell the
+//! interface draws, uncoloured command output included, reads on Alba's
+//! own background in `text`.
 //!
 //! Nothing here samples a clock or touches the terminal: `now` arrives
 //! as an argument, so a redraw is a deterministic function of its
-//! inputs and a snapshot test owns the clock. See the spec's Layout
-//! section for the mockup this module renders — the outer frame, the
-//! divider, the junction, the footer, and the header/bottom-bar text
-//! sitting in the border are all drawn exactly as that mockup shows
-//! them.
+//! inputs and a snapshot test owns the clock.
 
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::text::{Line, Span};
+use ratatui::style::Stylize;
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::state::{AppState, Mode};
+use crate::state::{AppState, Mode, Phase};
 
-mod footer;
+use theme::{ColourMode, Token, fill, style};
+
+mod beams;
+mod diagnostic;
 mod graphpane;
 mod header;
 mod help;
-mod logpane;
-mod theme;
-mod tree;
+mod keys;
+mod output;
+mod progress;
+pub(crate) mod theme;
+mod title;
 
-/// Below this floor, the tree and log panes have no room left to mean
-/// anything, so the whole layout gives way to one message instead of
-/// drawing a garbled screen (spec: "terminal too small", roughly 40x12).
+/// Below this floor the panes have no room left to mean anything, so the
+/// whole screen gives way to the too-small screen.
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 12;
 
-/// The tree pane's fixed content width, measured inside the frame's
-/// outer border and the divider that separates it from the log pane.
-/// The task brief's Interfaces line calls for "left tree pane (30
-/// columns)" — that line, not a character count taken from the spec's
-/// hand-drawn ASCII mockup (which comes out to 28 by literal count), is
-/// the authority for this number.
-const TREE_WIDTH: u16 = 30;
+/// Rows above the body (empty, header, empty, progress, separator) and
+/// below it (separator, key hints, empty).
+const ROWS_ABOVE_BODY: u16 = 5;
+const ROWS_BELOW_BODY: u16 = 3;
 
-pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
-    let area = frame.area();
-    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        frame.render_widget(
-            Paragraph::new("terminal too small (need at least 40x12)").alignment(Alignment::Center),
-            area,
-        );
-        return;
-    }
-
-    // The outer frame carries the header and the bottom bar inside its
-    // own border, exactly as the spec's mockup draws them
-    // (`┌─ alba · build ──── ... ── watching 3 files ─┐` / `└─ q quit ·
-    // ... ─┘`): a leading `─ ` and trailing ` ` (mirrored for the
-    // right-hand title) are baked into the title itself so the block's
-    // own border fill supplies the rest of the dashes, wrapped around
-    // the header's and the bar's own spans rather than their plain text,
-    // so the colour underneath survives into the border's title. The
-    // session state is a second, right-aligned title on the same edge,
-    // so it never displaces the identity.
-    let identity = framed_title(header::line(state));
-    let mut outer = Block::bordered()
-        .title_top(identity.clone())
-        .title_bottom(framed_title(theme::bar_line(
-            &bottom_bar(state, now),
-            state.colour,
-        )));
-    if let Some(session) = header::session(state) {
-        // `Block` draws a right-aligned title first and a left-aligned
-        // one second, so past a certain width the identity would
-        // silently repaint over the session title rather than the two
-        // visibly colliding. Attach the session title only when both
-        // fit on the edge side by side; the identity always wins the
-        // arbitration and is drawn whole either way, since the run's
-        // own target name is the one thing this edge cannot drop.
-        let session_title = framed_title_right(session);
-        if titles_fit(&identity, &session_title, area.width) {
-            outer = outer.title_top(session_title.right_aligned());
-        }
-    }
-    let inner = outer.inner(area);
-    frame.render_widget(outer, area);
-
-    // Inside the frame, top to bottom: the body (the two panes, or the
-    // graph), the junction line that closes the panes' columns, and the
-    // footer carrying the run. The bottom edge below them is the outer
-    // block's own.
-    let rows = Layout::vertical([
-        Constraint::Min(0),    // body
-        Constraint::Length(1), // junction: ├───┴───┤
-        Constraint::Length(1), // footer: counts, bar or outcome
-    ])
-    .split(inner);
-    let (body, junction, footer) = (rows[0], rows[1], rows[2]);
-
-    footer::draw(frame, footer, state, now);
-
-    // Graph mode replaces the body entirely — no tree, no log pane, no
-    // divider between them, and no junction closing columns that are
-    // not there: the graph gets the junction's row too. The footer stays:
-    // the run is still the run while the reader looks at its graph.
-    if let Mode::Graph(graph) = &state.mode {
-        let body = Rect {
-            height: body.height + junction.height,
-            ..body
-        };
-        graphpane::draw(frame, body, state, graph);
-        return;
-    }
-
-    // The tree pane's region includes its own right border, which is
-    // the divider between it and the log pane — one column wider than
-    // the tree's actual content width.
-    let panes =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(body);
-    let divider = Block::new().borders(Borders::RIGHT);
-    let tree_area = divider.inner(panes[0]);
-    frame.render_widget(divider, panes[0]);
-
-    tree::draw(frame, tree_area, state, now);
-    logpane::draw(frame, panes[1], state);
-    draw_junction(frame, area, junction);
-
-    // Help is an overlay, not a replacement: the tree and log panes stay
-    // drawn underneath it (dimmed), unlike graph mode's own early return
-    // above, which takes over the body entirely instead.
-    if matches!(state.mode, Mode::Help) {
-        help::draw(frame, inner);
-    }
-}
-
-/// The line closing the two panes' columns: `─` across the frame's
-/// inside, `┴` where the divider lands on it, and the outer border's
-/// own `│` on either side turned into `├`/`┤`. Those three cells are
-/// written by hand: `Block` draws one rectangle's edges, and this row
-/// is where three of them meet.
-fn draw_junction(frame: &mut Frame, frame_area: Rect, junction: Rect) {
-    frame.render_widget(
-        Paragraph::new("─".repeat(junction.width as usize)),
-        junction,
-    );
-    let buffer = frame.buffer_mut();
-    buffer[(frame_area.x, junction.y)].set_symbol("├");
-    buffer[(junction.x + TREE_WIDTH, junction.y)].set_symbol("┴");
-    buffer[(frame_area.right() - 1, junction.y)].set_symbol("┤");
-}
-
-/// Wraps a header or bottom-bar line in the border's own `─ ... ` frame,
-/// spans and all, so a coloured span inside it (the progress bar, the
-/// outcome, a bold key) survives into the block's title rather than
-/// being flattened to plain text first.
-fn framed_title(content: Line<'static>) -> Line<'static> {
-    let mut spans = vec![Span::raw("─ ")];
-    spans.extend(content.spans);
-    spans.push(Span::raw(" "));
-    Line::from(spans)
-}
-
-/// `framed_title`'s mirror image for a title on the right end of an
-/// edge: ` ... ─`, so the border's fill meets it from the left.
-fn framed_title_right(content: Line<'static>) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
-    spans.extend(content.spans);
-    spans.push(Span::raw(" ─"));
-    Line::from(spans)
-}
-
-/// Whether `left` and `right`, already framed by [`framed_title`] and
-/// [`framed_title_right`], both have room on one edge of `area_width`
-/// cells: the corners take one cell each, and past that the two titles
-/// must not need more room than what is left between them.
-fn titles_fit(left: &Line<'_>, right: &Line<'_>, area_width: u16) -> bool {
-    left.width() + right.width() <= area_width.saturating_sub(2) as usize
-}
-
-/// The always-available actions for the current mode.
-///
-/// A copy just made (`AppState::last_copy_result`) takes over the bar
-/// entirely, regardless of mode, for as long as `CopyResult::is_visible`
-/// says — by the time it is set, `y` (or a mouse release) has already
-/// put the session back in `Mode::Normal`, so there is nothing else
-/// worth advertising while it is shown. That window is a couple of
-/// seconds rather than the single frame a literal "for one draw" would
-/// give it: at the 80ms tick, or with a beam still flooding output, a
-/// one-draw message would be gone well under a blink.
-///
-/// The Normal bar names the six actions a first-time reader needs, not
-/// the whole keymap: `f`, `t`, `n`/`N`, `g`, and `v` live in the help
-/// overlay (`?`) instead, which the bar itself points at. `help.rs`'s
-/// `keymap_lines` is where all of them are listed.
-fn bottom_bar(state: &AppState, now: Instant) -> String {
-    if let Some(result) = &state.last_copy_result
-        && result.is_visible(now)
-    {
-        return format!("{} · q quit", result.message);
-    }
-    match &state.mode {
-        Mode::Normal => "q quit · r rerun · c cancel · w watch · / search · ? help".to_string(),
-        Mode::Search(search) => {
-            let total = search.matches.len();
-            let current = if total == 0 { 0 } else { search.current + 1 };
-            format!(
-                "/{} · {current}/{total} · Enter commit · Esc cancel",
-                search.query
-            )
-        }
-        // Copy's, Graph's, and Help's text is the same constant
-        // `help.rs`'s own overlay lists for these three modes
-        // (`COPY_KEYS`/`GRAPH_KEYS`/`HELP_KEYS`) — one spelling of each,
-        // not two hand-copied literals the overlay and this bar could
-        // silently drift apart from each other.
-        Mode::Copy(_) => help::COPY_KEYS.to_string(),
-        Mode::Graph(_) => help::GRAPH_KEYS.to_string(),
-        // While help is showing, only `Esc`/`?` (both close it) and
-        // Ctrl-C do anything at all — `q` is swallowed as a plain
-        // character the same as every other key `handle_modal_key`
-        // doesn't recognize for this mode (see its own doc comment).
-        Mode::Help => help::HELP_KEYS.to_string(),
-    }
-}
-
-/// How long something took, as one decimal of a second (`4.1s`) — the
-/// same shape as `alba`'s `format_duration`, kept as its own copy
-/// here because the dependency direction (`alba` → `alba-tui`) runs
-/// the wrong way for this crate to import it.
-fn format_duration(duration: Duration) -> String {
-    format!("{:.1}s", duration.as_secs_f64())
-}
-
-/// The log pane's own content rectangle — inside the outer border, past
-/// the tree pane and its divider, and inside the title row, and above
-/// the junction and footer rows `logpane::draw` reserves — for a
-/// terminal of `width` × `height` cells. `None` below the too-small
-/// floor, where `draw` paints nothing but its one message and there is
-/// no pane to hit-test against.
-///
-/// Copy mode's mouse handling (`lib::dispatch_mouse`) asks this rather
-/// than re-deriving the layout its own way, so a click can never drift
-/// out of sync with what `draw` actually painted: both go through the
-/// exact same `Layout` calls.
-pub fn log_pane_content_area(width: u16, height: u16) -> Option<Rect> {
+/// The body's rectangle for a terminal of `width` x `height` cells:
+/// columns 2 to `W-3`, rows 5 to `H-4`. `None` below the 40x12 floor,
+/// where the too-small screen is all there is.
+pub fn body_area(width: u16, height: u16) -> Option<Rect> {
     if width < MIN_WIDTH || height < MIN_HEIGHT {
         return None;
     }
-    let inner = Block::bordered().inner(Rect::new(0, 0, width, height));
-    let rows = Layout::vertical([
-        Constraint::Min(0),    // body
-        Constraint::Length(1), // junction
-        Constraint::Length(1), // footer
-    ])
-    .split(inner);
-    let panes =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH + 1), Constraint::Min(1)]).split(rows[0]);
-    let pane = Layout::vertical([
-        Constraint::Length(1), // "LOGS" title row
-        Constraint::Min(0),    // output
-    ])
-    .split(panes[1]);
-    Some(pane[1])
+    Some(Rect::new(
+        2,
+        ROWS_ABOVE_BODY,
+        width - 4,
+        height - ROWS_ABOVE_BODY - ROWS_BELOW_BODY,
+    ))
+}
+
+/// The body split into the beams pane (with the divider as its right
+/// border) and the output pane. The beams pane follows the beam names
+/// (`beams::beams_width`). `draw` and `log_pane_content_area` both go
+/// through here, so a click never drifts from what was painted.
+fn panes(body: Rect, state: &AppState, frame_width: u16) -> (Rect, Rect) {
+    let names: Vec<&str> = state.beams.iter().map(|row| row.id.as_str()).collect();
+    let beams = beams::beams_width(&names, frame_width);
+    let panes = Layout::horizontal([Constraint::Length(beams + 1), Constraint::Min(1)]).split(body);
+    (panes[0], panes[1])
+}
+
+pub fn draw(frame: &mut Frame, state: &AppState, now: Instant) {
+    let area = frame.area();
+    let mode = state.colour;
+    let surface = fill(Token::Surface, mode).patch(style(Token::Text, mode));
+    frame.buffer_mut().set_style(area, surface);
+    let Some(body) = body_area(area.width, area.height) else {
+        draw_too_small(frame, area, mode);
+        return;
+    };
+    let content_row = |y: u16| Rect::new(2, y, area.width - 4, 1);
+    let width = area.width - 4;
+
+    frame.render_widget(
+        Paragraph::new(header::line(state, now, width)),
+        content_row(1),
+    );
+    let progress = progress::banner(state, width).unwrap_or_else(|| progress::line(state, width));
+    frame.render_widget(Paragraph::new(progress), content_row(3));
+    let hints = match &state.last_copy_result {
+        Some(result) if result.is_visible(now) => keys::copy_result(result.message, mode),
+        _ => keys::line(state, width),
+    };
+    frame.render_widget(Paragraph::new(hints), content_row(area.height - 2));
+
+    let top = ROWS_ABOVE_BODY - 1;
+    let bottom = area.height - ROWS_BELOW_BODY;
+    draw_separator(frame, area, top, mode);
+    draw_separator(frame, area, bottom, mode);
+
+    // The help page replaces the whole body: no panes, no divider.
+    if matches!(state.mode, Mode::Help) {
+        help::draw(frame, body, mode);
+        return;
+    }
+
+    let (tree_pane, output_pane) = panes(body, state, area.width);
+    let divider = Block::new()
+        .borders(Borders::RIGHT)
+        .border_style(style(Token::Line, mode));
+    let tree_area = divider.inner(tree_pane);
+    frame.render_widget(divider, tree_pane);
+    let divider_x = tree_pane.right() - 1;
+    let buffer = frame.buffer_mut();
+    if let Some(cell) = buffer.cell_mut((divider_x, top)) {
+        cell.set_symbol("┬");
+    }
+    if let Some(cell) = buffer.cell_mut((divider_x, bottom)) {
+        cell.set_symbol("┴");
+    }
+
+    beams::draw(frame, tree_area, state, now);
+    // The graph takes the right pane; the beams stay on the left.
+    match &state.mode {
+        Mode::Graph(graph) => graphpane::draw(frame, output_pane, state, graph),
+        _ => output::draw(frame, output_pane, state),
+    }
+}
+
+/// A separator row, `─` in `line` from column 1 to `W-2`.
+fn draw_separator(frame: &mut Frame, area: Rect, y: u16, mode: ColourMode) {
+    let width = area.width - 2;
+    frame.render_widget(
+        Paragraph::new("─".repeat(width as usize)).style(style(Token::Line, mode)),
+        Rect::new(1, y, width, 1),
+    );
+}
+
+/// Below the floor: the badge, `Terminal too small` bold and the size
+/// needed, then the size there is, muted, centred; a blank row between
+/// each group.
+fn draw_too_small(frame: &mut Frame, area: Rect, mode: ColourMode) {
+    let muted = style(Token::TextMuted, mode);
+    let lines = vec![
+        Line::from(header::badge(mode)),
+        Line::default(),
+        Line::styled("Terminal too small", style(Token::Text, mode).bold()),
+        Line::styled(
+            format!("Resize to at least {MIN_WIDTH}×{MIN_HEIGHT}"),
+            muted,
+        ),
+        Line::default(),
+        Line::styled(format!("Now {}×{}", area.width, area.height), muted),
+    ];
+    let height = (lines.len() as u16).min(area.height);
+    let block = Rect::new(
+        area.x,
+        area.y + (area.height - height) / 2,
+        area.width,
+        height,
+    );
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), block);
+}
+
+/// How long something took: one decimal of a second (`4.1s`) under a
+/// minute, minutes and whole seconds (`2m 14s`) from there. `alba`'s
+/// own `format_duration` stays as it is: the headless output does not
+/// change, and the dependency direction (`alba` to `alba-tui`) keeps
+/// this crate from importing it.
+pub(crate) fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs_f64();
+    // `{:.1}` would read 59.96s as `60.0s`: from there on, minutes.
+    if seconds < 59.95 {
+        return format!("{seconds:.1}s");
+    }
+    let whole = seconds.round() as u64;
+    format!("{}m {}s", whole / 60, whole % 60)
+}
+
+/// The log pane's own text rectangle, below its title and definition
+/// rows, past its gutter and short of its scrollbar column, for a
+/// terminal of `width` x `height` cells. `None` below the too-small
+/// floor, where there is no pane to hit-test against.
+///
+/// Copy mode's mouse handling (`lib::dispatch_mouse`) asks this rather
+/// than re-deriving the layout its own way, so a click can never drift
+/// out of sync with what `draw` actually painted.
+pub fn log_pane_content_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
+    let (_, output_pane) = panes(body_area(width, height)?, state, width);
+    Some(output::layout(output_pane, matches!(state.phase, Phase::Parked)).text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alba_core::BeamId;
+    use alba_engine::RunEvent;
+    use alba_executors::{OutputLine, Stream};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
+    use unicode_width::UnicodeWidthStr;
 
-    #[test]
-    fn log_pane_content_area_sits_past_the_tree_and_its_borders() {
-        // Outer border: 1 cell each side. Tree pane + divider: 31
-        // columns. Title row: 1 line. Junction and footer: 2 lines.
-        let area = log_pane_content_area(80, 24).expect("80x24 clears the floor");
-        assert_eq!(area, Rect::new(32, 2, 47, 19));
+    fn id(name: &str) -> BeamId {
+        BeamId(name.to_string())
     }
 
-    #[test]
-    fn log_pane_content_area_is_none_below_the_floor() {
-        assert_eq!(log_pane_content_area(MIN_WIDTH - 1, 24), None);
-        assert_eq!(log_pane_content_area(80, MIN_HEIGHT - 1), None);
-    }
-
-    /// `titles_fit` pins the exact width the identity and the parked
-    /// session title need side by side: `alba · build` framed is 15
-    /// cells, `parked · waiting for a valid Beamfile` framed is 40, the
-    /// corners take 2, so 57 is the narrowest edge that has room for
-    /// both and 56 does not.
-    #[test]
-    fn titles_fit_needs_room_for_both_titles_and_the_corners() {
-        let identity = framed_title(Line::from("alba · build"));
-        let session = framed_title_right(Line::from("parked · waiting for a valid Beamfile"));
-        assert!(!titles_fit(&identity, &session, 56));
-        assert!(titles_fit(&identity, &session, 57));
-    }
-
-    /// The arbitration this pins: below the width both titles need, the
-    /// session title is dropped and the identity is drawn whole rather
-    /// than the two overlapping.
-    #[test]
-    fn the_session_title_is_dropped_when_it_would_overlap_the_identity() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut state = AppState::new("build", true);
-        state.apply(
-            &alba_engine::RunEvent::ProjectBroken {
-                diagnostic: "error: unknown target `nope`\n".to_string(),
-            },
-            Instant::now(),
-        );
-
-        let mut narrow = Terminal::new(TestBackend::new(56, 12)).unwrap();
-        narrow
-            .draw(|frame| draw(frame, &state, Instant::now()))
-            .unwrap();
-        let top_row = narrow.backend().buffer().content()[..56]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(
-            top_row.starts_with("┌─ alba · build ─") && !top_row.contains("parked"),
-            "the session title is dropped at 56 columns: {top_row}"
-        );
-
-        let mut wide = Terminal::new(TestBackend::new(57, 12)).unwrap();
-        wide.draw(|frame| draw(frame, &state, Instant::now()))
-            .unwrap();
-        let top_row = wide.backend().buffer().content()[..57]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(
-            top_row.ends_with("parked · waiting for a valid Beamfile ─┐"),
-            "both titles fit at 57 columns: {top_row}"
-        );
-    }
-
-    /// The junction row is where three block edges meet, and its three
-    /// special cells are written by hand, so this pins them: `├` on the
-    /// left edge, `┴` at the divider's foot, `┤` on the right edge.
-    #[test]
-    fn the_junction_closes_both_columns() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let state = AppState::new("build", false);
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| draw(frame, &state, Instant::now()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        // Rows at 80x24: 23 is the bottom edge, 22 the footer, 21 the
-        // junction, 20 the last body row.
-        assert_eq!(buffer[(0, 21)].symbol(), "├");
-        assert_eq!(buffer[(31, 21)].symbol(), "┴");
-        assert_eq!(buffer[(79, 21)].symbol(), "┤");
-        assert_eq!(
-            buffer[(31, 20)].symbol(),
-            "│",
-            "the divider reaches the junction"
-        );
-    }
-
-    /// The copy result takes over the bar for its whole visible window,
-    /// then gives it back to the mode's own bar — the plan owner's
-    /// two-second ruling on the brief's "for one draw", checked at the
-    /// layer that actually decides what the bottom bar shows.
-    #[test]
-    fn bottom_bar_shows_the_copy_result_until_it_expires() {
+    /// A run in flight with a wide (CJK) beam name and long output.
+    fn running(now: Instant) -> AppState {
         let mut state = AppState::new("build", false);
-        let now = Instant::now();
-        state.record_copy_result("copied (OSC 52)", now);
-
-        assert_eq!(bottom_bar(&state, now), "copied (OSC 52) · q quit");
-        assert_eq!(
-            bottom_bar(&state, now + Duration::from_secs(1)),
-            "copied (OSC 52) · q quit",
-            "still visible partway through the window"
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![id("build")],
+                affected_by: None,
+                beams: vec![
+                    id("codegen"),
+                    id("国国国国国国国国国国国国国国"),
+                    id("build"),
+                ],
+                edges: vec![(id("build"), id("codegen"))],
+                details: Vec::new(),
+            },
+            now,
         );
-        assert_eq!(
-            bottom_bar(&state, now + Duration::from_secs(3)),
-            "q quit · r rerun · c cancel · w watch · / search · ? help",
-            "falls back to the mode's own bar once the result has expired"
-        );
+        state.apply(&RunEvent::BeamStarted { id: id("codegen") }, now);
+        for index in 0..200 {
+            state.apply(
+                &RunEvent::BeamOutput {
+                    id: id("codegen"),
+                    line: OutputLine {
+                        stream: if index % 3 == 0 {
+                            Stream::Stderr
+                        } else {
+                            Stream::Stdout
+                        },
+                        text: format!("{index} {}", "compiling 国 crate ".repeat(index % 12)),
+                    },
+                    replayed: false,
+                },
+                now,
+            );
+        }
+        state
     }
 
-    /// Copy's, Graph's, and Help's bar text is asserted equal to
-    /// `help::COPY_KEYS`/`GRAPH_KEYS`/`HELP_KEYS` — the constants
-    /// `help.rs`'s own overlay lists for these three modes (its own
-    /// covering test,
-    /// `keymap_lines_build_copy_graph_and_help_from_the_shared_constants`,
-    /// checks the same constants from the overlay's side). A future edit
-    /// that reintroduces a hand-copied literal in either `bottom_bar` or
-    /// `help::keymap_lines` — rather than keeping both pointed at these
-    /// constants — desyncs the two screens silently unless one of these
-    /// two tests catches it.
+    fn drawn(state: &AppState, width: u16, height: u16, now: Instant) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, state, now)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
     #[test]
-    fn copy_graph_and_help_bars_match_their_shared_keymap_constants() {
-        use crate::copy::CopyState;
+    fn body_area_leaves_the_bands_and_the_margins() {
+        assert_eq!(body_area(80, 24), Some(Rect::new(2, 5, 76, 16)));
+        assert_eq!(body_area(40, 12), Some(Rect::new(2, 5, 36, 4)));
+        assert_eq!(body_area(MIN_WIDTH - 1, 24), None);
+        assert_eq!(body_area(80, MIN_HEIGHT - 1), None);
+    }
+
+    #[test]
+    fn log_pane_content_area_sits_past_the_beams_and_their_title() {
+        // Body from column 2; the beams pane (here the CJK name (14 wide
+        // characters, 28 cells) plus 12 is 40, capped to 32 at 80) and the
+        // divider take 33 columns; the gutter takes one more and the
+        // scrollbar the pane's last. The title, definition and blank rows
+        // take three lines.
+        let now = Instant::now();
+        assert_eq!(
+            log_pane_content_area(&running(now), 80, 24),
+            Some(Rect::new(36, 8, 41, 13))
+        );
+        // No beams yet: the beams pane keeps its 20-cell floor.
+        let empty = AppState::new("build", false);
+        assert_eq!(
+            log_pane_content_area(&empty, 80, 24),
+            Some(Rect::new(24, 8, 53, 13))
+        );
+        assert_eq!(log_pane_content_area(&empty, MIN_WIDTH - 1, 24), None);
+    }
+
+    #[test]
+    fn the_bands_sit_on_their_rows() {
+        let now = Instant::now();
+        let buffer = drawn(&running(now), 80, 24, now);
+        assert_eq!(row(&buffer, 0).trim(), "");
+        assert!(row(&buffer, 1).starts_with("   ALBA   run / build"));
+        assert_eq!(row(&buffer, 2).trim(), "");
+        assert!(row(&buffer, 3).contains("0/3 complete"));
+        assert_eq!(
+            row(&buffer, 4),
+            format!(" {}┬{} ", "─".repeat(33), "─".repeat(44))
+        );
+        assert_eq!(
+            buffer[(34, 10)].symbol(),
+            "│",
+            "the divider runs down the body"
+        );
+        assert_eq!(
+            row(&buffer, 21),
+            format!(" {}┴{} ", "─".repeat(33), "─".repeat(44))
+        );
+        assert!(row(&buffer, 22).starts_with("  ↑↓ beam"));
+        assert_eq!(row(&buffer, 23).trim(), "");
+    }
+
+    /// A run over `beams`, no edges, each beam running `echo <name>`.
+    fn graph_run(beams: &[&str]) -> RunEvent {
+        use alba_engine::{BeamDetails, ExecutorLabel};
+        RunEvent::RunStarted {
+            targets: vec![id("build")],
+            affected_by: None,
+            beams: beams.iter().map(|name| id(name)).collect(),
+            edges: Vec::new(),
+            details: beams
+                .iter()
+                .map(|name| BeamDetails {
+                    id: id(name),
+                    description: None,
+                    location: None,
+                    executor: ExecutorLabel {
+                        kind: "shell".to_string(),
+                        detail: None,
+                    },
+                    commands: vec![format!("echo {name}")],
+                })
+                .collect(),
+        }
+    }
+
+    /// The graph open on `focus` (by moving right from the first beam,
+    /// all beams sharing one layer).
+    fn graph_focused_on(beams: &[&str], focus: usize, now: Instant) -> AppState {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new("build", true);
+        state.apply(&graph_run(beams), now);
+        state.enter_graph();
+        for _ in 0..focus {
+            state.handle_modal_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        state
+    }
+
+    fn screen(state: &AppState, now: Instant) -> Vec<String> {
+        let buffer = drawn(state, 100, 30, now);
+        (0..buffer.area.height).map(|y| row(&buffer, y)).collect()
+    }
+
+    /// A reload while the graph is open keeps the focus on its beam by
+    /// id: the counter, the selection bar, `COMMANDS` and `Enter` all
+    /// follow it to its new row.
+    #[test]
+    fn the_graph_focus_follows_its_beam_across_a_reload() {
+        let now = Instant::now();
+        let mut state = graph_focused_on(&["a", "b", "c", "d", "e"], 4, now);
+        assert!(
+            screen(&state, now).iter().any(|line| line.contains("5/5")),
+            "precondition: focused on the fifth beam"
+        );
+
+        state.apply(&graph_run(&["x", "c", "e"]), now);
+
+        let all = screen(&state, now);
+        assert!(all.iter().any(|line| line.contains("3/3")), "{all:#?}");
+        assert!(
+            all.iter().any(|line| line.contains("COMMANDS / e")),
+            "{all:#?}"
+        );
+        state.open_focused_output();
+        assert_eq!(state.selected_beam().map(|row| row.id.as_str()), Some("e"));
+    }
+
+    /// A reload that removes the focused beam moves the focus to the
+    /// selection, itself carried across by id.
+    #[test]
+    fn a_graph_focus_whose_beam_is_gone_falls_back_to_the_selection() {
+        let now = Instant::now();
+        let mut state = graph_focused_on(&["a", "b", "c", "d", "e"], 4, now);
+        assert_eq!(state.selected_beam().map(|row| row.id.as_str()), Some("a"));
+
+        state.apply(&graph_run(&["x", "a", "b"]), now);
+
+        let all = screen(&state, now);
+        assert!(all.iter().any(|line| line.contains("2/3")), "{all:#?}");
+        assert!(
+            all.iter().any(|line| line.contains("COMMANDS / a")),
+            "{all:#?}"
+        );
+        state.open_focused_output();
+        assert_eq!(state.selected_beam().map(|row| row.id.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn drawing_never_panics_from_40_to_200_columns() {
+        use crate::graph::GraphState;
+        use alba_engine::RunSummary;
+
+        let now = Instant::now();
+        let with_mode = |mode: Mode| {
+            let mut state = running(now);
+            state.mode = mode;
+            state
+        };
+        let mut waiting = running(now);
+        waiting.watch_enabled = true;
+        waiting.apply(
+            &RunEvent::RunFinished {
+                summary: RunSummary::default(),
+            },
+            now,
+        );
+        waiting.apply(&RunEvent::WatchWaiting { files: 12 }, now);
+        let mut parked = running(now);
+        parked.watch_enabled = true;
+        parked.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: unknown target `nope`\n".to_string(),
+                report: None,
+            },
+            now,
+        );
+        let mut structured = running(now);
+        structured.watch_enabled = true;
+        structured.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: unknown field `tset`\n".to_string(),
+                report: Some(alba_core::DiagnosticReport {
+                    message: "unknown field `tset` in a message long enough to wrap".to_string(),
+                    path: "/home/someone/projects/payment/imports/Beamfile".to_string(),
+                    line: 5,
+                    column: 5,
+                    snippet: vec![
+                        alba_core::SnippetLine {
+                            number: 4,
+                            text: "beam build {".to_string(),
+                            faulty: false,
+                        },
+                        alba_core::SnippetLine {
+                            number: 5,
+                            text: "    tset = \"国国国国国国国国国国国国国国国国国国国国国国国国\""
+                                .to_string(),
+                            faulty: true,
+                        },
+                        alba_core::SnippetLine {
+                            number: 6,
+                            text: "}".to_string(),
+                            faulty: false,
+                        },
+                    ],
+                    caret: 4..8,
+                    help: Some("did you mean `test`?".to_string()),
+                }),
+            },
+            now,
+        );
+        assert!(structured.shows_structured_diagnostic(), "precondition");
+        let mut copy = running(now);
+        copy.enter_copy();
+        assert!(matches!(copy.mode, Mode::Copy(_)), "precondition");
+        let mut search = running(now);
+        search.enter_search();
+        if let Mode::Search(typed) = &mut search.mode {
+            typed.query = "compiling 国 crate".to_string();
+        }
+        let states = [
+            (running(now), "▶ RUNNING"),
+            (with_mode(Mode::Help), "▶ RUNNING"),
+            (with_mode(Mode::Graph(GraphState::new(0))), "▶ RUNNING"),
+            (search, "▶ RUNNING"),
+            (waiting, "● WATCHING"),
+            (parked, "Ⅱ PARKED"),
+            (structured, "Ⅱ PARKED"),
+            (copy, "▶ RUNNING"),
+        ];
+        // 12 to 16 cross the rows where the definition row, the graph's
+        // alignment row and its COMMANDS section come and go.
+        for height in (12..=16).chain([24, 50]) {
+            for width in 40..=200 {
+                let content = width as usize - 4;
+                for (state, label) in &states {
+                    let at = format!("{label} at {width}x{height}");
+                    assert!(
+                        header::line(state, now, width - 4).width() <= content,
+                        "{at}"
+                    );
+                    let progress = progress::banner(state, width - 4)
+                        .unwrap_or_else(|| progress::line(state, width - 4));
+                    assert!(progress.width() <= content, "{at}");
+                    assert!(keys::line(state, width - 4).width() <= content, "{at}");
+
+                    let buffer = drawn(state, width, height, now);
+                    let header = row(&buffer, 1);
+                    let drawn_header = header.trim_end();
+                    assert_eq!(
+                        drawn_header.width(),
+                        width as usize - 2,
+                        "the header ends at column W-3, {at}: {header:?}"
+                    );
+                    assert!(
+                        drawn_header.ends_with(label)
+                            || drawn_header.contains(&format!("{label}   ")),
+                        "the state closes the header, {at}: {header:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The badge is the one band on its own background. The cell behind
+    /// the second half of a wide character is never drawn (ratatui
+    /// resets it and the terminal paints the wide glyph over it), so it
+    /// is not checked.
+    #[test]
+    fn the_frame_paints_the_surface_everywhere() {
+        let now = Instant::now();
+        let state = running(now).with_colour(ColourMode::TrueColour);
+        let mut help = running(now).with_colour(ColourMode::TrueColour);
+        help.mode = Mode::Help;
+        assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&state, 104, 23, now), true);
+        // The help page replaces the body: no selected beam's bar.
+        assert_surface_everywhere_but_the_badge_and_the_bar(&drawn(&help, 104, 23, now), false);
+        let buffer = drawn(&state, 104, 23, now);
+        assert_eq!(buffer[(40, 12)].fg, Color::Rgb(0xE3, 0xE4, 0xDC));
+    }
+
+    fn assert_surface_everywhere_but_the_badge_and_the_bar(buffer: &Buffer, with_bar: bool) {
+        let surface = Some(Color::Rgb(0x15, 0x17, 0x19));
+        for y in 0..23 {
+            for x in 0..104 {
+                if x > 0 && buffer[(x - 1, y)].symbol().width() == 2 {
+                    continue;
+                }
+                let badge = y == 1 && (2..8).contains(&x);
+                // The selected beam's row is the accent bar, 40 cells here.
+                let bar = with_bar && y == 7 && (2..42).contains(&x);
+                let expected = if badge || bar {
+                    Some(Color::Rgb(0xF3, 0xC2, 0x80))
+                } else {
+                    surface
+                };
+                assert_eq!(Some(buffer[(x, y)].bg), expected, "cell ({x}, {y})");
+            }
+        }
+    }
+
+    /// 20 beams in a 6-row list: the divider turns into the scrollbar
+    /// (the thumb on the divider column, the junctions on the
+    /// separators untouched) and the window follows the selection.
+    #[test]
+    fn a_long_list_scrolls_and_the_divider_becomes_the_scrollbar() {
+        let now = Instant::now();
+        let names: Vec<BeamId> = (0..20).map(|n| id(&format!("beam{n:02}"))).collect();
+        let mut state = AppState::new("beam19", false);
+        state.apply(
+            &RunEvent::RunStarted {
+                targets: vec![id("beam19")],
+                affected_by: None,
+                beams: names,
+                edges: Vec::new(),
+                details: Vec::new(),
+            },
+            now,
+        );
+        state.selected = 10;
+        let buffer = drawn(&state, 80, 16, now);
+        assert!(
+            row(&buffer, 5).contains("BEAMS          11/20"),
+            "{}",
+            row(&buffer, 5)
+        );
+        // A blank row under the title, then six rows of the list.
+        assert!(row(&buffer, 6)[2..22].trim().is_empty());
+        let shown: Vec<String> = (7..13)
+            .map(|y| row(&buffer, y)[2..22].to_string())
+            .collect();
+        assert!(shown[0].contains("beam07"), "{shown:?}");
+        assert!(shown[3].contains("beam10"), "{shown:?}");
+        assert!(shown[5].contains("beam12"), "{shown:?}");
+        let divider: Vec<&str> = (4..14).map(|y| buffer[(22, y)].symbol()).collect();
+        assert_eq!(divider, ["┬", "│", "│", "│", "│", "┃", "┃", "│", "│", "┴"]);
+        // A list that fits draws no thumb.
+        let fits = drawn(&running(now), 80, 24, now);
+        assert!((5..21).all(|y| fits[(34, y)].symbol() != "┃"));
+    }
+
+    /// A wide (CJK) name keeps the duration against the divider, on
+    /// every row, whatever the pane's width.
+    #[test]
+    fn a_wide_name_keeps_the_duration_against_the_divider() {
+        let now = Instant::now();
+        let mut state = running(now);
+        state.apply(
+            &RunEvent::BeamStarted {
+                id: id("国国国国国国国国国国国国国国"),
+            },
+            now,
+        );
+        let buffer = drawn(&state, 80, 24, now);
+        let line: String = (2..34).map(|x| buffer[(x, 8)].symbol()).collect();
+        assert!(line.contains("国"), "{line:?}");
+        assert!(
+            line.ends_with("s"),
+            "the duration ends at the divider: {line:?}"
+        );
+        assert_eq!(buffer[(34, 8)].symbol(), "│");
+    }
+
+    /// The graph keeps the beams pane on the left, the divider and its
+    /// junctions; the graph takes the right pane.
+    #[test]
+    fn the_graph_keeps_the_beams_pane_and_the_divider() {
         use crate::graph::GraphState;
 
         let now = Instant::now();
-        let mut state = AppState::new("build", false);
-
-        state.mode = Mode::Copy(CopyState::new_at(0));
-        assert_eq!(bottom_bar(&state, now), help::COPY_KEYS);
-
+        let mut state = running(now);
         state.mode = Mode::Graph(GraphState::new(0));
-        assert_eq!(bottom_bar(&state, now), help::GRAPH_KEYS);
+        let buffer = drawn(&state, 80, 24, now);
+        assert!(
+            row(&buffer, 5).starts_with("  BEAMS"),
+            "{:?}",
+            row(&buffer, 5)
+        );
+        assert!(
+            row(&buffer, 5).contains("│ GRAPH / build"),
+            "{:?}",
+            row(&buffer, 5)
+        );
+        assert_eq!(buffer[(34, 4)].symbol(), "┬");
+        assert_eq!(buffer[(34, 10)].symbol(), "│");
+        assert_eq!(buffer[(34, 21)].symbol(), "┴");
+    }
 
-        state.mode = Mode::Help;
-        assert_eq!(bottom_bar(&state, now), help::HELP_KEYS);
+    /// In the graph the beams pane's selection follows the focus, the
+    /// counter included; the selection itself waits for `Enter`.
+    #[test]
+    fn the_beams_pane_follows_the_graph_focus() {
+        use crate::graph::GraphState;
+
+        let now = Instant::now();
+        let mut state = running(now).with_colour(ColourMode::TrueColour);
+        state.mode = Mode::Graph(GraphState::new(2));
+        let buffer = drawn(&state, 80, 24, now);
+        assert!(row(&buffer, 5).contains("BEAMS"), "{:?}", row(&buffer, 5));
+        assert!(row(&buffer, 5).contains("3/3"), "{:?}", row(&buffer, 5));
+        let accent = Color::Rgb(0xF3, 0xC2, 0x80);
+        assert!(row(&buffer, 9).contains("build"), "{:?}", row(&buffer, 9));
+        assert_eq!(buffer[(6, 9)].bg, accent, "the focused beam's row");
+        assert_ne!(buffer[(6, 7)].bg, accent, "the selected beam's row");
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn the_too_small_screen_names_both_sizes() {
+        let state = AppState::new("build", false);
+        let now = Instant::now();
+        let buffer = drawn(&state, 36, 10, now);
+        let text: Vec<String> = (0..10).map(|y| row(&buffer, y)).collect();
+        let text = text.join("\n");
+        for expected in [
+            "ALBA",
+            "Terminal too small",
+            "Resize to at least 40×12",
+            "Now 36×10",
+        ] {
+            assert!(text.contains(expected), "{expected:?} missing:\n{text}");
+        }
+    }
+
+    /// The badge, then the message and what it asks for, then the size
+    /// there is: each group a blank row from the next, centred.
+    #[test]
+    fn the_too_small_screen_groups_its_lines() {
+        let state = AppState::new("build", false);
+        let buffer = drawn(&state, 36, 10, Instant::now());
+        let rows: Vec<String> = (0..10)
+            .map(|y| row(&buffer, y).trim().to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "",
+                "",
+                "ALBA",
+                "",
+                "Terminal too small",
+                "Resize to at least 40×12",
+                "",
+                "Now 36×10",
+                "",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_copy_result_takes_over_the_key_hints_until_it_expires() {
+        let now = Instant::now();
+        let mut state = AppState::new("build", false);
+        state.record_copy_result("copied (OSC 52)", now);
+        assert!(row(&drawn(&state, 80, 24, now), 22).starts_with("  copied (OSC 52)   q quit"));
+        let later = now + Duration::from_secs(3);
+        assert!(row(&drawn(&state, 80, 24, later), 22).starts_with("  ↑↓ beam"));
+    }
+
+    #[test]
+    fn long_durations_read_in_minutes() {
+        assert_eq!(format_duration(Duration::from_secs(134)), "2m 14s");
+        assert_eq!(format_duration(Duration::from_millis(9400)), "9.4s");
+        assert_eq!(format_duration(Duration::from_millis(59_960)), "1m 0s");
+        assert_eq!(format_duration(Duration::from_millis(119_600)), "2m 0s");
     }
 }

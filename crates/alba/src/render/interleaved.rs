@@ -75,6 +75,8 @@ impl Renderer for InterleavedRenderer {
             RunEvent::BeamStarted { id } => self.line(&id.0, "started"),
             RunEvent::BeamCached { id } => self.line(&id.0, "cached — replaying last output"),
             RunEvent::BeamOutput { id, line, .. } => self.line(&id.0, &line.text),
+            // Printed where the stderr line it replaced used to appear.
+            RunEvent::BeamNotice { id, text, .. } => self.line(&id.0, text),
             RunEvent::BeamFinished {
                 id,
                 status,
@@ -97,10 +99,12 @@ impl Renderer for InterleavedRenderer {
                 print_summary(&mut self.err, summary, self.affected_by.as_deref());
             }
             RunEvent::RunStarted { affected_by, .. } => self.affected_by = affected_by.clone(),
-            RunEvent::WatchWaiting { .. } | RunEvent::WatchTriggered { .. } => {}
+            RunEvent::WatchWaiting { .. }
+            | RunEvent::WatchTriggered { .. }
+            | RunEvent::CommandStarted { .. } => {}
             // Alba commentary, not the run's output — stderr, like every
             // other diagnostic this module prints (see the module doc).
-            RunEvent::ProjectBroken { diagnostic } => {
+            RunEvent::ProjectBroken { diagnostic, .. } => {
                 self.err.line(diagnostic.trim_end());
             }
         }

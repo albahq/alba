@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use alba_core::{BeamId, load_project};
 use alba_engine::{
-    CacheOptions, EngineError, Executors, RunEvent, RunOptions, Selection, SessionCommand,
-    SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session, watch,
+    CacheOptions, EngineError, Executors, RenderedError, RunEvent, RunOptions, Selection,
+    SessionCommand, SessionEnd, SessionError, WatchBatch, WatchExit, Watcher, session, watch,
 };
 use alba_executors::{FakeBehavior, FakeEvent, FakeExecutor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -138,7 +138,15 @@ enum ObservedError {
 }
 
 fn start(beamfile: &str, target: &str, executor: FakeExecutor, force: bool) -> Session {
-    start_reporting_to(beamfile, target, executor, force, |_| String::new())
+    start_reporting_to(beamfile, target, executor, force, |_| unrendered())
+}
+
+/// The answer of a `render_error` callback whose text nobody reads.
+fn unrendered() -> RenderedError {
+    RenderedError {
+        text: String::new(),
+        report: None,
+    }
 }
 
 /// A session whose `render_error` reports are recorded, so a test can
@@ -155,7 +163,10 @@ fn start_with_error_log(
             SessionError::Load(_) => ObservedError::Load,
             SessionError::Run { .. } => ObservedError::Run,
         });
-        String::new()
+        RenderedError {
+            text: String::new(),
+            report: None,
+        }
     });
     (session, log)
 }
@@ -165,7 +176,7 @@ fn start_reporting_to(
     target: &str,
     executor: FakeExecutor,
     force: bool,
-    render_error: impl FnMut(&SessionError) -> String + Send + 'static,
+    render_error: impl FnMut(&SessionError) -> RenderedError + Send + 'static,
 ) -> Session {
     spawn(beamfile, target, executor, force, true, None, render_error)
 }
@@ -186,7 +197,7 @@ fn start_commandable(
         false,
         watch_enabled,
         Some(receiver),
-        |_| String::new(),
+        |_| unrendered(),
     );
     (session, commands)
 }
@@ -198,7 +209,7 @@ fn spawn(
     force: bool,
     watch_enabled: bool,
     commands: Option<UnboundedReceiver<SessionCommand>>,
-    mut render_error: impl FnMut(&SessionError) -> String + Send + 'static,
+    mut render_error: impl FnMut(&SessionError) -> RenderedError + Send + 'static,
 ) -> Session {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -227,6 +238,7 @@ fn spawn(
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
     let handle = tokio::spawn({
         let executor = Arc::clone(&executor);
@@ -657,6 +669,53 @@ async fn a_beamfile_change_reloads_and_reruns() {
     session.finish().await;
 }
 
+/// The details a run announces describe the Beamfile as it is on disk
+/// now, not as it was when the session started.
+#[tokio::test]
+async fn a_reload_announces_the_new_definitions() {
+    let mut session = start(
+        "beam build { inputs [\"src/**/*.rs\"] run \"echo compile-v1\" }\n",
+        "build",
+        FakeExecutor::new(),
+        false,
+    );
+    let first = definition_of_build(session.event_matching(is_run_started).await);
+    assert_eq!(
+        first,
+        (
+            Some("Beamfile:1".to_string()),
+            vec!["echo compile-v1".to_string()]
+        )
+    );
+    session.event_matching(is_waiting).await;
+
+    let beamfile = session.touch(
+        "Beamfile",
+        "\nbeam build { inputs [\"src/**/*.rs\"] run \"echo compile-v2\" }\n",
+    );
+    session.send(vec![beamfile]);
+
+    let second = definition_of_build(session.event_matching(is_run_started).await);
+    assert_eq!(
+        second,
+        (
+            Some("Beamfile:2".to_string()),
+            vec!["echo compile-v2".to_string()]
+        )
+    );
+
+    session.finish().await;
+}
+
+/// The location and commands the `build` beam was announced with.
+fn definition_of_build(event: RunEvent) -> (Option<String>, Vec<String>) {
+    let RunEvent::RunStarted { details, .. } = event else {
+        unreachable!("not a RunStarted event")
+    };
+    let build = details.into_iter().find(|d| d.id.0 == "build").unwrap();
+    (build.location, build.commands)
+}
+
 /// A Beamfile that stops parsing is reported, nothing executes, and the
 /// session resumes as soon as it parses again.
 #[tokio::test]
@@ -710,9 +769,23 @@ async fn a_broken_beamfile_reports_waits_and_recovers() {
 /// diagnostic is the callback's answer, not something the engine invented.
 #[tokio::test]
 async fn a_failed_reload_emits_project_broken() {
-    let mut session = start_reporting_to(ONE_BEAM, "build", FakeExecutor::new(), false, |_| {
-        "rendered by the callback".to_string()
-    });
+    let report = alba_core::DiagnosticReport {
+        message: "reported by the callback".to_string(),
+        path: "Beamfile".to_string(),
+        line: 1,
+        column: 1,
+        snippet: Vec::new(),
+        caret: 0..0,
+        help: None,
+    };
+    let answer = report.clone();
+    let mut session =
+        start_reporting_to(ONE_BEAM, "build", FakeExecutor::new(), false, move |_| {
+            RenderedError {
+                text: "rendered by the callback".to_string(),
+                report: Some(answer.clone()),
+            }
+        });
     session.event_matching(is_waiting).await;
 
     let beamfile = session.touch("Beamfile", "beam build { this does not parse");
@@ -722,10 +795,15 @@ async fn a_failed_reload_emits_project_broken() {
     let event = session
         .event_matching(|event| matches!(event, RunEvent::ProjectBroken { .. }))
         .await;
-    let RunEvent::ProjectBroken { diagnostic } = event else {
+    let RunEvent::ProjectBroken {
+        diagnostic,
+        report: emitted,
+    } = event
+    else {
         unreachable!()
     };
     assert_eq!(diagnostic, "rendered by the callback");
+    assert_eq!(emitted, Some(report));
 
     session.finish().await;
 }
@@ -903,7 +981,7 @@ async fn a_run_error_after_a_reload_carries_the_reloaded_sources() {
                     .map_or_else(String::new, |(_, source)| source.to_string());
                 sink.lock().unwrap().push(text);
             }
-            String::new()
+            unrendered()
         },
     );
     session.event_matching(is_waiting).await;
@@ -1284,6 +1362,7 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
         cache: None,
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
     let handle = tokio::spawn({
         let executor = Arc::clone(&executor);
@@ -1305,7 +1384,7 @@ async fn an_affected_session_recomputes_its_targets_on_every_run() {
                 events_tx,
                 cancel,
                 watcher,
-                &mut |_| String::new(),
+                &mut |_| unrendered(),
             )
             .await
         }

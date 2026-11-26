@@ -22,7 +22,7 @@
 //! of the same facts for a consumer that by construction is parsing the
 //! first one.
 
-use std::io;
+use std::io::{self, Write};
 
 use alba_engine::{BeamStatus, RunEvent, RunSummary};
 use alba_executors::Stream;
@@ -30,30 +30,38 @@ use serde::Serialize;
 
 use super::LineSink;
 
-pub struct JsonRenderer {
-    out: LineSink<io::Stdout>,
+pub struct JsonRenderer<O: Write = io::Stdout, E: Write = io::Stderr> {
+    out: LineSink<O>,
     /// Only ever written to for `ProjectBroken`: the diagnostic still goes
     /// to stderr in JSON mode too, exactly as it did before this event
     /// existed, for whoever is reading the process the old way rather than
     /// parsing the stream.
-    err: LineSink<io::Stderr>,
+    err: LineSink<E>,
 }
 
 impl JsonRenderer {
     pub fn new() -> Self {
+        Self::with_writers(io::stdout(), io::stderr())
+    }
+}
+
+impl<O: Write, E: Write> JsonRenderer<O, E> {
+    pub fn with_writers(out: O, err: E) -> Self {
         Self {
-            out: LineSink::stdout(),
-            err: LineSink::stderr(),
+            out: LineSink::new(out),
+            err: LineSink::new(err),
         }
     }
 }
 
-impl super::Renderer for JsonRenderer {
+impl<O: Write + Send, E: Write + Send> super::Renderer for JsonRenderer<O, E> {
     fn handle(&mut self, event: &RunEvent) {
-        if let RunEvent::ProjectBroken { diagnostic } = event {
+        if let RunEvent::ProjectBroken { diagnostic, .. } = event {
             self.err.line(diagnostic.trim_end());
         }
-        let wire = WireEvent::from(event);
+        let Some(wire) = WireEvent::of(event) else {
+            return;
+        };
         // Serializing these types cannot fail: every field is a string, a
         // number, or a sequence of them. The `Result` is still handled
         // rather than unwrapped, since a panic mid-run would be a far
@@ -131,14 +139,17 @@ enum WireStream {
     Stderr,
 }
 
-impl<'a> From<&'a RunEvent> for WireEvent<'a> {
-    fn from(event: &'a RunEvent) -> Self {
-        match event {
+impl<'a> WireEvent<'a> {
+    /// The line an event becomes, or `None` for the events this stream
+    /// does not carry.
+    fn of(event: &'a RunEvent) -> Option<Self> {
+        Some(match event {
             RunEvent::RunStarted {
                 targets,
                 affected_by,
                 beams,
                 edges,
+                details: _,
             } => WireEvent::RunStarted {
                 targets: targets.iter().map(|id| id.0.as_str()).collect(),
                 affected_by: affected_by.as_deref(),
@@ -170,10 +181,19 @@ impl<'a> From<&'a RunEvent> for WireEvent<'a> {
                 duration_ms: millis(duration),
             },
             RunEvent::RunFinished { summary } => WireEvent::from_summary(summary),
+            // A notice keeps the wire shape it always had, a stderr line.
+            RunEvent::BeamNotice { id, text, .. } => WireEvent::BeamOutput {
+                beam: &id.0,
+                stream: WireStream::Stderr,
+                text,
+                replayed: false,
+            },
+            // The stream keeps its event kinds: nothing is written for it.
+            RunEvent::CommandStarted { .. } => return None,
             RunEvent::WatchWaiting { files } => WireEvent::WatchWaiting { files: *files },
             RunEvent::WatchTriggered { paths } => WireEvent::WatchTriggered { paths },
-            RunEvent::ProjectBroken { diagnostic } => WireEvent::ProjectBroken { diagnostic },
-        }
+            RunEvent::ProjectBroken { diagnostic, .. } => WireEvent::ProjectBroken { diagnostic },
+        })
     }
 }
 
@@ -228,7 +248,48 @@ mod tests {
     use alba_executors::OutputLine;
 
     fn json(event: &RunEvent) -> serde_json::Value {
-        serde_json::from_str(&serde_json::to_string(&WireEvent::from(event)).unwrap()).unwrap()
+        serde_json::from_str(&serde_json::to_string(&WireEvent::of(event).unwrap()).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn command_started_writes_nothing() {
+        let event = RunEvent::CommandStarted {
+            id: BeamId("build".to_string()),
+            command: "cargo build".to_string(),
+        };
+
+        let mut renderer = JsonRenderer::with_writers(Vec::new(), Vec::new());
+
+        super::super::Renderer::handle(&mut renderer, &event);
+        assert!(renderer.out.writer.is_empty(), "nothing is written");
+
+        // The sink itself works: another event does write a line.
+        super::super::Renderer::handle(
+            &mut renderer,
+            &RunEvent::BeamStarted {
+                id: BeamId("build".to_string()),
+            },
+        );
+        assert!(!renderer.out.writer.is_empty());
+    }
+
+    #[test]
+    fn a_notice_is_written_as_a_stderr_output_event() {
+        let event = RunEvent::BeamNotice {
+            id: BeamId("build".to_string()),
+            level: alba_engine::NoticeLevel::Error,
+            text: "failed to spawn".to_string(),
+        };
+
+        let mut renderer = JsonRenderer::with_writers(Vec::new(), Vec::new());
+        super::super::Renderer::handle(&mut renderer, &event);
+
+        let written = String::from_utf8(renderer.out.writer.clone()).unwrap();
+        assert_eq!(
+            written.trim_end(),
+            r#"{"event":"beam_output","beam":"build","stream":"stderr","text":"failed to spawn","replayed":false}"#
+        );
     }
 
     #[test]
@@ -366,9 +427,10 @@ mod tests {
             affected_by: None,
             beams: vec![BeamId("codegen".to_string()), BeamId("build".to_string())],
             edges: vec![(BeamId("build".to_string()), BeamId("codegen".to_string()))],
+            details: Vec::new(),
         };
 
-        let line = serde_json::to_string(&WireEvent::from(&event)).unwrap();
+        let line = serde_json::to_string(&WireEvent::of(&event).unwrap()).unwrap();
 
         assert_eq!(
             line,
@@ -387,8 +449,8 @@ mod tests {
             paths: vec!["src/lib.rs".to_string()],
         };
 
-        let waiting = serde_json::to_string(&WireEvent::from(&waiting)).unwrap();
-        let triggered = serde_json::to_string(&WireEvent::from(&triggered)).unwrap();
+        let waiting = serde_json::to_string(&WireEvent::of(&waiting).unwrap()).unwrap();
+        let triggered = serde_json::to_string(&WireEvent::of(&triggered).unwrap()).unwrap();
 
         assert_eq!(waiting, r#"{"event":"watch_waiting","files":42}"#);
         assert_eq!(
@@ -404,9 +466,10 @@ mod tests {
     fn project_broken_is_emitted_on_the_wire() {
         let event = RunEvent::ProjectBroken {
             diagnostic: "error: oh no\n".to_string(),
+            report: None,
         };
 
-        let line = serde_json::to_string(&WireEvent::from(&event)).unwrap();
+        let line = serde_json::to_string(&WireEvent::of(&event).unwrap()).unwrap();
 
         assert_eq!(
             line,

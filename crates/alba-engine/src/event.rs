@@ -9,17 +9,74 @@
 
 use std::time::Duration;
 
-use alba_core::BeamId;
+use alba_core::{BeamId, DiagnosticReport, ExecutorKind};
 use alba_executors::OutputLine;
+
+/// A beam's definition, for an interface that wants to show more than its
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeamDetails {
+    pub id: BeamId,
+    pub description: Option<String>,
+    /// `<file relative to the project root>:<line>`, when the caller
+    /// supplied the beam's definition (see [`crate::RunOptions::definitions`]).
+    pub location: Option<String>,
+    pub executor: ExecutorLabel,
+    /// The `run` templates as written, unrendered; empty when the caller
+    /// supplied no definition.
+    pub commands: Vec<String>,
+}
+
+/// How an interface names a beam's executor: a kind, then what
+/// distinguishes this beam's use of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorLabel {
+    pub kind: String,
+    pub detail: Option<String>,
+}
+
+impl From<&ExecutorKind> for ExecutorLabel {
+    fn from(executor: &ExecutorKind) -> Self {
+        let (kind, detail) = match executor {
+            ExecutorKind::Shell => ("shell", Some("(embedded)".to_string())),
+            ExecutorKind::SystemShell => ("system shell", None),
+            // `image` names the container; a beam with only `build` is
+            // known by its build context.
+            ExecutorKind::Docker { image, build, .. } => {
+                ("docker", image.clone().or_else(|| build.clone()))
+            }
+            ExecutorKind::Compose { service, .. } => ("compose", Some(service.clone())),
+            ExecutorKind::Plugin { name, .. } => ("plugin", Some(name.clone())),
+        };
+        Self {
+            kind: kind.to_string(),
+            detail,
+        }
+    }
+}
+
+/// How serious a [`RunEvent::BeamNotice`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeLevel {
+    /// Informational: the beam runs as usual (a cache bypass).
+    Info,
+    /// The beam could not run, or a step of it failed.
+    Error,
+}
 
 /// One thing that happened during a run.
 ///
-/// Per beam, the order is `BeamStarted`, then every `BeamOutput`, then
+/// Per beam, the order is `BeamStarted`, then for each command a
+/// `CommandStarted` followed by that command's `BeamOutput` lines, then
 /// `BeamFinished` — a beam that runs several commands still emits exactly
-/// one started/finished pair, since the individual commands are an
-/// implementation detail of the beam. A cache hit follows the same shape
-/// with `BeamCached` in place of `BeamStarted`: the same replayed
-/// `BeamOutput` lines, then `BeamFinished` with [`BeamStatus::Cached`]. A
+/// one started/finished pair. Output produced while the beam's session is
+/// set up (an executor's start-up message) can precede the first
+/// `CommandStarted` (as can a `BeamNotice`, which otherwise keeps its
+/// arrival order relative to the output). A cache hit follows the same
+/// shape with `BeamCached`
+/// in place of `BeamStarted` and no `CommandStarted`, since nothing runs:
+/// the replayed `BeamOutput` lines, then `BeamFinished` with
+/// [`BeamStatus::Cached`]. A
 /// beam that never ran (cancelled before it acquired a slot, or skipped
 /// because a dependency failed) emits only `BeamFinished` with
 /// [`BeamStatus::Cancelled`]. Events from different beams interleave
@@ -48,6 +105,10 @@ pub enum RunEvent {
         /// `(beam, dependency)`: the first needs the second. Both ends are
         /// always members of `beams` — the subgraph is transitively closed.
         edges: Vec<(BeamId, BeamId)>,
+        /// What each member of `beams` is, as the author wrote it: one
+        /// entry per beam, in the order of `beams`. A snapshot for the same
+        /// reason as the graph: a watch session reloads the Beamfile.
+        details: Vec<BeamDetails>,
     },
     BeamStarted {
         id: BeamId,
@@ -58,6 +119,23 @@ pub enum RunEvent {
     /// run's duration.
     BeamCached {
         id: BeamId,
+    },
+    /// A command of the beam is about to run: the command as rendered, with
+    /// the beam's secrets masked, so a consumer can echo it before the
+    /// output it produces. Emitted after `BeamStarted` and before any
+    /// `BeamOutput` of that command, once per command; a beam restored
+    /// from the cache runs nothing and emits none.
+    CommandStarted {
+        id: BeamId,
+        command: String,
+    },
+    /// Something Alba itself says about a beam (why it runs uncached, why
+    /// it could not run), as opposed to what the beam's commands print.
+    /// Emitted in order with the beam's output, never stored in the cache.
+    BeamNotice {
+        id: BeamId,
+        level: NoticeLevel,
+        text: String,
     },
     BeamOutput {
         id: BeamId,
@@ -99,9 +177,22 @@ pub enum RunEvent {
     /// caret, spans, help — because rendering lives above this crate and is
     /// done by the session's `render_error` callback; the event exists so a
     /// stream consumer that never sees stderr still learns why nothing runs.
+    /// `report` is the same diagnostic in structured form, for a front end
+    /// that draws the snippet itself; absent when the failure has no span
+    /// to point at.
     ProjectBroken {
         diagnostic: String,
+        report: Option<DiagnosticReport>,
     },
+}
+
+/// What a session's `render_error` callback answers: the diagnostic as the
+/// headless renderers print it, and, when the failure points into a
+/// Beamfile, the structured report a front end can draw itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedError {
+    pub text: String,
+    pub report: Option<DiagnosticReport>,
 }
 
 /// How a beam ended.

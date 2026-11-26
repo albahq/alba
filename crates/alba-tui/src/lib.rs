@@ -22,15 +22,16 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use alba_core::BeamId;
-use alba_engine::{RunEvent, RunSummary, SessionCommand};
+use alba_engine::{NoticeLevel, RunEvent, RunSummary, SessionCommand};
 use crossterm::event::{MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::layout::Size;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::input::Action;
-use crate::logs::LogBuffer;
+use crate::logs::{LineKind, LogBuffer};
 use crate::state::AppState;
+pub use crate::ui::theme::ColourMode;
 
 /// The heartbeat between events. Redrawing is event-driven, but elapsed
 /// times and the progress bar have to keep moving while nothing else
@@ -49,7 +50,7 @@ const MAX_BATCH: usize = 256;
 pub struct TuiOptions {
     pub target: String,
     pub watch: bool,
-    pub colour: bool,
+    pub colour: ColourMode,
 }
 
 /// One replayed line, both ways the CLI may print it.
@@ -59,14 +60,27 @@ pub struct ReplayLine {
     pub text: String,
 }
 
+/// One failed beam's material for the exit replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedLog {
+    pub beam: String,
+    pub lines: Vec<ReplayLine>,
+    /// Whether the beam's buffer dropped its oldest lines past
+    /// [`logs::MAX_LINES`], so `lines` is not the whole log. Read from
+    /// the buffer itself: the cap counts Alba's own lines too, so the
+    /// length of `lines` cannot tell.
+    pub truncated: bool,
+}
+
 #[derive(Debug)]
 pub struct TuiOutcome {
     /// `Some(code)` iff the last run ran to completion un-abandoned.
     pub last_run_code: Option<i32>,
     pub last_summary: Option<RunSummary>,
-    /// `(beam id, its buffered lines)` for the last summary's failed
-    /// beams, for the CLI's exit replay.
-    pub failed_logs: Vec<(String, Vec<ReplayLine>)>,
+    /// The last summary's failed beams, in its order, for the CLI's exit
+    /// replay: each one's process output and error notices, never the
+    /// command echo, the info notices or the end line.
+    pub failed_logs: Vec<FailedLog>,
 }
 
 /// Drives the interface until the user quits or the session ends.
@@ -243,25 +257,8 @@ fn dispatch(
     action: Action,
     terminal_size: Size,
 ) {
-    // Refreshed before every action: `EnterCopy`'s anchor and copy
-    // mode's keyboard-driven scroll-follow both need to know the log
-    // pane's current content geometry, and this is the one place that
-    // reaches the terminal size to compute it.
-    let pane = ui::log_pane_content_area(terminal_size.width, terminal_size.height);
-    let (height, width) = pane
-        .map(|area| (area.height as usize, area.width as usize))
-        .unwrap_or((0, 0));
-    state.set_pane_size(height, width);
+    let (height, width) = size_pane(state, terminal_size);
     match action {
-        Action::Quit => {
-            // Quitting on a run in flight abandons it: its summary,
-            // whatever it ends up saying, is not a verdict on the
-            // sources. Outside a run the call is inert (`AppState`
-            // marks nothing when nothing is running), which is what
-            // leaves a finished run's code standing.
-            state.mark_user_cancelled();
-            state.should_quit = true;
-        }
         Action::CancelOrQuit => {
             if state.running() {
                 state.mark_user_cancelled();
@@ -303,28 +300,85 @@ fn dispatch(
             state.watch_enabled = !state.watch_enabled;
             let _ = commands.send(SessionCommand::SetWatch(state.watch_enabled));
         }
+        other => apply_sized(state, other, terminal_size, height, width),
+    }
+}
+
+/// Refreshed before every action: `EnterCopy`'s anchor and copy mode's
+/// keyboard-driven scroll-follow both need to know the log pane's
+/// current content geometry, and this is the one place that reaches the
+/// terminal size to compute it. Returns the pane's `(height, width)`.
+fn size_pane(state: &mut AppState, terminal_size: Size) -> (usize, usize) {
+    let pane = ui::log_pane_content_area(state, terminal_size.width, terminal_size.height);
+    let (height, width) = pane
+        .map(|area| (area.height as usize, area.width as usize))
+        .unwrap_or((0, 0));
+    state.set_pane_size(height, width);
+    (height, width)
+}
+
+/// The part of [`dispatch`] that needs no session: every action that
+/// only changes the state (selection, scrolling, modes, keys, the
+/// mouse), carried out exactly as the event loop does, pane sizing
+/// included. The actions that talk to the session (cancel, rerun,
+/// watch) are inert here. Public for the snapshot tests, which reach
+/// their screens through the same steps as a reader's keys.
+#[doc(hidden)]
+pub fn apply_action(state: &mut AppState, action: Action, terminal_size: Size) {
+    let (height, width) = size_pane(state, terminal_size);
+    apply_sized(state, action, terminal_size, height, width);
+}
+
+/// [`apply_action`] once the pane is sized to `height` x `width`.
+fn apply_sized(
+    state: &mut AppState,
+    action: Action,
+    terminal_size: Size,
+    height: usize,
+    width: usize,
+) {
+    match action {
+        Action::Quit => {
+            // Quitting on a run in flight abandons it: its summary,
+            // whatever it ends up saying, is not a verdict on the
+            // sources. Outside a run the call is inert (`AppState`
+            // marks nothing when nothing is running), which is what
+            // leaves a finished run's code standing.
+            state.mark_user_cancelled();
+            state.should_quit = true;
+        }
+        // These need the session; `dispatch` carries them out.
+        Action::CancelOrQuit
+        | Action::Rerun { .. }
+        | Action::RunSessionTarget
+        | Action::CancelRun
+        | Action::ToggleWatch => {}
         Action::SelectNext => state.select_next(),
         Action::SelectPrevious => state.select_previous(),
         Action::ScrollUp(rows) => {
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up_rows(rows, width);
+                buffer.scroll_up_rows(rows, width, filter);
             }
         }
         Action::ScrollDown(rows) => {
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down_rows(rows, width);
+                buffer.scroll_down_rows(rows, width, filter);
             }
         }
         Action::ScrollHalfPageUp => {
             let rows = half_pane(height);
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_up_rows(rows, width);
+                buffer.scroll_up_rows(rows, width, filter);
             }
         }
         Action::ScrollHalfPageDown => {
             let rows = half_pane(height);
+            let filter = state.effective_filter();
             if let Some(buffer) = selected_buffer_mut(state) {
-                buffer.scroll_down_rows(rows, width);
+                buffer.scroll_down_rows(rows, width, filter);
             }
         }
         Action::FollowTail => {
@@ -332,6 +386,8 @@ fn dispatch(
                 buffer.follow_tail();
             }
         }
+        Action::CycleStreamFilter => state.cycle_stream_filter(),
+        Action::OpenFocusedOutput => state.open_focused_output(),
         Action::EnterSearch => state.enter_search(),
         Action::SearchNext => state.search_next(),
         Action::SearchPrevious => state.search_previous(),
@@ -357,23 +413,24 @@ fn half_pane(height: usize) -> usize {
 }
 
 /// Copy mode's own hit testing: a click or a drag only means something
-/// once it lands inside the log pane's own content area — the tree
-/// pane, the borders, and the title row are not part of the buffer copy
-/// mode addresses, and neither are the junction and footer rows, which
-/// sit outside the pane entirely. A release (`Up`) is the one exception:
-/// it always finishes whatever selection is already there, wherever the
-/// pointer ended up, since dragging off the bottom of the buffer or
-/// into the tree pane and letting go there are both routine and must
-/// not strand the user mid-selection with nothing copied. Every other
-/// mode leaves a mouse event exactly as inert as before this task;
-/// their own hit testing (e.g. click-to-select in the tree) is a later
-/// task's to add.
+/// once it lands inside the log pane's own content area: the tree
+/// pane, the divider, and the title row are not part of the buffer copy
+/// mode addresses, and neither are the separators and the bands around
+/// the body, which sit outside the pane entirely. A release (`Up`) is
+/// the one exception: it always finishes whatever selection is already
+/// there, wherever the pointer ended up, since dragging off the bottom
+/// of the buffer or into the tree pane and letting go there are both
+/// routine and must not strand the user mid-selection with nothing
+/// copied. Every other mode leaves a mouse event inert: their own hit
+/// testing (click-to-select in the tree, for example) is not handled
+/// yet.
 fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) {
     if matches!(mouse.kind, MouseEventKind::Up(_)) {
         state.finish_copy();
         return;
     }
-    let Some(area) = ui::log_pane_content_area(terminal_size.width, terminal_size.height) else {
+    let Some(area) = ui::log_pane_content_area(state, terminal_size.width, terminal_size.height)
+    else {
         return;
     };
     if mouse.row < area.y
@@ -398,18 +455,34 @@ fn dispatch_mouse(state: &mut AppState, mouse: MouseEvent, terminal_size: Size) 
 /// has printed nothing yet is still a legitimate thing to do. `None`
 /// only when no beam is selected at all (before the first run).
 fn selected_buffer_mut(state: &mut AppState) -> Option<&mut LogBuffer> {
-    let id = state.selected_beam()?.id.clone();
-    Some(state.logs.entry(id).or_default())
+    // Nothing to scroll while the structured diagnostic is what shows.
+    if state.shows_structured_diagnostic() {
+        return None;
+    }
+    // The buffer on screen: the selected beam's, or the diagnostic's
+    // while parked.
+    let key = state.displayed_log_key();
+    if key.is_empty() {
+        return None;
+    }
+    Some(state.logs.entry(key).or_default())
 }
 
 /// What the CLI needs once the screen is gone: the exit code the session
 /// earned, and enough of the log to replay the failures on stderr.
-fn outcome(state: &AppState) -> TuiOutcome {
+pub fn outcome(state: &AppState) -> TuiOutcome {
     let failed_logs = state
         .last_summary
         .iter()
         .flat_map(|summary| &summary.failed)
-        .map(|id| (id.0.clone(), buffered_lines(state, &id.0)))
+        .map(|id| FailedLog {
+            beam: id.0.clone(),
+            lines: buffered_lines(state, &id.0),
+            truncated: state
+                .logs
+                .get(&id.0)
+                .is_some_and(|buffer| buffer.truncated() > 0),
+        })
         .collect();
     TuiOutcome {
         last_run_code: state.exit_outcome(),
@@ -418,6 +491,13 @@ fn outcome(state: &AppState) -> TuiOutcome {
     }
 }
 
+/// The lines the exit replay prints for `beam`: what its processes wrote,
+/// and the error notices that say why it failed (a template that does not
+/// render, an executor that cannot open, a command that cannot spawn).
+/// Those were stderr lines before Alba had notices, and the headless
+/// renderers still print them, so the replay keeps them where they were.
+/// The command echo, the info notices and the end line are the
+/// interface's own decoration and stay behind with it.
 fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
     state
         .logs
@@ -425,6 +505,12 @@ fn buffered_lines(state: &AppState, beam: &str) -> Vec<ReplayLine> {
         .map(|buffer| {
             buffer
                 .lines()
+                .filter(|line| {
+                    matches!(
+                        line.kind,
+                        LineKind::Output(_) | LineKind::Notice(NoticeLevel::Error)
+                    )
+                })
                 .map(|line| ReplayLine {
                     raw: line.raw.clone(),
                     text: line.text.clone(),
@@ -450,6 +536,7 @@ mod tests {
             affected_by: None,
             beams: beams.iter().map(|name| id(name)).collect(),
             edges: Vec::new(),
+            details: Vec::new(),
         }
     }
 
@@ -461,6 +548,15 @@ mod tests {
                 text: text.to_string(),
             },
             replayed: false,
+        }
+    }
+
+    /// An untruncated failed beam's replay material.
+    fn failed_log(beam: &str, lines: Vec<ReplayLine>) -> FailedLog {
+        FailedLog {
+            beam: beam.to_string(),
+            lines,
+            truncated: false,
         }
     }
 
@@ -575,6 +671,57 @@ mod tests {
         );
     }
 
+    /// The replay is for the terminal the TUI just left: what the
+    /// processes wrote, and the error notices that say why a beam failed
+    /// (a template that does not render, a command that cannot spawn),
+    /// which were stderr lines before notices existed. Never Alba's echo,
+    /// its info notices or its end lines.
+    #[test]
+    fn the_replay_after_quitting_holds_process_output_and_error_notices() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started(&["bad"]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("bad") }, now);
+        state.apply(
+            &RunEvent::BeamNotice {
+                id: id("bad"),
+                level: alba_engine::NoticeLevel::Info,
+                text: "no cache".to_string(),
+            },
+            now,
+        );
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("bad"),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        state.apply(&output("bad", "boom"), now);
+        state.apply(
+            &RunEvent::BeamNotice {
+                id: id("bad"),
+                level: alba_engine::NoticeLevel::Error,
+                text: "failed to spawn\nmake: not found".to_string(),
+            },
+            now,
+        );
+        state.apply(&finished("bad", BeamStatus::Failed { exit_code: 2 }), now);
+        state.apply(&summary_event(&["bad"], &[]), now);
+
+        assert_eq!(
+            outcome(&state).failed_logs,
+            vec![failed_log(
+                "bad",
+                vec![
+                    replay_line("boom"),
+                    replay_line("failed to spawn"),
+                    replay_line("make: not found"),
+                ]
+            )]
+        );
+    }
+
     /// The exit replay's raw material: each failed beam of the last
     /// summary, with what it printed.
     #[test]
@@ -596,8 +743,8 @@ mod tests {
         assert_eq!(outcome.last_run_code, Some(1));
         assert_eq!(
             outcome.failed_logs,
-            vec![(
-                "bad".to_string(),
+            vec![failed_log(
+                "bad",
                 vec![replay_line("boom 1"), replay_line("boom 2")]
             )],
             "only the failed beam's lines, and all of them"
@@ -606,6 +753,45 @@ mod tests {
             outcome.last_summary.expect("a run finished").failed,
             vec![id("bad")]
         );
+    }
+
+    /// A failed beam that printed past the buffer's cap is flagged as
+    /// cut, even though Alba's own lines took part of the cap and the
+    /// replayed output alone stays under it.
+    #[test]
+    fn a_failed_beam_past_the_cap_is_flagged_truncated() {
+        let mut state = AppState::new("build", false);
+        let now = Instant::now();
+        state.apply(&run_started(&["chatty", "short"]), now);
+        state.apply(&RunEvent::BeamStarted { id: id("chatty") }, now);
+        state.apply(
+            &RunEvent::CommandStarted {
+                id: id("chatty"),
+                command: "make".to_string(),
+            },
+            now,
+        );
+        for index in 0..logs::MAX_LINES {
+            state.apply(&output("chatty", &format!("line {index}")), now);
+        }
+        state.apply(
+            &finished("chatty", BeamStatus::Failed { exit_code: 1 }),
+            now,
+        );
+        state.apply(&RunEvent::BeamStarted { id: id("short") }, now);
+        state.apply(&output("short", "boom"), now);
+        state.apply(&finished("short", BeamStatus::Failed { exit_code: 1 }), now);
+        state.apply(&summary_event(&["chatty", "short"], &[]), now);
+
+        let outcome = outcome(&state);
+
+        let chatty = &outcome.failed_logs[0];
+        assert_eq!(chatty.beam, "chatty");
+        assert!(chatty.lines.len() < logs::MAX_LINES, "precondition");
+        assert!(chatty.truncated, "the buffer dropped its oldest lines");
+        let short = &outcome.failed_logs[1];
+        assert_eq!(short.beam, "short");
+        assert!(!short.truncated, "nothing was dropped");
     }
 
     /// An event channel holding `events` and already closed, so a drain
@@ -656,7 +842,7 @@ mod tests {
         assert_eq!(outcome.last_run_code, None, "an abandoned run cannot vouch");
         assert_eq!(
             outcome.failed_logs,
-            vec![("bad".to_string(), vec![replay_line("boom")])],
+            vec![failed_log("bad", vec![replay_line("boom")])],
             "the drain still collects the replay's material"
         );
         assert!(outcome.last_summary.is_some());
@@ -734,7 +920,7 @@ mod tests {
 
         let outcome = outcome(&state);
 
-        assert_eq!(outcome.failed_logs, vec![("bad".to_string(), Vec::new())]);
+        assert_eq!(outcome.failed_logs, vec![failed_log("bad", Vec::new())]);
     }
 
     /// `?`: now that help has a renderer too, entering it actually flips
@@ -805,11 +991,11 @@ mod tests {
 
         match &state.mode {
             state::Mode::Copy(copy) => {
-                // 80x24 gives the log pane a content height of 19 rows
+                // 80x24 gives the log pane a content height of 13 rows
                 // (see `ui::log_pane_content_area`); following a 30-line
-                // buffer, the top visible line is 30 - 19 = 11.
-                assert_eq!(copy.anchor, (11, 0));
-                assert_eq!(copy.cursor, (11, 0));
+                // buffer, the top visible line is 30 - 13 = 17.
+                assert_eq!(copy.anchor, (17, 0));
+                assert_eq!(copy.cursor, (17, 0));
             }
             other => panic!("expected Mode::Copy, got {other:?}"),
         }
@@ -830,14 +1016,16 @@ mod tests {
         }
         dispatch(&mut state, &commands, Action::EnterCopy, size());
 
-        // The log pane's content area starts at (32, 2) for an 80x24
-        // terminal (see `ui::log_pane_content_area`); its 5 lines all
-        // fit inside the 19-row content height and follow the tail, so
-        // row 0 of the pane is buffer line 0 ("line 0").
+        // The log pane's content area starts at (24, 8) for an 80x24
+        // terminal (a single short beam name leaves the beams pane at
+        // its 20-cell floor; the gutter, title, definition and blank
+        // rows come before the text) (see `ui::log_pane_content_area`);
+        // its 5 lines all fit inside the 13-row content height and
+        // follow the tail, so row 0 of the pane is buffer line 0.
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 34,
-            row: 2,
+            column: 26,
+            row: 8,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         dispatch(&mut state, &commands, Action::Mouse(down), size());
@@ -848,8 +1036,8 @@ mod tests {
 
         let drag = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            column: 34,
-            row: 4,
+            column: 26,
+            row: 10,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         dispatch(&mut state, &commands, Action::Mouse(drag), size());
@@ -906,8 +1094,8 @@ mod tests {
         // Drag once inside the pane so the selection covers something.
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: 34,
-            row: 2,
+            column: 26,
+            row: 8,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         dispatch(&mut state, &commands, Action::Mouse(down), size());
@@ -1082,7 +1270,7 @@ mod tests {
 
     /// The log pane's keyboard scrolling, end to end through `dispatch`:
     /// half the pane's own content height per press, and back down to
-    /// following. At 80x24 the pane shows 19 rows, so half is 9.
+    /// following. At 80x24 the pane shows 13 rows, so half is 6.
     #[test]
     fn the_page_keys_scroll_the_selected_beams_buffer_by_half_a_pane() {
         let (commands, _receiver) = commands();
@@ -1097,21 +1285,21 @@ mod tests {
         assert!(
             matches!(
                 state.logs["build"].scroll(),
-                logs::Scroll::Paused { offset: 9 }
+                logs::Scroll::Paused { offset: 6 }
             ),
-            "half of the pane's 19 content rows"
+            "half of the pane's 13 content rows"
         );
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageUp, size());
         assert!(matches!(
             state.logs["build"].scroll(),
-            logs::Scroll::Paused { offset: 18 }
+            logs::Scroll::Paused { offset: 12 }
         ));
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageDown, size());
         assert!(matches!(
             state.logs["build"].scroll(),
-            logs::Scroll::Paused { offset: 9 }
+            logs::Scroll::Paused { offset: 6 }
         ));
 
         dispatch(&mut state, &commands, Action::ScrollHalfPageDown, size());
@@ -1123,13 +1311,13 @@ mod tests {
 
     /// `half_pane` is exercised end to end above at the 80x24 default; this
     /// pins its floor directly, at the two sizes that actually reach it: a
-    /// terminal just past the minimum, whose 7 content rows halve to 3, and
+    /// terminal just past the minimum, whose 3 content rows halve to 1, and
     /// one below the minimum, whose content area is empty (no pane at all)
     /// but never falls to zero, which would make the key a no-op.
     #[test]
     fn the_page_distance_is_half_the_panes_own_height() {
-        assert_eq!(half_pane(19), 9, "19 content rows at 80x24");
-        assert_eq!(half_pane(7), 3, "7 content rows at the floor");
+        assert_eq!(half_pane(13), 6, "13 content rows at 80x24");
+        assert_eq!(half_pane(3), 1, "3 content rows at the floor");
         assert_eq!(
             half_pane(0),
             1,
@@ -1155,6 +1343,7 @@ mod tests {
                 affected_by: None,
                 beams: vec![id("codegen")],
                 edges: Vec::new(),
+                details: Vec::new(),
             },
             Instant::now(),
         );
@@ -1230,6 +1419,65 @@ mod tests {
         assert!(matches!(
             state.logs["codegen"].scroll(),
             logs::Scroll::Following
+        ));
+    }
+
+    /// While the structured diagnostic is what the pane shows, the
+    /// scroll keys have nothing to scroll: they must not pause a buffer
+    /// that is not drawn.
+    #[test]
+    fn scrolling_is_ignored_while_the_structured_diagnostic_shows() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["codegen"]);
+        let now = Instant::now();
+        for index in 0..5 {
+            state.apply(&output("codegen", &format!("line {index}")), now);
+        }
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: "error: x\n".to_string(),
+                report: Some(alba_core::DiagnosticReport {
+                    message: "x".to_string(),
+                    path: "Beamfile".to_string(),
+                    line: 1,
+                    column: 1,
+                    snippet: Vec::new(),
+                    caret: 0..1,
+                    help: None,
+                }),
+            },
+            now,
+        );
+        dispatch(&mut state, &commands, Action::ScrollUp(2), size());
+        assert!(matches!(
+            state.logs["codegen"].scroll(),
+            logs::Scroll::Following
+        ));
+    }
+
+    /// In the parked plain view (a search is kept), the scroll keys act
+    /// on the diagnostic's own buffer, not on the selected beam's.
+    #[test]
+    fn scrolling_in_the_parked_plain_view_pauses_the_diagnostic() {
+        let (commands, _receiver) = commands();
+        let mut state = running(&["codegen"]);
+        let now = Instant::now();
+        let long: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        state.apply(
+            &RunEvent::ProjectBroken {
+                diagnostic: long,
+                report: None,
+            },
+            now,
+        );
+        dispatch(&mut state, &commands, Action::ScrollUp(2), size());
+        assert!(matches!(
+            state.logs[state::DIAGNOSTIC_LOG].scroll(),
+            logs::Scroll::Paused { .. }
+        ));
+        assert!(matches!(
+            state.logs.get("codegen").map(|b| b.scroll()),
+            None | Some(logs::Scroll::Following)
         ));
     }
 }

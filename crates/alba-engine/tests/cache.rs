@@ -12,9 +12,13 @@ use std::time::Duration;
 
 use alba_core::{BeamId, ExecutorKind, load_str};
 use alba_engine::{
-    BeamStatus, CacheOptions, Executors, RunEvent, RunOptions, RunSummary, Targets, run,
+    BeamStatus, CacheOptions, Executors, NoticeLevel, RunEvent, RunOptions, RunSummary, Targets,
+    run,
 };
-use alba_executors::{FakeBehavior, FakeExecutor};
+use alba_executors::{
+    BeamContext, CommandSpec, ExecContext, ExecError, ExecResult, ExecSession, Executor,
+    FakeBehavior, FakeExecutor, OutputLine, Stream,
+};
 use tokio_util::sync::CancellationToken;
 
 struct Outcome {
@@ -32,17 +36,13 @@ impl Outcome {
             .collect()
     }
 
-    /// Every stderr line this run emitted, live or replayed — where the
-    /// cache tells the user why a beam is running uncached.
-    fn stderr(&self) -> Vec<String> {
+    /// Every notice this run emitted: where the cache tells the user why
+    /// a beam is running uncached.
+    fn notices(&self) -> Vec<String> {
         self.events
             .iter()
             .filter_map(|event| match event {
-                RunEvent::BeamOutput { line, .. }
-                    if line.stream == alba_executors::Stream::Stderr =>
-                {
-                    Some(line.text.clone())
-                }
+                RunEvent::BeamNotice { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -60,6 +60,7 @@ fn options(dir: &Path, force: bool) -> RunOptions {
         }),
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     }
 }
 
@@ -341,6 +342,7 @@ async fn no_cache_configuration_disables_caching() {
         cache: None,
         extra_env: Vec::new(),
         ambient_env: Vec::new(),
+        definitions: Default::default(),
     };
 
     run_once(GEN, "gen", dir.path(), disabled(), FakeExecutor::new()).await;
@@ -1227,11 +1229,40 @@ beam gen {
     assert_eq!(second.executed().len(), 1);
     assert!(
         second
-            .stderr()
+            .notices()
             .iter()
             .any(|line| line.starts_with("cache:") && line.contains("running without cache")),
         "a beam whose inputs matched nothing must say so, got {:?}",
-        second.stderr()
+        second.notices()
+    );
+}
+
+/// The cache bypass is information, not a failure: the beam still runs.
+#[tokio::test]
+async fn the_cache_bypass_notice_is_an_info_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    const MISSPELLED: &str = r#"
+beam gen {
+  inputs ["scr/**/*.rs"]
+  run "generate"
+}
+"#;
+
+    let outcome = run_once(
+        MISSPELLED,
+        "gen",
+        dir.path(),
+        options(dir.path(), false),
+        FakeExecutor::new(),
+    )
+    .await;
+
+    let expected = "cache: `inputs` matched no file; running without cache";
+    assert!(
+        outcome.events.iter().any(|event| matches!(event,
+            RunEvent::BeamNotice { level: NoticeLevel::Info, text, .. } if text == expected)),
+        "{:?}",
+        outcome.events
     );
 }
 
@@ -1325,11 +1356,11 @@ async fn an_unreadable_input_runs_the_beam_uncached_with_a_notice() {
     assert_eq!(ids(&first.summary.succeeded), vec!["gen"]);
     assert!(
         first
-            .stderr()
+            .notices()
             .iter()
             .any(|line| line.starts_with("cache: cannot hash input `data.txt`")),
         "an unhashable input must say so, got {:?}",
-        first.stderr()
+        first.notices()
     );
     assert_eq!(
         second.executed().len(),
@@ -1419,11 +1450,11 @@ async fn an_unreadable_executor_identity_runs_the_beam_uncached() {
     assert_eq!(blind.executed(), vec!["generate"]);
     assert!(
         blind
-            .stderr()
+            .notices()
             .iter()
             .any(|line| line.contains("cache:") && line.contains("daemon unreachable")),
         "{:?}",
-        blind.stderr()
+        blind.notices()
     );
 }
 
@@ -1636,4 +1667,95 @@ async fn an_entry_stored_before_a_secret_was_declared_replays_masked() {
 
     assert!(replayed.executed().is_empty(), "still a hit");
     assert_eq!(output_texts(&replayed), vec!["token ***"]);
+}
+
+/// Prints a line, succeeds, and then fails to close its session.
+struct ClosesBadlyExecutor;
+
+#[async_trait::async_trait]
+impl Executor for ClosesBadlyExecutor {
+    async fn open(&self, _beam: BeamContext) -> Result<Box<dyn ExecSession>, ExecError> {
+        Ok(Box::new(ClosesBadlySession))
+    }
+}
+
+struct ClosesBadlySession;
+
+#[async_trait::async_trait]
+impl ExecSession for ClosesBadlySession {
+    async fn execute(
+        &mut self,
+        _cmd: CommandSpec,
+        ctx: ExecContext,
+    ) -> Result<ExecResult, ExecError> {
+        let _ = ctx.output.send(OutputLine {
+            stream: Stream::Stdout,
+            text: "built".to_string(),
+        });
+        Ok(ExecResult { exit_code: 0 })
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), ExecError> {
+        Err(ExecError {
+            message: "daemon went away".to_string(),
+        })
+    }
+
+    async fn kill(self: Box<Self>) {}
+}
+
+async fn run_closing_badly(dir: &Path) -> Vec<RunEvent> {
+    let mut project = load_str(GEN).expect("the test Beamfile must load");
+    for beam in &mut project.beams {
+        beam.dir = dir.to_path_buf();
+    }
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    run(
+        &project,
+        &Targets::beam(BeamId("gen".to_string())),
+        options(dir, false),
+        Executors::uniform(Arc::new(ClosesBadlyExecutor)),
+        events_tx,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("the run must not fail");
+    let mut events = Vec::new();
+    while let Ok(event) = events_rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// A close failure is Alba's own message about the run, not output of the
+/// beam: it is reported live, and what the cache stores for replay leaves
+/// it out.
+#[tokio::test]
+async fn a_session_close_error_is_not_stored_in_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data.txt", "v1");
+
+    let first = run_closing_badly(dir.path()).await;
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event, RunEvent::BeamNotice {
+            level: NoticeLevel::Error, text, ..
+        } if text.starts_with("session close:"))),
+        "the close failure must be reported live: {first:?}"
+    );
+
+    let second = run_closing_badly(dir.path()).await;
+    let replayed: Vec<&str> = second
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::BeamOutput {
+                line,
+                replayed: true,
+                ..
+            } => Some(line.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replayed, ["built"], "only the beam's output is replayed");
 }

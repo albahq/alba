@@ -500,6 +500,28 @@ mod layout {
         );
     }
 
+    /// A beam's own failure message is an Alba notice, printed with the
+    /// beam's prefix exactly like the stderr line it replaced.
+    #[test]
+    fn interleaved_prints_a_notice_with_its_beam_prefix() {
+        let dir = project("beam broken { run \"echo {env('ALBA_MISSING_VAR_XYZ')}\" }\n");
+
+        let assert = alba()
+            .current_dir(&dir)
+            .args(["run", "broken", "--output", "interleaved"])
+            .assert()
+            .code(1);
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("broken \u{2502} ")
+                    && line.contains("ALBA_MISSING_VAR_XYZ")),
+            "missing the prefixed notice in:\n{stdout}"
+        );
+    }
+
     /// `── beam-id (1.2s, ok) ──`, with the beam's lines underneath it.
     #[test]
     fn grouped_frames_each_beam_with_a_header() {
