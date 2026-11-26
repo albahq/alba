@@ -32,13 +32,24 @@ use super::beams::{self, fit_name, glyph_for, selection_style};
 use super::theme::{ColourMode, Token, status_token, style};
 use super::title;
 
-/// The title row and the blank row under it.
-const ROWS_ABOVE_DAG: u16 = 2;
+/// The title row and the blank row under it; where the output pane
+/// would have its definition row, one more, so the DAG starts level
+/// with the output's first line.
+fn rows_above_dag(pane_height: u16) -> u16 {
+    if super::output::has_definition_row(pane_height) {
+        3
+    } else {
+        2
+    }
+}
 
-/// The rows `COMMANDS` needs under the DAG (a blank row, its header and
-/// at least three lines); with fewer it is dropped before the DAG ever
-/// scrolls.
-const COMMANDS_MIN_ROWS: usize = 5;
+/// The blank rows between the DAG and `COMMANDS`.
+const ROWS_ABOVE_COMMANDS: usize = 2;
+
+/// The rows `COMMANDS` needs under the DAG, five in all: its blank
+/// rows, its header and at least two lines. With fewer it is dropped
+/// before the DAG ever scrolls.
+const COMMANDS_MIN_ROWS: usize = ROWS_ABOVE_COMMANDS + 3;
 
 /// Draws the graph into `pane`, the right pane: the title row, the DAG,
 /// then `COMMANDS` for the focused beam when there is room for it. Like
@@ -57,7 +68,8 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
         return;
     }
 
-    let room = area.height.saturating_sub(ROWS_ABOVE_DAG) as usize;
+    let above = rows_above_dag(area.height);
+    let room = area.height.saturating_sub(above) as usize;
     let dag_rows = node_row(layers.len() - 1) + 1;
     let focused_row = layer_of(&layers, graph_state.focused).map_or(0, node_row);
     let visible = if dag_rows <= room {
@@ -67,7 +79,7 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
     };
     let dag = Rect::new(
         area.x,
-        area.y + ROWS_ABOVE_DAG.min(area.height),
+        area.y + above.min(area.height),
         area.width,
         room as u16,
     );
@@ -88,7 +100,7 @@ pub fn draw(frame: &mut Frame, pane: Rect, state: &AppState, graph_state: &Graph
     }
 
     if dag_rows + COMMANDS_MIN_ROWS <= room {
-        let below = dag_rows as u16 + 1; // a blank row under the DAG
+        let below = (dag_rows + ROWS_ABOVE_COMMANDS) as u16;
         let section = Rect::new(dag.x, dag.y + below, dag.width, dag.height - below);
         draw_commands(frame, section, state, graph_state.focused);
     }
@@ -569,20 +581,20 @@ mod tests {
                 .find(|&x| buffer[(x, y)].symbol() == glyph)
                 .unwrap_or_else(|| panic!("no {glyph:?} on row {y}: {:?}", row(&buffer, y)))
         };
-        // Rows: title, blank, codegen, three connector rows, build and
-        // lint, three connector rows, test.
-        let build = at(8, "└");
-        let lint = at(8, "┘");
-        let join = at(8, "┬");
-        assert_eq!(buffer[(build, 7)].fg, ACCENT, "out of build");
-        assert_eq!(buffer[(build, 8)].fg, ACCENT, "build's corner");
-        assert_eq!(buffer[(build + 1, 8)].fg, ACCENT, "build to test");
-        assert_eq!(buffer[(join, 8)].fg, ACCENT, "the shared join");
-        assert_eq!(buffer[(join, 9)].fg, ACCENT, "into test");
-        assert_eq!(buffer[(lint, 7)].fg, LINE, "out of lint");
-        assert_eq!(buffer[(lint, 8)].fg, LINE, "lint's corner");
-        assert_eq!(buffer[(lint - 1, 8)].fg, LINE, "lint to test");
-        for y in 3..6 {
+        // Rows: title, two blanks, codegen, three connector rows, build
+        // and lint, three connector rows, test.
+        let build = at(9, "└");
+        let lint = at(9, "┘");
+        let join = at(9, "┬");
+        assert_eq!(buffer[(build, 8)].fg, ACCENT, "out of build");
+        assert_eq!(buffer[(build, 9)].fg, ACCENT, "build's corner");
+        assert_eq!(buffer[(build + 1, 9)].fg, ACCENT, "build to test");
+        assert_eq!(buffer[(join, 9)].fg, ACCENT, "the shared join");
+        assert_eq!(buffer[(join, 10)].fg, ACCENT, "into test");
+        assert_eq!(buffer[(lint, 8)].fg, LINE, "out of lint");
+        assert_eq!(buffer[(lint, 9)].fg, LINE, "lint's corner");
+        assert_eq!(buffer[(lint - 1, 9)].fg, LINE, "lint to test");
+        for y in 4..7 {
             for x in 0..80 {
                 if buffer[(x, y)].symbol() != " " {
                     assert_eq!(buffer[(x, y)].fg, LINE, "codegen's edges, ({x}, {y})");
@@ -590,14 +602,14 @@ mod tests {
             }
         }
         let start = (0..80)
-            .find(|&x| buffer[(x, 6)].symbol() == "b")
+            .find(|&x| buffer[(x, 7)].symbol() == "b")
             .expect("the build node");
-        assert_eq!(buffer[(start, 6)].bg, ACCENT, "the focused node");
-        assert_eq!(buffer[(start, 6)].fg, Color::Rgb(0x24, 0x22, 0x1E));
+        assert_eq!(buffer[(start, 7)].bg, ACCENT, "the focused node");
+        assert_eq!(buffer[(start, 7)].fg, Color::Rgb(0x24, 0x22, 0x1E));
         assert!(
-            row(&buffer, 6).contains("[ ○ build ]"),
+            row(&buffer, 7).contains("[ ○ build ]"),
             "{:?}",
-            row(&buffer, 6)
+            row(&buffer, 7)
         );
     }
 
@@ -606,9 +618,9 @@ mod tests {
     fn the_focused_path_is_bold_in_monochrome() {
         let state = diamond(Vec::new()).with_colour(ColourMode::Monochrome);
         let buffer = buffer_at(&state, 1, 80, 24);
-        let at = |glyph: &str| (0..80).find(|&x| buffer[(x, 8)].symbol() == glyph).unwrap();
-        assert!(buffer[(at("└"), 8)].modifier.contains(Modifier::BOLD));
-        assert!(!buffer[(at("┘"), 8)].modifier.contains(Modifier::BOLD));
+        let at = |glyph: &str| (0..80).find(|&x| buffer[(x, 9)].symbol() == glyph).unwrap();
+        assert!(buffer[(at("└"), 9)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(at("┘"), 9)].modifier.contains(Modifier::BOLD));
     }
 
     /// The title names the target and counts the beams and layers.
@@ -667,8 +679,8 @@ mod tests {
         assert!(!header.contains("NEEDED BY"), "{header:?}");
     }
 
-    /// A four-layer chain takes thirteen rows, fifteen with the title and
-    /// the blank under it; `COMMANDS` needs five more. At 16 rows the DAG
+    /// A four-layer chain takes thirteen rows, sixteen with the title and
+    /// the blanks under it; `COMMANDS` needs five more. At 16 rows the DAG
     /// still fits whole and `COMMANDS` goes; at 6 rows the DAG scrolls
     /// to keep the focused node, at the bottom, on screen.
     #[test]
@@ -682,10 +694,10 @@ mod tests {
             vec![details("beam3", &["make"])],
         );
 
-        let roomy = rows(&buffer_at(&state, 3, 60, 20)).join("\n");
+        let roomy = rows(&buffer_at(&state, 3, 60, 21)).join("\n");
         assert!(roomy.contains("COMMANDS / beam3"), "{roomy}");
 
-        let tight = rows(&buffer_at(&state, 3, 60, 19)).join("\n");
+        let tight = rows(&buffer_at(&state, 3, 60, 20)).join("\n");
         assert!(!tight.contains("COMMANDS"), "one row short: {tight}");
 
         let short = rows(&buffer_at(&state, 3, 60, 16)).join("\n");
@@ -918,13 +930,13 @@ mod tests {
         );
         let buffer = buffer_at(&state, 0, 41, 24);
         let bar = format!("{}│{}", " ".repeat(10), " ".repeat(10));
-        assert_eq!(cells(&buffer, 3, 11, 31), bar, "under lib");
+        assert_eq!(cells(&buffer, 4, 11, 31), bar, "under lib");
         assert_eq!(
-            cells(&buffer, 4, 11, 31),
+            cells(&buffer, 5, 11, 31),
             format!("┌{}┴{}┐", "─".repeat(9), "─".repeat(9))
         );
         assert_eq!(
-            cells(&buffer, 5, 11, 31),
+            cells(&buffer, 6, 11, 31),
             format!("│{}│", " ".repeat(19)),
             "into app and cli"
         );
@@ -943,10 +955,10 @@ mod tests {
         );
         let buffer = buffer_at(&state, 0, 61, 24);
         assert_eq!(
-            cells(&buffer, 4, 11, 51),
+            cells(&buffer, 5, 11, 51),
             format!("└{}┼{}┘", "─".repeat(19), "─".repeat(19))
         );
-        assert_eq!(cells(&buffer, 5, 31, 31), "│");
+        assert_eq!(cells(&buffer, 6, 31, 31), "│");
     }
 
     /// `c` needs `a` (two layers up) and `b`; `b` needs `x`. The edge
@@ -964,36 +976,61 @@ mod tests {
         // 41 cells: `a` and `x` on columns 11 and 31, `b` and `c` on 21.
         // Focused on `a`: only its edge to `c` is the path.
         let buffer = buffer_at(&state, 0, 41, 24);
-        for y in 3..6 {
+        for y in 4..7 {
             assert_eq!(cells(&buffer, y, 11, 11), "│", "a's drop, row {y}");
         }
         assert_eq!(
-            cells(&buffer, 4, 21, 31),
+            cells(&buffer, 5, 21, 31),
             format!("┌{}┘", "─".repeat(9)),
             "x to b"
         );
-        assert_eq!(cells(&buffer, 7, 11, 11), "│", "a passes b's band");
+        assert_eq!(cells(&buffer, 8, 11, 11), "│", "a passes b's band");
         assert_eq!(
-            cells(&buffer, 8, 11, 21),
+            cells(&buffer, 9, 11, 21),
             format!("└{}┤", "─".repeat(9)),
             "a joins b's drop into c"
         );
-        assert_eq!(cells(&buffer, 9, 21, 21), "│", "into c");
+        assert_eq!(cells(&buffer, 10, 21, 21), "│", "into c");
 
         for (x, y) in [
-            (11, 3),
             (11, 4),
             (11, 5),
-            (11, 7),
+            (11, 6),
             (11, 8),
-            (16, 8),
-            (21, 8),
+            (11, 9),
+            (16, 9),
             (21, 9),
+            (21, 10),
         ] {
             assert_eq!(buffer[(x, y)].fg, ACCENT, "a to c at ({x}, {y})");
         }
-        for (x, y) in [(31, 3), (31, 4), (26, 4), (21, 4), (21, 5), (21, 7)] {
+        for (x, y) in [(31, 4), (31, 5), (26, 5), (21, 5), (21, 6), (21, 8)] {
             assert_eq!(buffer[(x, y)].fg, LINE, "x to b and b to c at ({x}, {y})");
         }
+    }
+
+    /// Where the output pane would have its definition row, the DAG
+    /// starts level with the output's first line, two rows under the
+    /// title, and `COMMANDS` sits two blank rows under the DAG; a
+    /// shorter pane gives one of the rows above the DAG back.
+    #[test]
+    fn the_dag_starts_with_the_output_and_commands_sits_two_rows_below() {
+        let state = run(
+            &["codegen", "build"],
+            &[("build", "codegen")],
+            &["build"],
+            vec![details("build", &["make"])],
+        );
+        let line_of = |rows: &[String], needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} in {rows:#?}"))
+        };
+        let roomy = rows(&buffer_at(&state, 1, 60, 20));
+        assert_eq!(line_of(&roomy, "[ ○ codegen ]"), 3);
+        assert_eq!(line_of(&roomy, "[ ○ build ]"), 7);
+        assert_eq!(line_of(&roomy, "COMMANDS / build"), 10);
+        let short = rows(&buffer_at(&state, 1, 60, 7));
+        assert_eq!(line_of(&short, "[ ○ codegen ]"), 2);
     }
 }
